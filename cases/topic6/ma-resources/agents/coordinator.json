@@ -1,0 +1,43 @@
+{
+  "name": "topic6-coordinator",
+  "description": "topic6 社媒热点周刊主协调器。承载 Producer 主线 14 步时序 + 子 Agent 委派。",
+  "model": {
+    "id": "doubao-seed-2-1-pro-260628"
+  },
+  "system_file": "coordinator.system.md",
+  "skills": [
+    {"type": "custom", "skill_id": "${skill_id.topic6-fetch-normalize}", "version": "${version.topic6-fetch-normalize}"},
+    {"type": "custom", "skill_id": "${skill_id.topic6-annotation}", "version": "${version.topic6-annotation}"},
+    {"type": "custom", "skill_id": "${skill_id.topic6-insight}", "version": "${version.topic6-insight}"},
+    {"type": "custom", "skill_id": "${skill_id.topic6-event-registry}", "version": "${version.topic6-event-registry}"},
+    {"type": "custom", "skill_id": "${skill_id.topic6-web-report}", "version": "${version.topic6-web-report}"},
+    {"type": "custom", "skill_id": "${skill_id.miaoda-web-publish}", "version": "${version.miaoda-web-publish}"}
+  ],
+  "tools": [
+    {"type": "agent_toolset_20260701"},
+    {
+      "type": "mcp_toolset",
+      "mcp_server_name": "hot-topics",
+      "default_config": {
+        "permission_policy": {
+          "type": "always_allow"
+        }
+      }
+    }
+  ],
+  "mcp_servers": [
+    {
+      "type": "url",
+      "name": "hot-topics",
+      "url": "${HOT_TOPICS_MCP_URL}"
+    }
+  ],
+  "multiagent": {
+    "type": "coordinator",
+    "agents": [
+      {"type": "agent", "id": "${agent_id.topic6-annotator}"},
+      {"type": "agent", "id": "${agent_id.topic6-insighter}"},
+      {"type": "self"}
+    ]
+  }
+}

@@ -1,0 +1,957 @@
+"""topic6 长任务运行器:飞书触发 → 方舟 MA Session → 事件桥接。
+
+职责:
+
+  - ``start_job``:接飞书触发词(热点报告/热点周报),创建 MA Session(挂 topic6-coordinator),
+    落 ``pipeline_jobs``,启动异步 SSE 消费任务。
+  - ``resume_job``:HITL 卡片回调后,把 HC 决策以 ``user.message`` 注入原 MA Session,
+    再启一个 SSE 消费任务把 pipeline 从 wait_hc 拉回 running。
+  - SSE 消费:``agent.tool_use`` / ``agent.message.delta`` 汇成一句进度文本发飞书;
+    ``session.status_idle`` 时检查末尾消息是否是 HC 结构化 JSON,是则把主卡切到 HITL,
+    否则视为流程终态(成功/失败)落库并推最终链接。
+
+不重写 SSE / SSE 解析,直接复用 :mod:`arkagent.ark` 里的 ``_open_event_stream`` 与
+事件抽取工具。飞书发消息全部走 ``FeishuSender.send_to_chat``(同步),外面用
+``run_in_executor`` 转异步。
+
+同一 Session 同时只允许一个 SSE 消费任务:任务 ID 存在 ``_active_streams``,
+resume 前先 cancel 前一个,避免重复订阅导致 429/事件重复。
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import re
+import time
+from collections import deque
+from dataclasses import dataclass, field
+from pathlib import PurePosixPath
+from typing import Optional
+from urllib.parse import urlsplit
+
+from arkagent.ark import ArkClient, event_error, event_progress, event_requires_action, event_text
+from arkagent.feishu import FeishuSender
+from pipeline_store import (
+    HC_KINDS,
+    STATUS_DONE,
+    STATUS_FAILED,
+    STATUS_RUNNING,
+    STATUS_STOPPED,
+    STATUS_WAIT_HC,
+    PipelineJob,
+    PipelineStore,
+)
+from topic6_progress_card import MAX_TOOL_LINES, build_progress_card
+
+log = logging.getLogger("arkagent.topic6.runner")
+
+# 触发词:精确匹配 prompt/00_角色与触发.md;命中即启动 topic6 pipeline。
+TRIGGER_KEYWORDS = ("热点报告", "热点周报")
+
+# 模式关键词(用户消息里带就用,不带默认 full)。
+MODE_DEMO_KEYWORDS = ("demo", "演示")
+# 旧 test 触发词保留为 full 的兼容别名，但不再作为内部 mode 值。
+MODE_FULL_KEYWORDS = ("full", "完整", "正式", "test", "小样本", "试跑")
+
+# ---- idle 自动续跑 ----
+# Agent 在 pipeline 中途偶发 end_turn 后，Runner 通过 MA send_message 注入催促
+# 消息唤醒 idle session。最多重试 MAX_IDLE_NUDGES 次，超限才判终态。
+MAX_IDLE_NUDGES = 2
+# HC 卡点的 idle 是正常业务行为（等人审），不做自动催促。
+_HC_PHASE_PREFIXES = tuple(HC_KINDS)
+MODE_SKIP_SAMPLING_KEYWORDS = (
+    "skip_sampling",
+    "skip-sampling",
+    "跳过采样",
+    "跳过抽样",
+)
+
+# 进度卡片 patch 节流:同一卡片至少间隔多少秒才发一次 patch,避免飞书频控。
+PROGRESS_MIN_INTERVAL_SEC = 4.0
+
+# Topic6 业务项目只能落在该目录的直属子目录。Coordinator 负责按周期契约生成子目录名。
+PROJECTS_ROOT = PurePosixPath("/workspace/Projects")
+
+
+def normalize_user_text(text: str, mentioned_bot: bool = False) -> str:
+    """群聊入站先去掉开头的 @机器人，避免机器人名称参与命令/触发词判断。"""
+    normalized = text.strip()
+    if mentioned_bot:
+        normalized = re.sub(r"^(?:@\S+\s*)+", "", normalized).strip()
+    return normalized
+
+
+def parse_trigger(text: str) -> Optional[str]:
+    """返回 mode(demo|full|skip_sampling),不是触发消息返回 None。"""
+    if not text:
+        return None
+    lower = text.strip().lower()
+    if not any(kw in text for kw in TRIGGER_KEYWORDS):
+        return None
+    if any(kw in lower for kw in MODE_SKIP_SAMPLING_KEYWORDS):
+        return "skip_sampling"
+    if any(kw in lower for kw in MODE_DEMO_KEYWORDS):
+        return "demo"
+    if any(kw in lower for kw in MODE_FULL_KEYWORDS):
+        return "full"
+    return "full"
+
+
+# ---- 事件解析 --------------------------------------------------------------
+
+
+# 兜底"文本意图检测"用:如果 Agent 违约(说要输出 HC JSON 但没真输出),
+# 只要正文出现 HC 关键词 + 明确的"等确认"意图,就伪造一个占位 payload,
+# 免得 pipeline 被吞掉。关键词覆盖 coordinator.system.md 里禁止的元描述表达。
+_HC_INTENT_KEYWORDS = (
+    "等用户",
+    "等你审",
+    "请审核",
+    "请点击卡片",
+    "等待用户",
+    "等待确认",
+    "点击卡片确认",
+    "确认后继续",
+    "现在输出",
+    "接下来输出",
+    "输出结构化 JSON",
+    "输出 HC",
+)
+
+
+def extract_hc_payload(text: str) -> Optional[dict]:
+    """从 agent.message 正文里抠出 HC 结构化 JSON;抠不到返回 None。
+
+    coordinator.system.md 已强制约定 HC1/HC2/HC3 在 end_turn 前必须落一个如下 JSON:
+
+        {"hc": "HC1", "mode": "full", "project_dir": "...", ...}
+
+    正文中允许穿插其它文本,但 JSON 块本身必须完整可解析。逐个尝试正文中的 ``{``
+    起点并交给 ``JSONDecoder.raw_decode``，从而正确处理嵌套对象；找不到合法 HC
+    对象时返回 None,由上层视为普通完成事件。
+    """
+    if not text:
+        return None
+    decoder = json.JSONDecoder()
+    payload: Optional[dict] = None
+    for start in (match.start() for match in re.finditer(r"\{", text)):
+        try:
+            value, _ = decoder.raw_decode(text[start:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict) and value.get("hc") in HC_KINDS:
+            payload = value
+            break
+    return payload
+
+
+def normalize_project_dir(value: object) -> Optional[str]:
+    """校验 Topic6 项目绝对路径，只允许 ``/workspace/Projects`` 的直属子目录。"""
+    raw = str(value or "").strip().strip("`")
+    if not raw:
+        return None
+    candidate = PurePosixPath(raw)
+    if candidate.parent != PROJECTS_ROOT or candidate.name in {"", ".", ".."}:
+        return None
+    return str(candidate)
+
+
+def extract_project_dir(text: str) -> Optional[str]:
+    """解析 Coordinator 的 ``[project_dir]`` 状态标记。"""
+    if not text:
+        return None
+    match = re.search(r"(?m)^\[project_dir\]\s+([^\r\n]+?)\s*$", text)
+    return normalize_project_dir(match.group(1)) if match else None
+
+
+def detect_hc_intent(text: str) -> Optional[str]:
+    """兜底:Agent 违约时,从文本里嗅出它**想**触发的 HC 类型。
+
+    coordinator.system.md 严禁"现在输出 HC1..." 之类的元描述——但方舟 doubao 模型
+    在长上下文/多工具后偶发违约,只在文本里"讲"要输出 JSON、却没真输出。gateway
+    如果只认严格 JSON,就会把这一轮当普通 idle 收工,导致 HITL 卡片不发、用户
+    看不到审批入口、pipeline 静默停滞在 A phase(见 job_1f05e24cccdc 场景)。
+
+    检测规则:文本同时包含 HC1/HC2/HC3 之一 **和** 至少一个意图关键词(等用户 /
+    等你审 / 请审核 / 点击卡片 等),就认为 Agent 在**表达**要触发 HC 但未落 JSON,
+    返回它想触发的 HC 类型;调用方用一个空 payload 兜住,照走 mark_wait_hc + 发卡片。
+    没匹配到返回 None,保留原有"当普通完成"路径。
+    """
+    if not text:
+        return None
+    hc_kind: Optional[str] = None
+    for kind in HC_KINDS:
+        if kind in text:
+            hc_kind = kind
+            break
+    if hc_kind is None:
+        return None
+    if not any(kw in text for kw in _HC_INTENT_KEYWORDS):
+        return None
+    return hc_kind
+
+
+def build_hc_fallback_payload(
+    job: PipelineJob, hc_kind: str, collected_messages: list[str]
+) -> dict:
+    """从 Agent 已输出的核验摘要恢复 HC1/HC2 卡片字段。
+
+    这里只恢复文本中有明确证据的指标；不猜测缺失值。路径按既定产物契约生成，
+    并保留 ``__fallback__``，让卡片明确提示结构化载荷来自 Gateway 兜底。
+    """
+    transcript = "\n".join(collected_messages[-12:])
+    project_name = (
+        PurePosixPath(job.project_dir.rstrip("/")).name if job.project_dir else ""
+    )
+    payload: dict = {
+        "hc": hc_kind,
+        "mode": job.mode,
+        "project_dir": job.project_dir,
+        "__fallback__": True,
+        "agent_message_tail": (collected_messages[-1] if collected_messages else "")[-400:],
+    }
+    if hc_kind not in {"HC1", "HC2"}:
+        return payload
+
+    if project_name:
+        artifact_mode = job.mode if hc_kind == "HC1" else "skip_sampling"
+        payload["wide_table_path"] = (
+            f"/mnt/session/outputs/{project_name}/05_合并/"
+            f"wide_table_{artifact_mode}_r1.xlsx"
+        )
+
+    summary: dict = {}
+    shape_match = re.search(r"(\d[\d,]*)\s*行\s*[×xX*]\s*(\d+)\s*列", transcript)
+    if shape_match:
+        summary["rows"] = int(shape_match.group(1).replace(",", ""))
+        summary["cols"] = int(shape_match.group(2))
+
+    c0_match = re.search(
+        r"C0.{0,24}?有效率\s*(?:为|=|:|：)?\s*(\d+(?:\.\d+)?)\s*%",
+        transcript,
+        re.IGNORECASE,
+    )
+    if c0_match:
+        summary["c0_valid_rate"] = float(c0_match.group(1)) / 100
+
+    routes_match = re.search(
+        r"R1\s*[~～\-—至到]+\s*R5.{0,48}?有效率.{0,16}?(\d+(?:\.\d+)?)\s*%",
+        transcript,
+        re.IGNORECASE,
+    )
+    if routes_match:
+        route_rate = float(routes_match.group(1)) / 100
+        summary["r1_r5_valid_rates"] = [route_rate] * 5
+
+    marketing_match = re.search(
+        r"营销(?:命中|可用)(?:率)?\s*(?:为|=|:|：)?\s*(\d+(?:\.\d+)?)\s*%",
+        transcript,
+    )
+    if hc_kind == "HC2" and marketing_match:
+        summary["marketing_hit_rate"] = float(marketing_match.group(1)) / 100
+
+    if summary:
+        payload["distribution_summary"] = summary
+    if any(marker in transcript for marker in ("所有 HC", "检查项通过", "无缺失")):
+        payload["issues_detected"] = []
+    return payload
+
+
+def validate_hc_payload(payload: dict) -> Optional[str]:
+    """返回 HC payload 的契约错误；合法时返回 None。"""
+    if payload.get("hc") == "HC3" and not str(payload.get("feishu_doc_url") or "").strip():
+        return "HC3 缺少 feishu_doc_url：Phase F 飞书发布未完成"
+    return None
+
+
+# ---- Runner ----------------------------------------------------------------
+
+
+@dataclass
+class Topic6Config:
+    """topic6 运行器所需的方舟资源常量(来自 ma-resources/skill_ids.json 汇总)。"""
+
+    coordinator_agent_id: str
+    environment_id: str
+    memory_store_id: str = ""  # 会被平台自动挂到沙箱 /mnt/memory/;为空则不挂
+    vault_ids: tuple[str, ...] = ()
+    # Session 首次消息发送后,SSE 消费的整体超时(秒)。给足 3.5h 主线 + 富余。
+    session_timeout_sec: int = 6 * 3600
+
+
+@dataclass
+class _ProgressState:
+    """一次 pipeline 的进度卡片本地状态(runner 内部使用)。
+
+    - ``tool_lines``: 环形缓冲,存"HH:MM:SS · name · desc"字符串;超过 MAX_TOOL_LINES 自动挤旧。
+    - ``overflow``: 已被环形缓冲挤掉的历史条数,渲染时用作"(更早 N 条已省略)"提示。
+    - ``last_patch_at``: 单调时钟时间戳,用于节流。0 表示卡片刚发出、还没 patch 过。
+    - ``started_at_wall``: 墙钟时间(秒),用于算 elapsed_sec。
+    - ``last_signature``: 上一次渲染快照的哈希指纹,内容没变就不 patch。
+    """
+
+    started_at_wall: float = field(default_factory=time.time)
+    tool_lines: deque = field(default_factory=lambda: deque(maxlen=MAX_TOOL_LINES))
+    overflow: int = 0
+    last_patch_at: float = 0.0
+    last_signature: str = ""
+    idle_nudge_count: int = 0
+
+    def push_tool_line(self, line: str) -> None:
+        if len(self.tool_lines) == self.tool_lines.maxlen:
+            self.overflow += 1
+        self.tool_lines.append(line)
+
+
+class Topic6Runner:
+    """飞书 ↔ 方舟 MA topic6 pipeline 的桥接器。"""
+
+    def __init__(
+        self,
+        ark: ArkClient,
+        feishu: FeishuSender,
+        store: PipelineStore,
+        config: Topic6Config,
+        loop: Optional[asyncio.AbstractEventLoop] = None,
+        card_sender: Optional["Topic6CardSenderProtocol"] = None,
+    ):
+        self._ark = ark
+        self._feishu = feishu
+        self._store = store
+        self._config = config
+        self._loop = loop
+        self._card_sender = card_sender  # 由 topic6_hitl 注入
+        # 串行化“检查活跃任务 → 创建 Session → 落 Job”，避免两个同时到达的触发
+        # 都在落库前通过检查并各自创建一条长任务。
+        self._start_lock = asyncio.Lock()
+        # ma_session_id → 正在消费的 SSE 任务;续跑前 cancel 前一个。
+        self._active_streams: dict[str, asyncio.Task] = {}
+        # job_id → 进度卡片本地状态(tool 环形缓冲 + 上次 patch 时间)。
+        self._progress: dict[str, "_ProgressState"] = {}
+        # 同一任务的进度事件与 HITL 回调可能并发 patch；按 job 串行，避免旧快照覆盖新状态。
+        self._card_locks: dict[str, asyncio.Lock] = {}
+
+    def bind_card_sender(self, sender: "Topic6CardSenderProtocol") -> None:
+        self._card_sender = sender
+
+    # ---- 入口 --------------------------------------------------------------
+
+    async def start_job(
+        self,
+        *,
+        chat_id: str,
+        thread_id: str,
+        user_open_id: str,
+        mode: str,
+        user_message: str,
+        user_vault_id: str = "",
+    ) -> PipelineJob:
+        """全局串行检查并启动任务；同一 Gateway 只允许一个活跃 Job。"""
+        async with self._start_lock:
+            return await self._start_job_locked(
+                chat_id=chat_id,
+                thread_id=thread_id,
+                user_open_id=user_open_id,
+                mode=mode,
+                user_message=user_message,
+                user_vault_id=user_vault_id,
+            )
+
+    async def _start_job_locked(
+        self,
+        *,
+        chat_id: str,
+        thread_id: str,
+        user_open_id: str,
+        mode: str,
+        user_message: str,
+        user_vault_id: str = "",
+    ) -> PipelineJob:
+        """创建 MA Session、落库并启动 SSE 消费任务。
+
+        - 整个 Gateway 任意 ``running`` / ``wait_hc`` Job 都会阻止新建任务。
+        - Session 挂载 Memory Store(``/mnt/memory``)承载 topic6 的 lm/ 内容。
+        - 首个 user.message 拼「触发词 + 模式 + 用户原始消息」,由 coordinator 解析并按
+          system prompt 的 14 步执行。
+        """
+        existing = self._store.get_active_job()
+        if existing:
+            state = "等待审核" if existing.status == STATUS_WAIT_HC else "运行中"
+            raise Topic6RunnerError(
+                f"当前已有热点周报任务{state}"
+                f"（mode={existing.mode}，phase={existing.current_phase}）。"
+                "请等待前一个任务结束后再发起。"
+            )
+
+        resources = []
+        if self._config.memory_store_id:
+            resources.append(
+                {
+                    "type": "memory_store",
+                    "memory_store_id": self._config.memory_store_id,
+                    "access": "read_only",
+                }
+            )
+        env_overrides = {"FEISHU_USER_OPEN_ID": user_open_id}
+        if self._config.memory_store_id:
+            # 方舟把每个 memstore 挂在 /mnt/memory/{memstore_id}/ 下(多 store 隔离),
+            # 注入 ID 供 Agent bash 展开路径,例如 cat /mnt/memory/$TOPIC6_MEMORY_STORE_ID/topic6/_版本状态.md
+            env_overrides["TOPIC6_MEMORY_STORE_ID"] = self._config.memory_store_id
+        vault_ids = list(
+            dict.fromkeys(
+                vault_id
+                for vault_id in (*self._config.vault_ids, user_vault_id)
+                if vault_id
+            )
+        )
+        session_id = await self._ark.create_session(
+            self._config.coordinator_agent_id,
+            self._config.environment_id,
+            vault_ids=vault_ids,
+            env_overrides=env_overrides,
+            resources=resources,
+        )
+        # 业务目录名依赖 Coordinator 解析出的周期。创建 Job 时保持未知，Coordinator
+        # 创建目录后必须输出 [project_dir] 标记，SSE 消费器会立即回写真值。
+        project_dir = ""
+        job = self._store.create_job(
+            chat_id=chat_id,
+            thread_id=thread_id,
+            user_open_id=user_open_id,
+            ma_session_id=session_id,
+            mode=mode,
+            project_dir=project_dir,
+        )
+        log.info(
+            "topic6 start_job job=%s session=%s mode=%s chat=%s user=%s",
+            job.job_id, session_id, mode, chat_id, user_open_id,
+        )
+
+        prompt = (
+            f"[topic6] 触发词=热点报告 mode={mode} "
+            f"workspace_root={PROJECTS_ROOT}\n用户原始消息:{user_message}"
+        )
+        # 先发一张进度卡片当作"启动确认",拿到 message_id 落库,后续 patch 覆写这张卡即可,
+        # 不再对每条 tool 事件单独 send_to_chat 刷屏。发失败也不阻塞主流程,只是这一次没有卡片。
+        state = _ProgressState()
+        self._progress[job.job_id] = state
+        self._card_locks[job.job_id] = asyncio.Lock()
+        card = build_progress_card(
+            job=job,
+            status=STATUS_RUNNING,
+            elapsed_sec=0,
+            tool_lines=[],
+            overflow=0,
+        )
+        try:
+            message_id = await self._loop_run(
+                lambda: self._feishu.send_interactive_card(chat_id, card)
+            )
+        except Exception as error:  # noqa: BLE001
+            log.warning("topic6 progress card init failed job=%s: %s", job.job_id, error)
+            message_id = None
+        if message_id:
+            self._store.set_progress_card_message_id(job.job_id, message_id)
+            job.progress_card_message_id = message_id  # 内存态同步,后续路径不用再查库
+            state.last_signature = self._signature(card)
+
+        # SSE 消费任务在后台跑,不阻塞当前请求线程(飞书 3 秒响应窗口)。
+        task = self._spawn_stream(job, first_user_message=prompt)
+        self._active_streams[session_id] = task
+        return job
+
+    async def resume_job(self, job: PipelineJob, decision_message: str) -> None:
+        """HITL 卡片回调路径:注入 user.message 后重新订阅 SSE。"""
+        # cancel 前一个消费任务(通常已经因 idle 退出,但兜底)。
+        prev = self._active_streams.get(job.ma_session_id)
+        if prev is not None and not prev.done():
+            prev.cancel()
+        self._store.resume_running(job.job_id, next_phase=job.current_phase)
+        # 复用同一张进度卡片(state 若已回收就重建,避免续跑丢卡)。
+        if job.job_id not in self._progress:
+            self._progress[job.job_id] = _ProgressState()
+        # 审核回调刚把唯一主卡 patch 成“已通过/已备注”终态。必须在启动下一段 SSE 前
+        # 立即恢复运行卡，否则下一段开头若只有 status/thinking 事件、迟迟没有可展示的
+        # progress，卡片会一直停留在 HC 已处理状态，历史工具进度也看不到。
+        await self._render_and_patch(job.job_id, status=STATUS_RUNNING, force=True)
+        task = self._spawn_stream(job, first_user_message=decision_message)
+        self._active_streams[job.ma_session_id] = task
+
+    async def cancel_active_job(
+        self, chat_id: str, thread_id: str, user_open_id: str
+    ) -> Optional[PipelineJob]:
+        """取消该会话键上的活跃 job(SSE task + status → failed),让 /new 可以马上开新任务。
+
+        - 无活跃 job → 返回 None(调用方给"当前没有可取消的任务"的提示)。
+        - 有活跃 job → cancel SSE task、mark_failed(reason=cancelled_by_user)、
+          刷一次进度卡片到失败终态,返回该 job。
+        """
+        job = self._store.get_active_job_by_session_key(chat_id, thread_id, user_open_id)
+        if job is None:
+            return None
+
+        task = self._active_streams.pop(job.ma_session_id, None)
+        if task is not None and not task.done():
+            task.cancel()
+
+        reason = "cancelled_by_user"
+        self._store.mark_failed(job.job_id, reason)
+        await self._render_and_patch(
+            job.job_id, status=STATUS_FAILED, error=reason, force=True
+        )
+        return job
+
+    # ---- SSE 消费 ----------------------------------------------------------
+
+    def _spawn_stream(self, job: PipelineJob, first_user_message: str) -> asyncio.Task:
+        loop = self._loop or asyncio.get_event_loop()
+        return loop.create_task(self._drive_session(job, first_user_message))
+
+    async def _drive_session(self, job: PipelineJob, first_user_message: str) -> None:
+        session_id = job.ma_session_id
+        job_id = job.job_id
+        try:
+            async with self._ark._open_event_stream(session_id) as stream:
+                await self._ark.send_message(session_id, first_user_message)
+                await self._consume_events(job_id, stream)
+        except asyncio.CancelledError:
+            log.info("topic6 stream cancelled job=%s session=%s", job_id, session_id)
+            raise
+        except Exception as error:  # noqa: BLE001 - 网关层兜底
+            log.exception("topic6 stream failed job=%s: %s", job_id, error)
+            reason = f"sse_stream_error: {error!s}"[:400]
+            self._store.mark_failed(job_id, reason)
+            await self._render_and_patch(
+                job_id, status=STATUS_FAILED, error=reason, force=True
+            )
+        finally:
+            # 消费退出即清引用,避免 dict 里挂着 done Task。
+            if self._active_streams.get(session_id) and self._active_streams[session_id].done():
+                self._active_streams.pop(session_id, None)
+
+    async def _consume_events(self, job_id: str, stream) -> None:
+        """SSE 事件循环:tool 事件 → 环形缓冲 + 节流 patch;terminal 走终态渲染。"""
+        collected_messages: list[str] = []
+        async for event in stream:
+            etype = event.get("type") or ""
+
+            # 阶段推进标记:coordinator 在切阶段时会调 `phase.mark` 之类的工具或直接发一句
+            # `[phase] C1`,我们简单从 agent.message 里找 `[phase] X` 前缀更新 current_phase。
+            phase_changed = False
+            if etype == "agent.message":
+                body = event_text(event)
+                if body:
+                    collected_messages.append(body)
+                    self._maybe_update_project_dir(job_id, body)
+                    phase_changed = self._maybe_update_phase(job_id, body)
+
+            # 进度事件:塞进环形缓冲,由 patch 节流器决定何时刷卡片。
+            progress = event_progress(event)
+            if progress:
+                self._append_progress_line(job_id, progress)
+
+            if progress or phase_changed:
+                # phase 切换是低频关键事件,强制立即刷,避免用户看到过时 phase。
+                await self._render_and_patch(job_id, status=STATUS_RUNNING, force=phase_changed)
+
+            if etype == "user.interrupt":
+                reason = "用户在方舟后台手动停止了 Session"
+                self._store.mark_stopped(job_id, reason)
+                await self._render_and_patch(
+                    job_id, status=STATUS_STOPPED, error=reason, force=True
+                )
+                return
+
+            # 失败终态。
+            if etype in (
+                "session.error",
+                "session.status_failed",
+                "session.status_terminated",
+            ):
+                error = event_error(event) or (
+                    "session_terminated"
+                    if etype == "session.status_terminated"
+                    else "session_failed"
+                )
+                self._store.mark_failed(job_id, error[:400])
+                await self._render_and_patch(
+                    job_id, status=STATUS_FAILED, error=error[:400], force=True
+                )
+                return
+
+            # 空闲终态:HC 或最终完成——也可能是 Agent 偶发提前 idle。
+            if etype == "session.status_idle" and not event_requires_action(event):
+                nudge_msg = await self._handle_idle(job_id, collected_messages)
+                if nudge_msg is None:
+                    # 真正的终态（HC / done / 超限 stopped），退出事件循环。
+                    return
+                # L1 自动续跑：Agent 偶发中断，注入催促消息唤醒 session。
+                # send_message 会让 idle session 切回 running，SSE 会继续收到新事件。
+                job = self._store.get_job(job_id)
+                if not job:
+                    return
+                try:
+                    await self._ark.send_message(job.ma_session_id, nudge_msg)
+                except Exception as err:  # noqa: BLE001
+                    log.error(
+                        "topic6 idle nudge send_message failed job=%s session=%s: %s",
+                        job_id, job.ma_session_id, err,
+                    )
+                    reason = f"自动续跑失败（send_message 异常）：{err!s}"[:400]
+                    self._store.mark_failed(job_id, reason)
+                    await self._render_and_patch(
+                        job_id, status=STATUS_FAILED, error=reason, force=True,
+                    )
+                    return
+
+    async def _handle_idle(self, job_id: str, collected: list[str]) -> Optional[str]:
+        """Session 空闲了:看最后一条 agent.message 是否落了 HC JSON。
+
+        返回值：
+        - None：已处理终态（HC / done / stopped），调用方应退出事件循环。
+        - str：Agent 偶发中断，返回催促消息文本，调用方注入后继续消费 SSE。
+        """
+        job = self._store.get_job(job_id)
+        if not job:
+            log.warning("topic6 handle_idle 找不到 job=%s", job_id)
+            return None
+        last = collected[-1] if collected else ""
+        payload = extract_hc_payload(last)
+        if payload is None:
+            # 兜底:Agent 违约(只在文本里说"要输出 HC JSON"但没真输出),嗅出意图后
+            # 伪造一个占位 payload,防止流程被吞。占位标记 __fallback__=True 让 HC 卡片
+            # 渲染层能提示用户"AI 未输出结构化载荷,请照常审阅原始输出"。
+            intent_hc = detect_hc_intent(last)
+            if intent_hc is not None:
+                log.warning(
+                    "topic6 HC fallback triggered job=%s hc=%s (agent did not emit JSON, using intent detection)",
+                    job_id,
+                    intent_hc,
+                )
+                payload = build_hc_fallback_payload(job, intent_hc, collected)
+        if payload:
+            hc_kind = str(payload["hc"])
+            # HC 正常识别说明之前的 nudge（如有）是成功的——Agent 已恢复并推进到
+            # 审核卡点。重置 nudge 计数器，给 HC 通过后的后续阶段同等容错额度。
+            state = self._progress.get(job_id)
+            if state is not None and state.idle_nudge_count > 0:
+                log.info(
+                    "topic6 idle nudge counter reset job=%s hc=%s (was %d)",
+                    job_id, hc_kind, state.idle_nudge_count,
+                )
+                state.idle_nudge_count = 0
+            payload_project_dir = normalize_project_dir(payload.get("project_dir"))
+            if payload_project_dir:
+                self._maybe_update_project_dir(
+                    job_id, f"[project_dir] {payload_project_dir}"
+                )
+                job = self._store.get_job(job_id) or job
+            payload_error = validate_hc_payload(payload)
+            if payload_error:
+                log.error(
+                    "topic6 invalid HC payload job=%s hc=%s: %s",
+                    job_id,
+                    hc_kind,
+                    payload_error,
+                )
+                self._store.mark_failed(job_id, payload_error)
+                await self._render_and_patch(
+                    job_id,
+                    status=STATUS_FAILED,
+                    error=payload_error,
+                    force=True,
+                )
+                await self._reply_async_by_job(job_id, f"❌ {payload_error}")
+                return None
+            event_id = self._store.append_hc_event(job_id, hc_kind, payload)
+            self._store.mark_wait_hc(job_id, hc_kind)
+            job = self._store.get_job(job_id) or job
+            if self._card_sender is None:
+                # 兜底:没注入 HC 卡片发送器,退回一条纯文本让用户手工继续。
+                await self._render_and_patch(job_id, status=STATUS_WAIT_HC, force=True)
+                await self._reply_async_by_job(
+                    job_id,
+                    f"⏸️ 等你审 {hc_kind}(卡片发送器未注入,回复 pass/reject/remark:xxx 继续)",
+                )
+                return None
+            try:
+                message_id = await self._card_sender.send_hc_card(job, hc_kind, event_id, payload)
+                # HC 与运行进度复用同一个 message_id；写回事件便于回调审计与兜底反查。
+                if message_id:
+                    self._store._conn.execute(  # noqa: SLF001 - runner 与 store 同包
+                        "UPDATE pipeline_hc_events SET card_message_id = ? WHERE id = ?",
+                        (message_id, event_id),
+                    )
+            except Exception as error:  # noqa: BLE001 - 卡片失败仍算 wait_hc,人工兜底
+                log.exception("topic6 send hc card failed job=%s hc=%s: %s", job_id, hc_kind, error)
+                await self._render_and_patch(job_id, status=STATUS_WAIT_HC, force=True)
+                await self._reply_async_by_job(
+                    job_id, f"⚠️ {hc_kind} 卡片发送失败({error!s});可回复 pass/reject 手工继续"
+                )
+            return None
+
+        # ---- L1 自动续跑：检测 Agent 偶发提前 idle ----
+        # 条件：不是 HC payload、不是 Phase H 最终结果、pipeline 尚未完成。
+        # 排除条件：current_phase 是 HC 卡点（HC idle 是等人审，不催）。
+        online_url = extract_final_online_url(last)
+        if online_url:
+            # Phase H 正常完成。
+            self._store.mark_done(job_id, online_url=online_url)
+            await self._render_and_patch(
+                job_id, status=STATUS_DONE, online_url=online_url, force=True
+            )
+            self._progress.pop(job_id, None)
+            return None
+
+        state = self._progress.get(job_id)
+        phase = job.current_phase or "A"
+        is_hc_phase = phase.startswith(_HC_PHASE_PREFIXES)
+        can_nudge = (
+            state is not None
+            and state.idle_nudge_count < MAX_IDLE_NUDGES
+            and not is_hc_phase
+        )
+
+        if can_nudge:
+            assert state is not None  # guarded by can_nudge condition
+            state.idle_nudge_count += 1
+            nudge_n = state.idle_nudge_count
+            log.warning(
+                "topic6 idle nudge job=%s phase=%s nudge=%d/%d last_msg=%s",
+                job_id, phase, nudge_n, MAX_IDLE_NUDGES,
+                (last[:120] + "…") if len(last) > 120 else last,
+            )
+            # 卡片显示自动恢复状态
+            state.push_tool_line(
+                f"{time.strftime('%H:%M:%S')} · ⚡ Agent 暂停，正在自动恢复（{nudge_n}/{MAX_IDLE_NUDGES}）"
+            )
+            await self._render_and_patch(job_id, status=STATUS_RUNNING, force=True)
+            # 返回催促消息——Coordinator 读到后应从当前 phase 继续执行。
+            return (
+                f"你在 Phase {phase} 中途停止了，请从当前阶段继续执行。"
+                f"不要重复已完成的步骤，从上次输出之后的下一步继续。"
+            )
+
+        # ---- L2 结构化诊断：超限或不可催促，走终态 ----
+        nudge_count = state.idle_nudge_count if state else 0
+        last_summary = (last[:200] + "…") if len(last) > 200 else (last or "(无 agent 输出)")
+        reason = (
+            f"Pipeline 在 Phase {phase} 中断"
+            f"（自动续跑 {nudge_count}/{MAX_IDLE_NUDGES} 次后仍未恢复）。"
+            f"\n最后输出：{last_summary}"
+        )[:400]
+        log.error(
+            "topic6 pipeline stalled job=%s phase=%s nudges=%d last=%s",
+            job_id, phase, nudge_count, last_summary,
+        )
+        self._store.mark_stopped(job_id, reason)
+        await self._render_and_patch(
+            job_id, status=STATUS_STOPPED, error=reason, force=True
+        )
+        return None
+
+    # ---- helper --------------------------------------------------------------
+
+    def _maybe_update_phase(self, job_id: str, body: str) -> bool:
+        """扫 body 里的 `[phase] X` 前缀更新 current_phase;有变化返回 True。"""
+        match = re.search(r"\[phase\]\s+([A-Z0-9]+)", body)
+        if not match:
+            return False
+        new_phase = match.group(1)
+        job = self._store.get_job(job_id)
+        if job and job.current_phase == new_phase:
+            return False
+        self._store.update_phase(job_id, new_phase)
+        return True
+
+    def _maybe_update_project_dir(self, job_id: str, body: str) -> bool:
+        project_dir = extract_project_dir(body)
+        if not project_dir:
+            return False
+        job = self._store.get_job(job_id)
+        if not job or job.project_dir == project_dir:
+            return False
+        if job.project_dir:
+            log.warning(
+                "topic6 project_dir changed job=%s old=%s new=%s",
+                job_id,
+                job.project_dir,
+                project_dir,
+            )
+        self._store.update_project_dir(job_id, project_dir)
+        log.info("topic6 project_dir resolved job=%s path=%s", job_id, project_dir)
+        return True
+
+    def _append_progress_line(self, job_id: str, progress: str) -> None:
+        """把一条 progress 事件塞进环形缓冲,带时间戳前缀。"""
+        state = self._progress.get(job_id)
+        if state is None:
+            return
+        ts = time.strftime("%H:%M:%S", time.localtime())
+        state.push_tool_line(f"{ts} · {progress}")
+
+    def _review_lines(self, job_id: str) -> list[str]:
+        """格式化已落库的 HC 审核轨迹，供后续运行态和终态持续展示。"""
+        decision_meta = {
+            "pass": ("✅", "通过"),
+            "reject": ("❌", "打回"),
+            "remark": ("📝", "备注通过"),
+        }
+        lines: list[str] = []
+        for event in self._store.list_resolved_hc_for_job(job_id):
+            emoji, label = decision_meta.get(
+                event.user_decision, ("•", event.user_decision or "已处理")
+            )
+            operator = event.operator_label or "审核人未记录"
+            resolved_at = time.strftime(
+                "%H:%M",
+                time.localtime(event.resolved_at or event.created_at),
+            )
+            lines.append(
+                f"{event.hc_kind} · {emoji} {label} · {operator} · {resolved_at}"
+            )
+        return lines
+
+    async def _render_and_patch(
+        self,
+        job_id: str,
+        *,
+        status: str,
+        error: str = "",
+        online_url: str = "",
+        force: bool = False,
+    ) -> None:
+        """按当前 state 渲染卡片并 patch;节流由 last_patch_at 决定,force=True 时无视节流。
+
+        没有 message_id(初次 send 失败)时跳过 — 用户看不到卡片但 SSE 消费不受影响。
+        """
+        state = self._progress.get(job_id)
+        job = self._store.get_job(job_id)
+        if state is None or job is None or not job.progress_card_message_id:
+            return
+        now = time.monotonic()
+        if not force and now - state.last_patch_at < PROGRESS_MIN_INTERVAL_SEC:
+            return
+        elapsed_sec = int(time.time() - state.started_at_wall)
+        card = build_progress_card(
+            job=job,
+            status=status,
+            elapsed_sec=elapsed_sec,
+            tool_lines=list(state.tool_lines),
+            review_lines=self._review_lines(job_id),
+            overflow=state.overflow,
+            error=error,
+            online_url=online_url,
+        )
+        signature = self._signature(card)
+        if signature == state.last_signature and not force:
+            # 内容没变(比如相邻两次 progress 完全同文),省一次 API 调用。
+            return
+        try:
+            await self.patch_job_card(job_id, card)
+        except Exception as error_patch:  # noqa: BLE001 - patch 失败不该拖垮 SSE
+            log.warning(
+                "topic6 progress card patch failed job=%s: %s", job_id, error_patch
+            )
+            return
+        state.last_patch_at = now
+        state.last_signature = signature
+
+    async def patch_job_card(self, job_id: str, card: dict) -> Optional[str]:
+        """串行 patch 当前任务唯一的交互卡片；没有 message_id 时返回 None。"""
+        job = self._store.get_job(job_id)
+        if job is None or not job.progress_card_message_id:
+            return None
+        lock = self._card_locks.setdefault(job_id, asyncio.Lock())
+        async with lock:
+            await self._loop_run(
+                lambda: self._feishu.patch_interactive_card(
+                    job.progress_card_message_id, card
+                )
+            )
+        state = self._progress.get(job_id)
+        if state is not None:
+            state.last_signature = self._signature(card)
+            state.last_patch_at = time.monotonic()
+        return job.progress_card_message_id
+
+    @staticmethod
+    def _signature(card: dict) -> str:
+        return json.dumps(card, ensure_ascii=False, sort_keys=True)
+
+    async def _loop_run(self, fn):
+        """在 executor 里跑同步的 feishu SDK 调用,避免阻塞事件循环。"""
+        loop = self._loop or asyncio.get_event_loop()
+        return await loop.run_in_executor(None, fn)
+
+    async def _reply_async_by_job(self, job_id: str, text: str) -> None:
+        job = self._store.get_job(job_id)
+        if job:
+            await self._reply_async(job.chat_id, text)
+
+    async def _reply_async(self, chat_id: str, text: str) -> None:
+        loop = self._loop or asyncio.get_event_loop()
+        try:
+            await loop.run_in_executor(
+                None, lambda: self._feishu.send_to_chat(chat_id, text)
+            )
+        except Exception as error:  # noqa: BLE001 - 回帖失败不该拖垮 SSE 消费
+            log.warning("topic6 reply failed chat=%s: %s", chat_id, error)
+
+
+class Topic6RunnerError(RuntimeError):
+    """topic6 触发/续跑相关的业务错误。"""
+
+
+class Topic6CardSenderProtocol:
+    """topic6_hitl 会实现的审核态切换接口(避免 runner ↔ hitl 循环 import)。"""
+
+    async def send_hc_card(
+        self,
+        _job: PipelineJob,
+        _hc_kind: str,
+        _event_id: int,
+        _payload: dict,
+    ) -> Optional[str]:
+        """把任务主卡切到 HC 状态,返回复用的飞书 message_id(供反查)。"""
+        raise NotImplementedError
+
+
+def extract_final_online_url(text: str) -> str:
+    """读取 Phase H 结构化结果中的妙搭线上 URL。
+
+    自由文本中的 URL 不可信：报告正文通常先出现飞书 docx 链接，而且 Markdown /
+    JSON 标点会被宽松正则一并吞入。这里只接受显式 ``online_url`` 字段，并校验
+    HTTPS 与妙搭发布域名。
+    """
+    if not text:
+        return ""
+    decoder = json.JSONDecoder()
+    for start in (match.start() for match in re.finditer(r"\{", text)):
+        try:
+            value, _ = decoder.raw_decode(text[start:])
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(value, dict):
+            continue
+        candidate = str(value.get("online_url") or "").strip()
+        if not candidate:
+            continue
+        parsed = urlsplit(candidate)
+        hostname = (parsed.hostname or "").lower()
+        is_aiforce = hostname == "aiforce.cloud" or hostname.endswith(".aiforce.cloud")
+        is_feishuapp = (
+            (hostname == "feishuapp.cn" or hostname.endswith(".feishuapp.cn"))
+            and re.fullmatch(r"/app/app_[A-Za-z0-9]+/?", parsed.path) is not None
+        )
+        if (
+            parsed.scheme == "https"
+            and parsed.query == ""
+            and parsed.fragment == ""
+            and parsed.username is None
+            and parsed.password is None
+            and (is_aiforce or is_feishuapp)
+        ):
+            return candidate
+    return ""

@@ -1,0 +1,101 @@
+---
+name: topic6-annotation
+version: 1.0.0
+description: 社媒热点周刊 Phase C 标注：调用 DataHub 完成 C0 基础事实、R1~R5 五维借势/合作/风险/创意/舆情、C3 关键词收拢的多路标注，含提交、轮询、合并、筛选、时窗展平的一体化流水线。当用户需要对已归一化的热搜宽表做多维度打标、汇聚成可交付宽表时使用。
+---
+
+# topic6-annotation — 热点标注 Skill
+
+火山方舟 Managed Agents 的社媒热点周刊 Phase C 标注 skill,调用 DataHub 完成 C0/R1~R5/C3 多路标注。
+
+## 挂载路径
+
+```
+/mnt/skills/topic6-annotation/
+├── prompts/          # C0/R1~R5/C3 各任务活跃版本 (版本历史见 ma-resources/memory/topic6/_版本状态.md)
+│   ├── C0_基础事实/v5.md      # 活跃版 v5 (v1~v4 归档保留)
+│   ├── R1_平台借势/v2.md      # 活跃版 v2 (v1 归档保留)
+│   ├── R2_商业合作/v1.md
+│   ├── R3_风险预警/v1.md
+│   ├── R4_创意借鉴/v2.md      # 活跃版 v2 (v1 归档保留)
+│   ├── R5_消费者行为/v2.md    # 活跃版 v2 (v1 归档保留)
+│   └── 节点标注/v7.md         # 活跃版 v7
+├── scripts/          # 一体化脚本 (submit+poll+postprocess 合并)
+│   ├── datahub_annotate.py    # 单任务 worker + 幂等后台启动
+│   ├── wait_datahub_batch.py  # 低于 120 秒阈值的统一批次检查器
+│   ├── run_demo_routes.py     # demo: R1~R5 Ark 小批次、checkpoint 与断点恢复
+│   ├── c0_merge_phase1.py     # C0 + C3 → 04_合并/phase1_merged
+│   ├── c0_filter_usable.py    # 筛选营销可用子集
+│   └── merge_annotations.py   # 七路 → 05_合并/wide_table 28 列宽表
+├── ks/               # 判定口径 md (9 篇, 供子 Agent 检索)
+├── references/
+│   └── marketing_calendar/    # C3 时效窗口计算依赖
+│       ├── nodes_definition.csv
+│       ├── nodes_definition_supplement.csv
+│       └── generate_marketing_calendar.py
+└── tool/
+    └── cost-tracker/cost_tracker.py    # 双轨成本台账
+```
+
+## 项目产出目录 (子 Agent 在 `/workspace/Projects/{project_dir}/` 下产出)
+
+```
+{project_dir}/
+├── 02_标准化/hot_topics_normalized.xlsx    # (topic6-fetch-normalize 产出, 本 skill 读取)
+├── 03_抽样/sample_500.xlsx                 # (topic6-fetch-normalize 产出, full/demo 模式用)
+├── 04_标注/
+│   ├── C0_基础事实/
+│   │   ├── c0_submit_meta.json         # datahub_annotate 上传+建任务后写
+│   │   ├── c0_result_raw_r{N}.xlsx     # DataHub 下载结果
+│   │   ├── c0_postprocess_r{N}.xlsx    # JSON 展开成列后
+│   │   └── c0_completion_meta.json     # token/耗时/valid_rate/成本汇总
+│   ├── R1_平台借势/..., R2_商业合作/..., R3_风险预警/...,
+│   ├── R4_创意借鉴/..., R5_消费者行为/...,
+│   ├── C3_节点标注/    # 内含 c3_result_raw_r{N}.xlsx 和展开后含"距节点天数/是否窗口期内"的 postprocess
+│   └── _可用子集/usable_subset_{mode}_r{N}.xlsx  # c0_filter_usable 产出, 供 R1~R5 上传
+├── 04_合并/phase1_merged_{mode}_r{N}.xlsx  # c0_merge_phase1 产出
+├── 05_合并/
+│   ├── wide_table_{mode}_r{N}.xlsx           # merge_annotations 产出 28 列宽表
+│   └── health_summary_{mode}_r{N}.md         # HC 健康度摘要
+└── costs/
+    ├── cost_tracker.jsonl
+    └── 本周成本汇总.md
+```
+
+## 编排顺序 (由 topic6-annotation 子 Agent 委派)
+
+1. **第一批 (全量并行)**: C0 + C3 各用
+   `datahub_annotate.py --launch-background` 幂等启动一次，再由 Coordinator 反复调用
+   `wait_datahub_batch.py --tasks c0,c3 --wait-seconds 105` 统一等待
+2. `c0_merge_phase1.py`: LEFT JOIN 到基础表 → phase1_merged
+3. `c0_filter_usable.py`: 按"是否营销可用"筛出 R1~R5 输入子集
+4. **第二批 (可用子集并行)**:
+   - full/skip_sampling: R1~R5 各用 `--launch-background` 启动一次，再由 Coordinator
+     调 `wait_datahub_batch.py --tasks r1,r2,r3,r4,r5 --wait-seconds 105`
+   - demo: 单次运行 `run_demo_routes.py`，默认并发启动 R1~R5 五个 route worker；
+     每个 worker 内按每批 5 行串行调用 Ark，每批成功即写 checkpoint
+5. C2 事件归档与 R1~R5 并发执行 (由 topic6-event-registry skill 完成, 不在本 skill 内)
+6. `merge_annotations.py`: 七路合并到 28 列宽表 + 健康度摘要
+
+## Prompt 版本
+
+各任务活跃版本: C0 v5, R1 v2, R2 v1, R3 v1, R4 v2, R5 v2, 节点标注 v7。
+未来迭代按各任务当前编号继续递增。
+
+## 环境变量
+
+- `DATAHUB_API_KEY` — DataHub Bearer Token (必填, MA 部署时注入)
+
+## 关键约束
+
+- 所有 prompt / 脚本内的路径全部走 `/mnt/skills/topic6-annotation/` 或 `/workspace/Projects/`。
+- Prompt 上传给 DataHub 时通过 `--prompt-file` 显式传绝对路径, 不再靠脚本自动扫描 prompts 目录。
+- `c0_filter_usable.py` 只把 C0 明确判定为“是”的记录送入 R1~R5；解析失败/缺失记录不进入五路下游。失败占比超过 5% 时熔断。
+- DataHub 成功态没有 `result_url` 时,`datahub_annotate.py` 自动分页读取 `result_list`,不需要子 Agent 手工下载。
+- 方舟 bash 长命令约 120 秒会自动转后台；不得用长时间前台调用规避。正式模式只允许
+  `--launch-background` 启动唯一 worker，批次检查器单次最长 105 秒，返回 `running`
+  后由 Coordinator 原参数重调，不创建额外后台等待进程。
+- `run_demo_routes.py` 只允许用于 50 条样本的 demo 流程；full/skip_sampling 必须继续走
+  DataHub 单行标注，以保持正式质量口径。
+- demo checkpoint 位于各 R1~R5 目录的 `{route}_demo_checkpoint_r{N}.json`。输入、
+  模型、Prompt、run_id 或 batch size 不匹配时自动失效；匹配时重跑只补缺失批次。

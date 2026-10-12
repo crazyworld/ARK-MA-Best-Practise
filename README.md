@@ -1,71 +1,165 @@
-# 火山方舟 Managed Agents · 最佳实践仓库
+# 场景1：MA × 飞书 Bot
 
-> 一组围绕**火山方舟 Managed Agents（MA）**的可运行最佳实践：按**场景**组织，通用件下沉到 `common/`。
+> 一个可运行的骨架 + 一组**案例**：把飞书对话机器人接到火山方舟 Managed Agents（MA）。
 
-每个场景是一个独立目录（含自己的 README、代码、案例）；跨场景共享的东西（MA 官方文档合集及其维护脚本）放在 `common/`。想上手某个场景，直接进它的目录看 README。
+飞书用户 @ Bot → 本地 Gateway（Python）→ 火山方舟 MA Session →（按案例）MCP Server。
+主体是 Python；只有「扫码创建飞书应用」这一步没有 Python 等价物，保留为一个 Node 小岛（子进程调用）。
 
-## 顶层结构
+## 本场景的案例
+
+| 案例 | 涉及能力 | 目录 |
+| --- | --- | --- |
+| **客户A 四卡点 ABCD** | 身份鉴权(static_bearer) · OpenID 透传 · 岗位信息注入 · 跨 Session 记忆 | [cases/customer-a-4checkpoints/](cases/customer-a-4checkpoints/) |
+| **数字员工阿J** | 支持群聊话题协作与单聊个人协作；群话题一个 Session，启动参数可选串行或方舟原生队列 | [cases/digital-employee/](cases/digital-employee/) |
+
+> 客户A 是「文档型 case」：它的运行代码就是本场景共享的 `arkagent/` + `mock_mcp/`；数字员工
+> 是独立示例脚本，**复用** `arkagent` 的纯基础设施，不改主包。
+
+## 通用架构
 
 ```text
-ark-agent-feishu-bot/
-├── README.md                         # 本文件：最佳实践索引
-├── index.html                        # 交互式场景与架构文档入口
-├── pyproject.toml                    # 打包入口（指向 scenarios/feishu-bot）
-├── environment.yml                   # MA × 飞书 Bot 的 conda 环境
-├── debug-oauth-vault-token-limit.md  # OAuth Vault Token 上限排查记录
-├── common/                           # 跨场景共享的文档与维护工具
-│   ├── docs/
-│   │   ├── managed-agents-architecture-atlas.html  # MA 交互式架构全景
-│   │   ├── 火山方舟_ManagedAgents_docs.md          # MA 官方文档合集
-│   │   ├── lark_channel_sdk_docs.md                # 飞书 Channel SDK 文档合集
-│   │   └── feishu_bot_permissions.md               # 飞书 Bot 权限说明
-│   └── skills/                       # 上述文档的同步与校验 skill
-│       ├── volc-docs-sync/
-│       ├── lark-channel-docs-sync/
-│       └── feishu-bot-perms-sync/
-└── scenarios/
-    ├── feishu-bot/                   # 场景1：MA × 飞书 Bot
-    │   ├── arkagent/                 # Gateway、CLI 与 MA 客户端
-    │   ├── mock_mcp/                 # 客户 A 示例 MCP
-    │   ├── node-helper/              # 扫码创建飞书应用
-    │   ├── cases/                    # Topic 6、数字员工、客户 A 四卡点
-    │   └── tests/
-    └── ma-replica/                   # 场景2：客户 Agent 轨迹在 MA 重放对比
+飞书用户 ──@──> Bot（长连接收消息）
+                 │
+                 ▼
+          本地 Gateway（Python）
+   去重 · Session 复用 · 指令分发（/new /role /whoami /remember …）
+                 │
+                 ├── 创建 Session：environment_with_overrides（注入会话级环境变量）
+                 │                 vault_ids（凭据，如 static_bearer）
+                 │                 resources（挂载 Memory Store → /mnt/memory/）
+                 ├── 发消息：user.message ＋（按需）system.message
+                 ▼
+      火山方舟 Managed Agents Session
+                 │  连 MCP 时按凭据注入鉴权头
+                 ▼
+             MCP Server（按案例，公网可达）
 ```
 
-## 浏览入口
+各能力点如何落到具体客户问题上，见 [cases/customer-a-4checkpoints/](cases/customer-a-4checkpoints/) 的文档。
 
-访问 **[GitHub Pages 在线站点](https://feizhuniu-infja.github.io/ARK-MA-Best-Practise/)**
-可浏览场景索引，并进入
-[Managed Agents 交互式架构全景](common/docs/managed-agents-architecture-atlas.html)、
-Topic 6 架构图和完整流水线。本地也可以直接打开 [index.html](index.html)。
+## 准备
 
-## 场景
+- **conda**（管理 Python 环境）；
+- 一个可用的**火山方舟 Managed Agents API Key**（`init` 掩码输入）；
+- 一个能创建企业自建应用的**飞书账号**（用于扫码建应用）；
+- 一个**内网穿透工具**（推荐 [cpolar](https://www.cpolar.com)，国内节点更稳；ngrok / frp 亦可），把本地 MCP 暴露成公网 HTTPS——方舟创建 `static_bearer` 等凭据时会**立即握手探测** MCP，不可达会直接失败。
 
-| 场景 | 一句话 | 目录 |
+## 快速开始
+
+打包配置在**仓库根**（`pyproject.toml` / `environment.yml`），命令从仓库根执行：
+
+```bash
+# 1) 环境
+conda env create -f environment.yml
+conda activate customer-a-ma-demo
+pip install -e ".[dev]"                                   # 安装本包（arkagent / customer-a-mock-mcp 命令）
+(cd scenarios/feishu-bot/node-helper && npm install)      # 装 Node 小岛依赖（registerApp 扫码用）
+pytest -q                                                 # 确认环境就绪
+
+# 2) 初始化（只扫一次码：建飞书应用 + 建 Agent/Vault/Environment，写 config）
+arkagent init
+arkagent doctor                                           # 检查配置
+
+# 3) 运行(必须显式指定 case)
+arkagent run --case topic6              # 或 --case digital-employee
+```
+
+各案例可能需要先起自己的 MCP(如客户A案例的 mock)并暴露公网,再 `init`——以案例文档为准。
+
+> **配置按 case 隔离**:每个 case 有独立的 env/db 目录 `~/.arkagent/cases/{case}/`,不再共享单一 `~/.arkagent/config.env`。样板见各 case 的 `env.example`(如 [cases/topic6/env.example](cases/topic6/env.example))。同一飞书 App 只允许一个 gateway 进程,锁按 `FEISHU_APP_ID` 分粒度(`~/.arkagent/feishu.{app_id}.lock`),不同 case 用不同 Bot 时可并行运行。
+
+## `arkagent` CLI
+
+| 命令 | 作用 |
+| --- | --- |
+| `arkagent init` | 首次初始化:掩码输入 API Key → 建 Agent(挂 `mcp_servers` + `mcp_toolset`)→ 扫码建飞书应用(仅 tenant 身份,无用户 OAuth)→ 建/复用 Vault + 凭据 → 建/复用 Environment → 写主 `~/.arkagent/config.env`(目录 `0700`、文件 `0600`;**仅旧客户 A demo 使用**,新 case 用 `--topic6` 或直接手写 `~/.arkagent/cases/{case}/config.env`)。 |
+| `arkagent init --topic6` | 轻量初始化:只扫码建飞书 Bot + 写 `~/.arkagent/cases/topic6/config.env`。 |
+| `arkagent doctor` | 检查配置完整性。 |
+| `arkagent run --case <name>` | 启动指定 case 的 Gateway,连飞书 WebSocket 收发消息。不带 `--case` 时列出可选项并退出。 |
+| `arkagent update-agent` | **日常迭代**:改了 Agent 的 system prompt / 工具配置后,读主 `config.env` 里现有 `ARK_AGENT_ID`,用最新配置原地更新(方舟 Agent 是版本化资源,更新生成新版本,**Agent ID 不变、飞书 Bot 不动**)。**不需要**重跑 `init` 重新扫码。 |
+
+> 只在**首次**、或**换了 MCP 公网地址**(需把新 URL 写进 Agent 定义)时才需 `init`。仅换地址也可先改 `config.env` 的 `MCP_SERVER_URL` 再 `update-agent`。
+
+## 配置项(按 case 隔离,`~/.arkagent/cases/{case}/config.env`)
+
+每个 case 有独立的 env 文件,样板见 case 目录下的 `env.example`(可直接 `cp` 后编辑真实值)。
+公共键(如 `ARK_API_KEY` / `FEISHU_APP_ID` / `FEISHU_APP_SECRET` / `ARK_BASE_URL`)在两个 case 中同时出现,case 独占键各自列于 `env.example`。
+
+- **topic6**:见 [cases/topic6/env.example](cases/topic6/env.example)——`TOPIC6_COORDINATOR_AGENT_ID` / `TOPIC6_ENVIRONMENT_ID` / `TOPIC6_MEMORY_STORE_ID` / `HOT_TOPICS_MCP_URL` / `BLUEAI_API_KEY` / `DATAHUB_*` 等。
+- **digital-employee**:见 [cases/digital-employee/env.example](cases/digital-employee/env.example)——`GROUP_BOT_AGENT_ID` / `GROUP_BOT_ENVIRONMENT_ID` / `GROUP_BOT_LARK_VAULT_ID` / `SESSION_TIMEOUT_MS` / `AUTHORIZED_*` 等。
+
+主 `~/.arkagent/config.env` 仅为旧客户 A demo 保留(`ARK_AGENT_ID` / `MCP_SERVER_URL` / `MCP_STATIC_BEARER` / `ARK_VAULT_ID`),新 case **不要写入**此文件。配置目录 `0700`、文件 `0600`;不要在 Agent prompt 或日志中打印凭证。
+
+## 消息与 Session 行为
+
+- 单聊处理文本消息；群聊只处理明确 `@Bot` 的文本消息。
+- 会话隔离键为 `(chat_id, thread_id, user_open_id)` 三元组（`tenant_key` 已降级为归属属性、不进键）：**不同发送者不复用 Session**（群里各人独立）；`/new` 显式重置当前会话。
+- 新建 Session 会立即回复「正在处理」；复用 Session 仅在超过 ~2.5 秒未完成时提示一次。
+- Gateway 不转发工具执行过程，只发处理中提示和最终结果。
+- 图片、文件、富文本、交互卡片暂不处理。
+
+## 目录结构
+
+```text
+scenarios/feishu-bot/
+  arkagent/            # Python 主体（安装后提供 arkagent 命令）
+    __init__.py        # 包声明
+    __main__.py        # python -m arkagent 入口，转调 cli.main()
+    cli.py             # 命令分发：init / doctor / run / update-agent；WS 主线程 + asyncio 后台线程
+    init.py            # 首次初始化：建 Agent/Vault/凭据/Environment，写 config.env
+    node_helper.py     # 以子进程调用 node-helper/register_app.mjs（扫码建应用），读回凭证
+    gateway.py         # 编排核心：去重 / Session 复用 / 指令分发 / 组装环境变量·凭据·记忆
+    ark.py             # 火山方舟 Managed Agents httpx 异步客户端 + SSE 解析
+    feishu.py          # 飞书长连接（WS）收消息 + im.v1 发消息 + 消息归一化
+    role.py            # 岗位缓存 + 动态 system.message 注入（含可替换的 HR Provider）
+    memory.py          # 每用户 / 团队 Memory Store 的创建与挂载、/remember 写入
+    store.py           # SQLite 状态：会话映射 / 事件去重 / 岗位缓存 / Store 映射
+    config.py          # 加载校验 config.env（KEY="json-value"），产出 GatewayConfig
+    paths.py           # 解析 ~/.arkagent/{config.env,gateway.db}（可 ARKAGENT_HOME 覆盖）
+    masked_input.py    # TTY 掩码输入（读 API Key 时以 • 回显）
+  mock_mcp/            # 示例 MCP Server（客户A 案例用，FastMCP streamable-http）
+    __init__.py        # 包声明
+    __main__.py        # python -m mock_mcp 启动（读 MCP_STATIC_BEARER/HOST/PORT）
+    server.py          # 工具定义 + static_bearer 鉴权中间件 + 掩码日志
+    data.py            # 按 open_id 分桶的演示数据与权限位
+  node-helper/         # 唯一保留的 Node 小岛
+    register_app.mjs   # registerApp 扫码建飞书应用，把凭证写回 JSON
+  tests/               # pytest（asyncio_mode=auto）
+  cases/               # 本场景的案例（customer-a-4checkpoints / digital-employee）
+```
+
+### 模块职责速查
+
+| 模块 | 职责 | 关键点 |
 | --- | --- | --- |
-| **MA × 飞书 Bot** | 把飞书对话机器人接到 MA；包含 Topic 6 社媒热点周刊、数字员工阿 J、客户 A 四卡点三个案例。 | [scenarios/feishu-bot/](scenarios/feishu-bot/) |
-| **客户 Agent 轨迹重放** | 将客户自研 Agent 的运行轨迹在 MA 上模拟重放，对比耗时、token、cache 与结果等效性。 | [scenarios/ma-replica/](scenarios/ma-replica/) |
+| [cli.py](arkagent/cli.py) | 命令入口 `init/doctor/run/update-agent` | 飞书 WS 在主线程阻塞，asyncio 事件循环跑后台线程，回调 `call_soon_threadsafe` 投递协程，满足飞书 3 秒处理约束 |
+| [init.py](arkagent/init.py) | 首次初始化全部方舟资源 + 飞书应用 | 建 Agent（挂 `mcp_servers`+`mcp_toolset`+`agent_toolset`）、Vault、`static_bearer` 凭据（创建时方舟会握手探测 MCP）、Environment，写 `config.env` |
+| [node_helper.py](arkagent/node_helper.py) | 封装 Node 小岛 | `registerApp` 无 Python 等价物；子进程运行，stderr 透传二维码，从临时 JSON 读回 `{appId,appSecret,userOpenId}` |
+| [gateway/orchestrator.py](arkagent/gateway/orchestrator.py) | 网关编排核心 | 串行队列；指令分发（`/new` `/role` `/whoami` `/remember`）；创建 Session 时组装 `env_overrides`（OpenID 透传）+ `vault_ids`（凭据）+ `resources`（挂 Memory Store） |
+| [ark.py](arkagent/ark.py) | 方舟 MA 异步客户端 | `create_session`(resources) / `send_message`(system.message) / `create_static_bearer_credential` / `create_memory_store`+`create_memory` / `update_agent`；SSE 流式 + 超时回查 |
+| [feishu.py](arkagent/feishu.py) | 飞书接入层 | 入站基于官方 `lark-channel-sdk`（`FeishuChannel`：WS 长连接/断线重连/事件归一化/去重打包），出站沿用 SDK 自带的同步 OpenAPI `Client`；单聊全量、群聊仅 `@Bot` |
+| [role.py](arkagent/role.py) | 岗位信息（软层） | 24h TTL 缓存；仅在「本 Session 未注入过」时挂一次 `system.message`；`on_role_change` 清标记强制重注入；HR Provider 可替换（默认 mock） |
+| [memory.py](arkagent/memory.py) | 跨 Session 记忆 | 每 open_id 一个专属 Store，仅创建 Session 时挂载；岗位调动不新建 Store 只开新 Session；写入靠应用侧 `/remember` 调 API（Agent 对 `/mnt/memory` 只读） |
+| [store.py](arkagent/store.py) | SQLite 持久化 | 会话映射、事件去重、`role_cache`、`memory_stores`/`team_stores` 表 |
+| [config.py](arkagent/config.py) | 配置加载校验 | 解析 `KEY="json-quoted-value"`；校验必填项；产出不可变 `GatewayConfig` |
+| [paths.py](arkagent/paths.py) | 状态目录解析 | `~/.arkagent/{config.env,gateway.db}`，`ARKAGENT_HOME` 可覆盖 |
+| [masked_input.py](arkagent/masked_input.py) | 安全输入 | TTY raw 模式逐字符读、`•` 回显、支持退格/Ctrl-C，仅真实终端可用 |
+| [mock_mcp/server.py](mock_mcp/server.py) | 示例 MCP 服务 | FastMCP streamable-http；工具函数 + `StaticBearerMiddleware`（传输层 Bearer 校验）+ 掩码日志；关 DNS-rebinding 保护 |
+| [mock_mcp/data.py](mock_mcp/data.py) | 示例数据与权限 | 按 open_id 分桶的账号（name/role/store/permissions/leads/kpi）、团队漏斗、车型目录及辅助查询函数 |
+| [node-helper/register_app.mjs](node-helper/register_app.mjs) | 扫码建飞书应用 | 唯一保留的 Node 脚本，把应用凭证写回 JSON 供 Python 读取 |
 
-## 通用件（common/）
+> 各模块如何协作解决具体客户问题（数据怎么一跳跳流动），见客户A 案例的 [数据流转说明](cases/customer-a-4checkpoints/MA迁移Demo-四卡点数据流转说明.md)。
 
-- **MA 交互式架构全景**：[common/docs/managed-agents-architecture-atlas.html](common/docs/managed-agents-architecture-atlas.html) —— 从组件关系、运行逻辑、权限门禁和生命周期理解 MA。
-- **MA 官方文档合集**：[common/docs/火山方舟_ManagedAgents_docs.md](common/docs/火山方舟_ManagedAgents_docs.md) —— 从火山方舟文档中心抓取拼接的 Managed Agents 文档。
-- **飞书 Channel SDK 文档合集**：[common/docs/lark_channel_sdk_docs.md](common/docs/lark_channel_sdk_docs.md) —— 飞书官方 Python Channel SDK 文档快照。
-- **飞书 Bot 权限说明**：[common/docs/feishu_bot_permissions.md](common/docs/feishu_bot_permissions.md) —— 汇总本项目实际使用的 OpenAPI scope 与常见错误码。
-- **文档维护 skill**：[common/skills/](common/skills/) —— 分别负责同步 MA 文档、同步 Channel SDK 文档及校验 Bot 权限说明。常用命令：
+## 开发
 
-  ```bash
-  python3 common/skills/volc-docs-sync/update_docs.py
-  python3 common/skills/lark-channel-docs-sync/update_docs.py
-  python3 common/skills/feishu-bot-perms-sync/check_doc.py
-  ```
+```bash
+pytest -q            # 全量单测（testpaths 已指向 scenarios/feishu-bot/tests）
+python -m mock_mcp   # 本地起示例 mock MCP（不带 token 则不校验，仅本地调试）
+```
 
-## 上手
+## 参考资料
 
-每个场景自带完整的环境搭建与运行说明——进对应目录看 README。跨场景**没有统一的一键安装**：两个场景的依赖与环境相互独立。
-
-- **场景1（MA × 飞书 Bot）**：conda 环境、`pip install -e .`（打包配置在仓库根，`package-dir` 把包目录指到 `scenarios/feishu-bot/`，import 名仍是 `arkagent` / `mock_mcp`，故安装/测试命令**从仓库根执行**）、扫码建应用及按 case 运行 Gateway —— 见 [scenarios/feishu-bot/README.md](scenarios/feishu-bot/README.md)。
-- **场景2（客户 Agent 轨迹重放）**：最小环境（仅依赖 `httpx`，不碰场景1 的包）、轨迹抽取 / mock / MA 实跑 / 对比报告 —— 见 [scenarios/ma-replica/README.md](scenarios/ma-replica/README.md)。
-
-> 外部一手文档（火山方舟 / 飞书官网链接）随场景收录在各自 README 的「参考资料」；跨场景权威出处是上面 `common/` 里的 MA 文档合集。
+- MA 官方文档合集：[../../common/docs/火山方舟_ManagedAgents_docs.md](../../common/docs/火山方舟_ManagedAgents_docs.md)（维护脚本见 [../../common/skills/volc-docs-sync/](../../common/skills/volc-docs-sync/)）
+- [火山方舟：Managed Agents API](https://docs.volcengine.com/docs/82379/2555910?lang=zh)
+- [飞书：一键创建飞书智能体应用](https://open.feishu.cn/document/mcp_open_tools/integrating-agents-with-feishu/overview)
+- [飞书：使用长连接接收事件](https://open.feishu.cn/document/server-docs/event-subscription-guide/event-subscription-configure-/request-url-configuration-case)
