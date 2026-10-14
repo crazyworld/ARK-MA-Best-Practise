@@ -12,8 +12,8 @@
     让 MA Session 继续跑。
 
 卡片模板:统一用飞书 schema=2.0 交互卡片。三个 HC 的头部颜色区分:HC1 蓝、HC2 绿、
-HC3 紫。按钮固定「通过 / 打回 / 备注」三个;备注按钮走 input 交互(飞书原生 form 提交
-的 form_value 里带 remark_note)。已处理的卡片头部改灰色(wathet),按钮换成静态标语。
+HC3 紫。审核人可以直接通过，或填写“打回原因”后让 Agent 回退处理；表单提交的
+``form_value`` 里带 ``reject_reason``。已处理的卡片头部改灰色(wathet),按钮换成静态标语。
 """
 from __future__ import annotations
 
@@ -74,7 +74,10 @@ def _fmt_payload_line(label: str, value: Any) -> Optional[dict]:
 
 
 def _payload_summary_elements(payload: dict) -> list[dict]:
-    """把 HC payload 的主要字段拍成一段可读摘要。字段挑选与三档 HC 通用。"""
+    """把 HC payload 的主要字段拍成一段可读摘要。字段挑选与三档 HC 通用。
+
+    注意: validator_verdict 不在此处渲染,由 _validator_verdict_elements 专责。
+    """
     fields = [
         ("模式", payload.get("mode")),
         ("项目目录", payload.get("project_dir")),
@@ -92,6 +95,62 @@ def _payload_summary_elements(payload: dict) -> list[dict]:
     return elements
 
 
+def _validator_verdict_elements(payload: dict) -> list[dict]:
+    """渲染 Validator 审计结论区块。payload 无 verdict 时返回空列表,零侵入。"""
+    verdict = payload.get("validator_verdict")
+    if not verdict or not isinstance(verdict, dict):
+        return []
+    conclusion = str(verdict.get("conclusion", "")).upper()
+    if not conclusion or conclusion == "SKIP":
+        # SKIP = Validator 未就绪/超时,不展示审计区块,避免干扰审核人。
+        skip_reason = verdict.get("audit_summary", "")
+        if skip_reason:
+            return [
+                {
+                    "tag": "markdown",
+                    "content": f"🔍 **Validator**: ⏭️ 未执行 — {skip_reason[:200]}",
+                }
+            ]
+        return []
+
+    emoji_map = {"PASS": "✅", "WARN": "⚠️", "BLOCK": "🚫"}
+    emoji = emoji_map.get(conclusion, "•")
+
+    elements: list[dict] = [
+        {
+            "tag": "markdown",
+            "content": f"🔍 **Validator 审计结论**: {emoji} **{conclusion}**",
+        }
+    ]
+
+    issues = verdict.get("issues")
+    if isinstance(issues, list) and issues:
+        lines: list[str] = []
+        for issue in issues[:5]:  # 卡片空间有限,最多展示 5 条
+            sev = issue.get("severity", "?") if isinstance(issue, dict) else "?"
+            desc = issue.get("description", "") if isinstance(issue, dict) else str(issue)
+            lines.append(f"- [{sev}] {desc[:120]}")
+        if len(issues) > 5:
+            lines.append(f"- _…及另外 {len(issues) - 5} 条问题_")
+        elements.append({"tag": "markdown", "content": "\n".join(lines)})
+
+    suggestion = verdict.get("suggestion")
+    if suggestion and isinstance(suggestion, str):
+        elements.append(
+            {"tag": "markdown", "content": f"**处理建议**: {suggestion[:200]}"}
+        )
+
+    coverage = verdict.get("coverage_note")
+    if coverage and isinstance(coverage, str):
+        elements.append({"tag": "markdown", "content": f"_{coverage[:300]}_"})
+
+    summary = verdict.get("audit_summary")
+    if summary and isinstance(summary, str):
+        elements.append({"tag": "markdown", "content": f"> {summary[:300]}"})
+
+    return elements
+
+
 def _action_value(job_id: str, hc_kind: str, event_id: int, decision: str) -> dict:
     """卡片按钮 value 结构;回调时会原样送回来。"""
     return {
@@ -105,6 +164,13 @@ def _action_value(job_id: str, hc_kind: str, event_id: int, decision: str) -> di
 def build_hc_card(job: PipelineJob, hc_kind: str, event_id: int, payload: dict) -> dict:
     """构造一张 HC 交互卡片(schema=2.0)。三档 HC 共用一套骨架,靠 _HC_META 区分。"""
     meta = _HC_META.get(hc_kind, _HC_META["HC1"])
+    verdict = payload.get("validator_verdict") or {}
+    verdict_conclusion = str(verdict.get("conclusion", "")).upper()
+
+    # BLOCK 时头部改红色,给审核人最直观的视觉警示。
+    if verdict_conclusion == "BLOCK":
+        meta = {**meta, "template": "red"}
+
     elements: list[dict] = [
         {
             "tag": "markdown",
@@ -130,64 +196,36 @@ def build_hc_card(job: PipelineJob, hc_kind: str, event_id: int, payload: dict) 
             }
         )
     elements.extend(_payload_summary_elements(payload))
+    elements.extend(_validator_verdict_elements(payload))
     elements.append({"tag": "hr"})
+    # BLOCK 时通过按钮加警示文案,保留操作权但视觉提醒。
+    pass_button_text = (
+        "⚠️ 忽略阻断并通过" if verdict_conclusion == "BLOCK" else "通过"
+    )
     elements.append(
         {
-            "tag": "column_set",
-            "columns": [
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": pass_button_text},
+            "type": "primary_filled",
+            "width": "fill",
+            "behaviors": [
                 {
-                    "tag": "column",
-                    "width": "weighted",
-                    "weight": 1,
-                    "elements": [
-                        {
-                            "tag": "button",
-                            "text": {"tag": "plain_text", "content": "通过"},
-                            "type": "primary_filled",
-                            "width": "fill",
-                            "behaviors": [
-                                {
-                                    "type": "callback",
-                                    "value": _action_value(
-                                        job.job_id, hc_kind, event_id, DECISION_PASS
-                                    ),
-                                }
-                            ],
-                        }
-                    ],
-                },
-                {
-                    "tag": "column",
-                    "width": "weighted",
-                    "weight": 1,
-                    "elements": [
-                        {
-                            "tag": "button",
-                            "text": {"tag": "plain_text", "content": "打回"},
-                            "type": "danger_filled",
-                            "width": "fill",
-                            "behaviors": [
-                                {
-                                    "type": "callback",
-                                    "value": _action_value(
-                                        job.job_id, hc_kind, event_id, DECISION_REJECT
-                                    ),
-                                }
-                            ],
-                        }
-                    ],
-                },
+                    "type": "callback",
+                    "value": _action_value(
+                        job.job_id, hc_kind, event_id, DECISION_PASS
+                    ),
+                }
             ],
         }
     )
     elements.append(
         {
             "tag": "form",
-            "name": f"remark_form_{event_id}",
+            "name": f"reject_form_{event_id}",
             "elements": [
                 {
                     "tag": "input",
-                    "name": "remark_note",
+                    "name": "reject_reason",
                     "required": True,
                     "input_type": "multiline_text",
                     "rows": 2,
@@ -195,22 +233,30 @@ def build_hc_card(job: PipelineJob, hc_kind: str, event_id: int, payload: dict) 
                     "max_rows": 4,
                     "max_length": 500,
                     "width": "fill",
-                    "label": {"tag": "plain_text", "content": "备注"},
+                    "label": {"tag": "plain_text", "content": "打回原因"},
                     "placeholder": {
                         "tag": "plain_text",
-                        "content": "填写补充说明，提交后继续执行",
+                        "content": "说明需要回退或调整的内容，提交后由 Agent 继续处理",
                     },
                 },
                 {
                     "tag": "button",
-                    "name": "remark_submit",
+                    "name": "reject_submit",
                     "text": {
                         "tag": "plain_text",
-                        "content": "提交备注并继续",
+                        "content": "打回并继续",
                     },
-                    "type": "default",
+                    "type": "danger",
                     "width": "fill",
                     "form_action_type": "submit",
+                    "behaviors": [
+                        {
+                            "type": "callback",
+                            "value": _action_value(
+                                job.job_id, hc_kind, event_id, DECISION_REJECT
+                            ),
+                        }
+                    ],
                 },
             ],
         }
@@ -219,9 +265,8 @@ def build_hc_card(job: PipelineJob, hc_kind: str, event_id: int, payload: dict) 
         {
             "tag": "markdown",
             "content": (
-                "> 通过:pipeline 继续跑下一阶段  "
-                "  ·  打回:标 failed 结束任务  "
-                "  ·  备注:填写后提交并继续"
+                "> 通过：进入下一阶段  "
+                "  ·  打回并继续：Agent 根据原因回退或调整后重试"
             ),
         }
     )
@@ -286,6 +331,7 @@ def build_hc_resolved_card(
             }
         )
     elements.extend(_payload_summary_elements(payload))
+    elements.extend(_validator_verdict_elements(payload))
     elements.append({"tag": "hr"})
     resolved_line = f"{decision_emoji} **{decision_label}** · {operator_label} · {resolved_at}"
     if note:
@@ -493,14 +539,8 @@ class Topic6Hitl(Topic6CardSenderProtocol):
                 operator_label=operator_label,
             )
 
-        if decision == DECISION_REJECT:
-            self._store.mark_failed(
-                job.job_id, f"{hc_kind} rejected: {note or 'no reason'}"[:400]
-            )
-            self._reply_sync(job.chat_id, f"❌ 已按 {hc_kind} 打回结束当前 pipeline。")
-            return
-
-        # pass / remark(带 note):把决策注入 MA Session 继续跑。
+        # pass / reject / remark(兼容历史卡片) 都把决策注入 MA Session 继续跑。
+        # reject 由 Coordinator 依据原因选择回退或调整，而不是 Gateway 直接终止任务。
         decision_message = _build_decision_message(hc_kind, decision, note)
         try:
             await self._runner.resume_job(job, decision_message)
@@ -643,13 +683,15 @@ def _extract_action_value(action: Any) -> Optional[dict]:
     name = getattr(inner, "name", None)
     if name is None and isinstance(inner, dict):
         name = inner.get("name")
+    if name == "reject_submit":
+        return {"decision": DECISION_REJECT}
     if name == "remark_submit":
         return {"decision": DECISION_REMARK}
     return None
 
 
 def _extract_action_note(action: Any) -> Optional[str]:
-    """备注按钮可能配合一个 input 组件;这里从 form_value / input_value 抽出说明文本。"""
+    """审核表单可能配合 input 组件;从 form_value / input_value 抽出说明文本。"""
     inner = getattr(action, "action", None)
     if inner is None and isinstance(action, dict):
         inner = action.get("action")
@@ -665,7 +707,11 @@ def _extract_action_note(action: Any) -> Optional[str]:
             form_value = {}
     form_value = form_value or {}
     if isinstance(form_value, dict):
-        note = form_value.get("remark_note") or form_value.get("note")
+        note = (
+            form_value.get("reject_reason")
+            or form_value.get("remark_note")  # 兼容已发出的旧卡片
+            or form_value.get("note")
+        )
         if isinstance(note, str) and note.strip():
             return note.strip()
     input_value = getattr(inner, "input_value", None)

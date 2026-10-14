@@ -2,46 +2,53 @@
   "note": "",
   "skills": {
     "topic6-fetch-normalize": {
-      "skill_id": "skill-20261009114625-9cncf",
+      "skill_id": "skill-20261012073456-zh0fs",
       "version": "1",
-      "uploaded_at": 1791546385,
-      "source_sha256": "c5c4d372751a44dc4523aea302b062e59dbab7ebf401774f2ef3b17623ca5682",
+      "uploaded_at": 1791790496,
+      "source_sha256": "88f03dd9df44405458b3935467087d791f067bde772791aad177ed6af731a123",
       "display_title": "topic6 · Phase A+B 取数标准化"
     },
     "topic6-annotation": {
-      "skill_id": "skill-20261009114625-ey8ug",
+      "skill_id": "skill-20261012073456-vh00v",
       "version": "1",
-      "uploaded_at": 1791546385,
-      "source_sha256": "6262a662e4b940e5e12eb6bcb8c2f42b55069a98678a7ee5fa93f14fe9338e7e",
+      "uploaded_at": 1791790496,
+      "source_sha256": "43f1e74a37c70dbadff224a27b2cdb74e813bfc4c8079de9293abb195de797bc",
       "display_title": "topic6 · C0/R1~R5/C3 标注与 DataHub 轮询"
     },
     "topic6-insight": {
-      "skill_id": "skill-20261009114625-uf7nf",
+      "skill_id": "skill-20261012073457-475ex",
       "version": "1",
-      "uploaded_at": 1791546385,
-      "source_sha256": "4934b6d0a7923e8ffc2559c9d6d84529cbcc4a6cf90ee322a4d79b80ba9dd09b",
+      "uploaded_at": 1791790496,
+      "source_sha256": "d3cc9c042575f3a2f2b22b3964d43379d74839a5edc99178b2e5cf40a97159d5",
       "display_title": "topic6 · E1~E4 分版块洞察"
     },
     "topic6-event-registry": {
-      "skill_id": "skill-20261009114626-1rxxj",
+      "skill_id": "skill-20261012073457-rntsv",
       "version": "1",
-      "uploaded_at": 1791546386,
-      "source_sha256": "0dc9c67edb3b8c4ba8743e01e1233f4305acfa6bd3edd810ce6d865b0cc677d0",
+      "uploaded_at": 1791790497,
+      "source_sha256": "505a64a7539e2678508a23e8eb5670efac8796dfe74a5a59340dbd8d1b43d673",
       "display_title": "topic6 · C2 事件合并 (blueai-canonical-event-registry v2.2.0)"
     },
     "topic6-web-report": {
-      "skill_id": "skill-20261009114627-2e7op",
+      "skill_id": "skill-20261012073458-4vjum",
       "version": "1",
-      "uploaded_at": 1791546387,
-      "source_sha256": "4835485988dea2859fb7a34d04c98254a4ec0f802af5917d35edb8b2383d311a",
+      "uploaded_at": 1791790498,
+      "source_sha256": "70e4daed526ba4b19108fe37f36e826fed092d83edf7ecc8224a21e94317042d",
       "display_title": "topic6 · Phase G 网页生成 (v1.1.0)"
     },
     "miaoda-web-publish": {
-      "skill_id": "skill-20261009114627-xnno7",
+      "skill_id": "skill-20261012073458-migbf",
       "version": "1",
-      "uploaded_at": 1791546387,
-      "source_sha256": "a1ca7e33407a3e4fa767111fbb0eb044559caf83a913ab4c15d51cb25cb4e9c4",
+      "uploaded_at": 1791790498,
+      "source_sha256": "040d5f08e7a15793d8c27adf813b047571a115b9500ad6cdc504e03038d1bddf",
       "display_title": "topic6 · Phase H 妙搭网页发布 (v1.0.1)"
+    },
+    "validator": {
+      "skill_id": null,
+      "version": null,
+      "uploaded_at": null,
+      "source_sha256": null,
+      "display_title": "通用质量验证 Agent 知识库"
     }
   }
 }

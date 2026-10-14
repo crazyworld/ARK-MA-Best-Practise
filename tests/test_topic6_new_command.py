@@ -315,8 +315,7 @@ def test_idle_without_hc_or_final_url_is_not_marked_done(loop, tmp_path):
 
     reloaded = store.get_job(job.job_id)
     assert reloaded.status == STATUS_STOPPED
-    assert "Phase A" in reloaded.last_error
-    assert "中断" in reloaded.last_error
+    assert reloaded.last_error == "Session 已结束，但 Phase H 未返回有效的妙搭 online_url"
 
 
 def test_idle_does_not_treat_feishu_doc_url_as_phase_h_result(loop, tmp_path):
@@ -407,6 +406,191 @@ def test_final_online_url_rejects_non_runtime_feishu_urls():
     ) == ""
 
 
+def test_get_resumable_job_includes_failed_and_stopped(tmp_path):
+    """get_resumable_job_by_session_key 必须能捞到 failed/stopped(供 /continue 用)。
+
+    get_active_job_by_session_key 只认 running/wait_hc,拿不到本地收口成 failed 的 job;
+    /continue 的主场景正是“卡片已失败但 Session 可能还 idle”,故需要更宽的查询。
+    """
+    store = PipelineStore(str(tmp_path / "topic6.db"))
+    job = store.create_job(
+        chat_id="c1",
+        thread_id="",
+        user_open_id="u1",
+        ma_session_id="session-1",
+        mode="full",
+        project_dir="/workspace/x",
+    )
+    store.mark_failed(job.job_id, "sse_stream_error: boom")
+
+    # 窄查询拿不到(已非 running/wait_hc)
+    assert store.get_active_job_by_session_key("c1", "", "u1") is None
+    # 宽查询能拿到同一个 job
+    resumable = store.get_resumable_job_by_session_key("c1", "", "u1")
+    assert resumable is not None
+    assert resumable.job_id == job.job_id
+    assert resumable.status == STATUS_FAILED
+
+    # done 不算可续跑
+    store.mark_done(job.job_id, "https://topic6-demo.aiforce.cloud/report")
+    assert store.get_resumable_job_by_session_key("c1", "", "u1") is None
+    store.close()
+
+
+def test_continue_job_resumes_failed_session(loop, tmp_path):
+    """/continue:对本地已 failed 的 job 注入「继续」并重订 SSE,把它拉回 running。"""
+    runner, store = _make_runner(tmp_path, loop)
+    job = store.create_job(
+        chat_id="c1",
+        thread_id="",
+        user_open_id="u1",
+        ma_session_id="session-1",
+        mode="full",
+        project_dir="/workspace/x",
+    )
+    store.update_phase(job.job_id, "D")
+    store.mark_failed(job.job_id, "sse_stream_error: boom")
+
+    injected: dict = {}
+    spawned = object()
+
+    def _fake_spawn(job_arg, first_user_message):
+        injected["session"] = job_arg.ma_session_id
+        injected["message"] = first_user_message
+        return spawned
+
+    runner._spawn_stream = _fake_spawn  # type: ignore[method-assign]
+
+    resumed = loop.run_until_complete(
+        runner.continue_job(chat_id="c1", thread_id="", user_open_id="u1")
+    )
+
+    assert resumed is not None
+    assert resumed.job_id == job.job_id
+    # 注入了「继续」到同一个 Session,并重订 SSE
+    assert injected == {"session": "session-1", "message": "继续"}
+    assert runner._active_streams["session-1"] is spawned
+    # 落库被 resume_running 拉回 running、清掉 last_error、沿用原 phase
+    reloaded = store.get_job(job.job_id)
+    assert reloaded.status == pipeline_store.STATUS_RUNNING
+    assert reloaded.last_error == ""
+    assert reloaded.current_phase == "D"
+
+
+def test_continue_job_passes_user_supplied_message(loop, tmp_path):
+    runner, store = _make_runner(tmp_path, loop)
+    store.create_job(
+        chat_id="c1",
+        thread_id="",
+        user_open_id="u1",
+        ma_session_id="session-1",
+        mode="full",
+        project_dir="/workspace/x",
+    )
+    injected = {}
+
+    def _fake_spawn(job_arg, first_user_message):
+        injected["session"] = job_arg.ma_session_id
+        injected["message"] = first_user_message
+        return object()
+
+    runner._spawn_stream = _fake_spawn  # type: ignore[method-assign]
+
+    loop.run_until_complete(
+        runner.continue_job(
+            chat_id="c1",
+            thread_id="",
+            user_open_id="u1",
+            message="请优先检查异常热点",
+        )
+    )
+
+    assert injected == {
+        "session": "session-1",
+        "message": "请优先检查异常热点",
+    }
+
+
+def test_sse_reconnect_does_not_resend_initial_message(loop, tmp_path, monkeypatch):
+    class _Stream:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class _Ark:
+        def __init__(self):
+            self.connects = 0
+            self.sent_messages = []
+
+        def _open_event_stream(self, _session_id):
+            self.connects += 1
+            return _Stream()
+
+        async def send_message(self, _session_id, message):
+            self.sent_messages.append(message)
+
+    store = PipelineStore(str(tmp_path / "topic6.db"))
+    ark = _Ark()
+    runner = Topic6Runner(
+        ark,
+        _StubSender(),
+        store,
+        RunnerConfig(coordinator_agent_id="agent-x", environment_id="env-x"),
+        loop=loop,
+    )
+    job = store.create_job(
+        chat_id="c1",
+        thread_id="",
+        user_open_id="u1",
+        ma_session_id="session-1",
+        mode="demo",
+        project_dir="/workspace/x",
+    )
+    consume_calls = 0
+
+    async def _consume(*_args, **_kwargs):
+        nonlocal consume_calls
+        consume_calls += 1
+        if consume_calls == 1:
+            raise OSError("temporary network failure")
+        return True
+
+    async def _no_sleep(_delay):
+        return None
+
+    runner._consume_events = _consume  # type: ignore[method-assign]
+    monkeypatch.setattr(topic6_runner.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr(topic6_runner.random, "uniform", lambda _a, _b: 1.0)
+
+    loop.run_until_complete(runner._drive_session(job, "initial request"))
+
+    assert ark.connects == 2
+    assert ark.sent_messages == ["initial request"]
+
+
+def test_continue_job_without_candidate_returns_none(loop, tmp_path):
+    """没有可续跑 job(只有 done)时 /continue 返回 None,不误动任何行。"""
+    runner, store = _make_runner(tmp_path, loop)
+    job = store.create_job(
+        chat_id="c1",
+        thread_id="",
+        user_open_id="u1",
+        ma_session_id="session-1",
+        mode="full",
+        project_dir="/workspace/x",
+    )
+    store.mark_done(job.job_id, "https://topic6-demo.aiforce.cloud/report")
+
+    result = loop.run_until_complete(
+        runner.continue_job(chat_id="c1", thread_id="", user_open_id="u1")
+    )
+    assert result is None
+    # done 态不被改动
+    assert store.get_job(job.job_id).status == pipeline_store.STATUS_DONE
+
+
 def test_resume_immediately_restores_single_card_to_running(loop, tmp_path):
     class _Sender:
         def __init__(self):
@@ -454,4 +638,144 @@ def test_resume_immediately_restores_single_card_to_running(loop, tmp_path):
     assert any("HC1 · ✅ 通过 · 俞麟" in content for content in contents)
     assert any("Phase D merge" in content for content in contents)
     assert runner._active_streams[job.ma_session_id] is spawned
+    store.close()
+
+
+def test_startup_recovery_resubscribes_running_session_without_user_message(
+    loop, tmp_path
+):
+    class _Ark:
+        async def list_session_events(self, _session_id):
+            return [{"type": "agent.message", "content": [{"type": "text", "text": "[phase] C2"}]}]
+
+    store = PipelineStore(str(tmp_path / "topic6.db"))
+    job = store.create_job(
+        chat_id="c1",
+        thread_id="",
+        user_open_id="u1",
+        ma_session_id="session-1",
+        mode="full",
+        project_dir="/workspace/x",
+    )
+    runner = Topic6Runner(
+        _Ark(),
+        _StubSender(),
+        store,
+        RunnerConfig(coordinator_agent_id="agent-x", environment_id="env-x"),
+        loop=loop,
+    )
+    spawned = object()
+    injected = {}
+
+    def _fake_spawn(job_arg, first_user_message):
+        injected["session"] = job_arg.ma_session_id
+        injected["message"] = first_user_message
+        return spawned
+
+    runner._spawn_stream = _fake_spawn  # type: ignore[method-assign]
+
+    result = loop.run_until_complete(runner.recover_job(job))
+
+    assert result == "subscribed"
+    assert injected == {"session": "session-1", "message": None}
+    assert runner._active_streams["session-1"] is spawned
+    assert store.get_job(job.job_id).current_phase == "C2"
+    store.close()
+
+
+def test_startup_recovery_reuses_existing_pending_hc_card(loop, tmp_path):
+    class _Ark:
+        async def list_session_events(self, _session_id):
+            return [
+                {
+                    "type": "agent.message",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": '{"hc":"HC1","mode":"full","project_dir":"/workspace/x"}',
+                        }
+                    ],
+                },
+                {"type": "session.status_idle", "stop_reason": {"type": "end_turn"}},
+            ]
+
+    class _CardSender:
+        def __init__(self):
+            self.calls = []
+
+        async def send_hc_card(self, job, hc_kind, event_id, payload):
+            self.calls.append((job.job_id, hc_kind, event_id, payload))
+            return "message-recovered"
+
+    store = PipelineStore(str(tmp_path / "topic6.db"))
+    job = store.create_job(
+        chat_id="c1",
+        thread_id="",
+        user_open_id="u1",
+        ma_session_id="session-1",
+        mode="full",
+        project_dir="/workspace/x",
+    )
+    event_id = store.append_hc_event(
+        job.job_id,
+        "HC1",
+        {"hc": "HC1", "mode": "full", "project_dir": "/workspace/x"},
+        card_message_id="message-old",
+    )
+    store.mark_wait_hc(job.job_id, "HC1")
+    runner = Topic6Runner(
+        _Ark(),
+        _StubSender(),
+        store,
+        RunnerConfig(coordinator_agent_id="agent-x", environment_id="env-x"),
+        loop=loop,
+    )
+    cards = _CardSender()
+    runner.bind_card_sender(cards)
+
+    result = loop.run_until_complete(runner.recover_job(store.get_job(job.job_id)))
+
+    assert result == pipeline_store.STATUS_WAIT_HC
+    assert cards.calls == [
+        (
+            job.job_id,
+            "HC1",
+            event_id,
+            {"hc": "HC1", "mode": "full", "project_dir": "/workspace/x"},
+        )
+    ]
+    hc_event = store.latest_hc_for_job(job.job_id, "HC1")
+    assert hc_event is not None
+    assert hc_event.id == event_id
+    assert hc_event.card_message_id == "message-recovered"
+    store.close()
+
+
+def test_startup_recovery_marks_ma_failed_session_failed(loop, tmp_path):
+    class _Ark:
+        async def list_session_events(self, _session_id):
+            return [
+                {
+                    "type": "session.status_failed",
+                    "error": {"message": "model_rate_limited_error"},
+                }
+            ]
+
+    runner, store = _make_runner(tmp_path, loop)
+    job = store.create_job(
+        chat_id="c1",
+        thread_id="",
+        user_open_id="u1",
+        ma_session_id="session-1",
+        mode="full",
+        project_dir="/workspace/x",
+    )
+    runner._ark = _Ark()
+
+    result = loop.run_until_complete(runner.recover_job(job))
+
+    assert result == "failed"
+    recovered = store.get_job(job.job_id)
+    assert recovered.status == STATUS_FAILED
+    assert "model_rate_limited_error" in recovered.last_error
     store.close()

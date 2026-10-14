@@ -3,7 +3,8 @@
 # 依赖: curl / jq / ARK_API_KEY 环境变量
 #
 # 幂等策略:
-#   - Environment / MemoryStore 按 name 查找,存在则复用(重建代价大且没意义)
+#   - Environment 优先复用 TOPIC6_ENVIRONMENT_ID,缺失或失效时再按 name 查找
+#   - MemoryStore 按 name 查找,存在则复用(重建代价大且没意义)
 #   - 3 个 Agent 每次都重建(prompt/skill 更新是主要驱动),同名旧 Agent 先删后建
 #
 # 使用:
@@ -88,18 +89,47 @@ ark_get() {
     -H "$ARK_BETA_HEADER" 2>/dev/null || echo '{}'
 }
 
-# 幂等辅助:按 name 在指定 collection 里查找,找到返回 id 到 stdout,找不到 stdout 为空。
-# 兼容 list 响应可能是 {"data":[...]} 也可能裸数组或 {"items":[...]}
+# 幂等辅助:按 name 在指定 collection 的全部分页中查找,找到返回 id 到 stdout。
+# 方舟列表响应使用 next_page;目标资源不一定在 page_size=200 的第一页。
+# 兼容 list 响应可能是 {"data":[...]} 也可能裸数组或 {"items":[...]}。
 find_by_name() {
   local collection="$1" name="$2"
-  local body
-  body=$(ark_get "/$collection?page_size=200")
-  jq -r --arg n "$name" '
-    (.data // .items // .) as $arr
-    | if ($arr | type) == "array" then
-        ($arr[] | select(.name == $n) | .id) // empty
-      else empty end
-  ' <<<"$body" | head -1
+  local body page="" encoded_page found
+  while :; do
+    if [ -n "$page" ]; then
+      encoded_page=$(jq -rn --arg value "$page" '$value | @uri')
+      body=$(ark_get "/$collection?page_size=200&page=$encoded_page")
+    else
+      body=$(ark_get "/$collection?page_size=200")
+    fi
+    found=$(jq -r --arg n "$name" '
+      (.data // .items // .) as $arr
+      | if ($arr | type) == "array" then
+          ($arr[] | select(.name == $n) | .id) // empty
+        else empty end
+    ' <<<"$body" | head -1)
+    if [ -n "$found" ]; then
+      printf '%s\n' "$found"
+      return 0
+    fi
+    page=$(jq -r '.next_page // empty' <<<"$body")
+    [ -n "$page" ] || return 0
+  done
+}
+
+find_environment_by_id() {
+  local environment_id="$1"
+  local tmp code body
+  tmp=$(mktemp)
+  code=$(curl -sS -o "$tmp" -w "%{http_code}" "$BASE_URL/environments/$environment_id" \
+    -H "Authorization: Bearer $ARK_API_KEY" \
+    -H "$ARK_BETA_HEADER")
+  body=$(cat "$tmp")
+  rm -f "$tmp"
+  if [ "$code" != "200" ]; then
+    return 1
+  fi
+  jq -er '.data.id // .id' <<<"$body"
 }
 
 find_memory_id_by_path() {
@@ -123,9 +153,21 @@ ark_delete() {
 }
 
 # ---- 1. Environment ----
-step "1) 创建 Environment(幂等:按 name 查找,存在复用;--update-env 时原地更新 config)"
+step "1) 创建 Environment(幂等:优先按 ID 复用,其次按 name 查找;--update-env 时原地更新 config)"
 env_name=$(jq -r '.name' "$ROOT/environment.json")
-ENVIRONMENT_ID=$(find_by_name "environments" "$env_name" || true)
+ENVIRONMENT_ID=""
+if [ -n "${TOPIC6_ENVIRONMENT_ID:-}" ]; then
+  existing_id=$(find_environment_by_id "$TOPIC6_ENVIRONMENT_ID" 2>/dev/null || true)
+  if [ "$existing_id" = "$TOPIC6_ENVIRONMENT_ID" ]; then
+    ENVIRONMENT_ID="$existing_id"
+    echo "按配置 ID 复用: $env_name -> $ENVIRONMENT_ID"
+  else
+    echo "配置中的 TOPIC6_ENVIRONMENT_ID 无效或不可访问，将按名称查找: $TOPIC6_ENVIRONMENT_ID" >&2
+  fi
+fi
+if [ -z "$ENVIRONMENT_ID" ]; then
+  ENVIRONMENT_ID=$(find_by_name "environments" "$env_name" || true)
+fi
 # environment.json 里 config.env 用 ${VAR} 字面占位,先展开一次。
 # 方舟不做二次插值,不展开就把 "${DATAHUB_ENDPOINT}" 死字符串灌进沙箱。
 # macOS 默认不带 envsubst,改用 jq 遍历字符串值做 ${VAR} 替换(未 export 的变量替成空串,与 envsubst 行为一致)。
@@ -271,6 +313,13 @@ annotator_resp=$(ark_post "/agents" "$annotator_payload")
 AGENT_ANNOTATOR_ID=$(extract_id "$annotator_resp")
 echo "AGENT_ANNOTATOR_ID=$AGENT_ANNOTATOR_ID"
 
+step "5.5) 创建子 Agent topic6-validator"
+delete_agent_if_exists "topic6-validator"
+validator_payload=$(render_agent_json validator.json validator.system.md)
+validator_resp=$(ark_post "/agents" "$validator_payload")
+AGENT_VALIDATOR_ID=$(extract_id "$validator_resp")
+echo "AGENT_VALIDATOR_ID=$AGENT_VALIDATOR_ID"
+
 step "6) 创建子 Agent topic6-insighter"
 delete_agent_if_exists "topic6-insighter"
 insighter_payload=$(render_agent_json insighter.json insighter.system.md)
@@ -282,10 +331,11 @@ echo "AGENT_INSIGHTER_ID=$AGENT_INSIGHTER_ID"
 step "7) 创建协调器 topic6-coordinator"
 delete_agent_if_exists "topic6-coordinator"
 coordinator_payload=$(render_agent_json coordinator.json coordinator.system.md \
-  | jq --arg a "$AGENT_ANNOTATOR_ID" --arg i "$AGENT_INSIGHTER_ID" '
+  | jq --arg a "$AGENT_ANNOTATOR_ID" --arg i "$AGENT_INSIGHTER_ID" --arg v "$AGENT_VALIDATOR_ID" '
       (.. | strings) |= (
           gsub("\\$\\{agent_id.topic6-annotator\\}"; $a) |
-          gsub("\\$\\{agent_id.topic6-insighter\\}"; $i)
+          gsub("\\$\\{agent_id.topic6-insighter\\}"; $i) |
+          gsub("\\$\\{agent_id.topic6-validator\\}"; $v)
       )
   ')
 coordinator_resp=$(ark_post "/agents" "$coordinator_payload")
@@ -299,7 +349,8 @@ cat >"$ROOT/created_ids.json" <<EOF
   "memory_store_id": "$MEMORY_STORE_ID",
   "agent_coordinator_id": "$AGENT_COORDINATOR_ID",
   "agent_annotator_id": "$AGENT_ANNOTATOR_ID",
-  "agent_insighter_id": "$AGENT_INSIGHTER_ID"
+  "agent_insighter_id": "$AGENT_INSIGHTER_ID",
+  "agent_validator_id": "$AGENT_VALIDATOR_ID"
 }
 EOF
 echo -e "\n完成。ID 落盘: $ROOT/created_ids.json"

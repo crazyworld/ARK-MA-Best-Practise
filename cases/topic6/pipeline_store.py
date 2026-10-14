@@ -330,6 +330,38 @@ class PipelineStore:
             ).fetchone()
         return self._row_to_job(row) if row else None
 
+    def get_resumable_job_by_session_key(
+        self, chat_id: str, thread_id: str, user_open_id: str
+    ) -> Optional[PipelineJob]:
+        """会话键上最近一个“可续跑”的 job(供 /continue 用)。
+
+        与 get_active_job_by_session_key 的区别:后者只认 running/wait_hc,拿不到
+        已被本地收口成 failed/stopped 的 job。而 /continue 的主场景恰恰是“卡片已失败,
+        但 MA Session 其实还 idle”(SSE 断线/HC 契约错/reject/cancel)——这些 job 已落到
+        failed/stopped,必须把它们也纳入候选,才能把误判为死的任务捞回来重订 SSE。
+
+        完成态(done)不返回:已出报告的任务没有续跑语义。
+        """
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT * FROM pipeline_jobs
+                WHERE chat_id = ? AND thread_id = ? AND user_open_id = ?
+                  AND status IN (?, ?, ?, ?)
+                ORDER BY updated_at DESC LIMIT 1
+                """,
+                (
+                    chat_id,
+                    thread_id or "",
+                    user_open_id,
+                    STATUS_RUNNING,
+                    STATUS_WAIT_HC,
+                    STATUS_FAILED,
+                    STATUS_STOPPED,
+                ),
+            ).fetchone()
+        return self._row_to_job(row) if row else None
+
     def get_active_job(self) -> Optional[PipelineJob]:
         """返回整个 Topic6 Gateway 最新的活跃任务。"""
         with self._lock:
@@ -342,6 +374,19 @@ class PipelineStore:
                 (STATUS_RUNNING, STATUS_WAIT_HC),
             ).fetchone()
         return self._row_to_job(row) if row else None
+
+    def list_active_jobs(self) -> list[PipelineJob]:
+        """返回全部运行中或等待审核的任务，供 Gateway 重启恢复。"""
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT * FROM pipeline_jobs
+                WHERE status IN (?, ?)
+                ORDER BY started_at ASC
+                """,
+                (STATUS_RUNNING, STATUS_WAIT_HC),
+            ).fetchall()
+        return [self._row_to_job(row) for row in rows]
 
     def get_job_by_ma_session(self, ma_session_id: str) -> Optional[PipelineJob]:
         with self._lock:
