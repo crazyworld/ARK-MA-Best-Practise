@@ -74,7 +74,10 @@ def _fmt_payload_line(label: str, value: Any) -> Optional[dict]:
 
 
 def _payload_summary_elements(payload: dict) -> list[dict]:
-    """把 HC payload 的主要字段拍成一段可读摘要。字段挑选与三档 HC 通用。"""
+    """把 HC payload 的主要字段拍成一段可读摘要。字段挑选与三档 HC 通用。
+
+    注意: validator_verdict 不在此处渲染,由 _validator_verdict_elements 专责。
+    """
     fields = [
         ("模式", payload.get("mode")),
         ("项目目录", payload.get("project_dir")),
@@ -92,6 +95,62 @@ def _payload_summary_elements(payload: dict) -> list[dict]:
     return elements
 
 
+def _validator_verdict_elements(payload: dict) -> list[dict]:
+    """渲染 Validator 审计结论区块。payload 无 verdict 时返回空列表,零侵入。"""
+    verdict = payload.get("validator_verdict")
+    if not verdict or not isinstance(verdict, dict):
+        return []
+    conclusion = str(verdict.get("conclusion", "")).upper()
+    if not conclusion or conclusion == "SKIP":
+        # SKIP = Validator 未就绪/超时,不展示审计区块,避免干扰审核人。
+        skip_reason = verdict.get("audit_summary", "")
+        if skip_reason:
+            return [
+                {
+                    "tag": "markdown",
+                    "content": f"🔍 **Validator**: ⏭️ 未执行 — {skip_reason[:200]}",
+                }
+            ]
+        return []
+
+    emoji_map = {"PASS": "✅", "WARN": "⚠️", "BLOCK": "🚫"}
+    emoji = emoji_map.get(conclusion, "•")
+
+    elements: list[dict] = [
+        {
+            "tag": "markdown",
+            "content": f"🔍 **Validator 审计结论**: {emoji} **{conclusion}**",
+        }
+    ]
+
+    issues = verdict.get("issues")
+    if isinstance(issues, list) and issues:
+        lines: list[str] = []
+        for issue in issues[:5]:  # 卡片空间有限,最多展示 5 条
+            sev = issue.get("severity", "?") if isinstance(issue, dict) else "?"
+            desc = issue.get("description", "") if isinstance(issue, dict) else str(issue)
+            lines.append(f"- [{sev}] {desc[:120]}")
+        if len(issues) > 5:
+            lines.append(f"- _…及另外 {len(issues) - 5} 条问题_")
+        elements.append({"tag": "markdown", "content": "\n".join(lines)})
+
+    suggestion = verdict.get("suggestion")
+    if suggestion and isinstance(suggestion, str):
+        elements.append(
+            {"tag": "markdown", "content": f"**处理建议**: {suggestion[:200]}"}
+        )
+
+    coverage = verdict.get("coverage_note")
+    if coverage and isinstance(coverage, str):
+        elements.append({"tag": "markdown", "content": f"_{coverage[:300]}_"})
+
+    summary = verdict.get("audit_summary")
+    if summary and isinstance(summary, str):
+        elements.append({"tag": "markdown", "content": f"> {summary[:300]}"})
+
+    return elements
+
+
 def _action_value(job_id: str, hc_kind: str, event_id: int, decision: str) -> dict:
     """卡片按钮 value 结构;回调时会原样送回来。"""
     return {
@@ -105,6 +164,13 @@ def _action_value(job_id: str, hc_kind: str, event_id: int, decision: str) -> di
 def build_hc_card(job: PipelineJob, hc_kind: str, event_id: int, payload: dict) -> dict:
     """构造一张 HC 交互卡片(schema=2.0)。三档 HC 共用一套骨架,靠 _HC_META 区分。"""
     meta = _HC_META.get(hc_kind, _HC_META["HC1"])
+    verdict = payload.get("validator_verdict") or {}
+    verdict_conclusion = str(verdict.get("conclusion", "")).upper()
+
+    # BLOCK 时头部改红色,给审核人最直观的视觉警示。
+    if verdict_conclusion == "BLOCK":
+        meta = {**meta, "template": "red"}
+
     elements: list[dict] = [
         {
             "tag": "markdown",
@@ -130,11 +196,16 @@ def build_hc_card(job: PipelineJob, hc_kind: str, event_id: int, payload: dict) 
             }
         )
     elements.extend(_payload_summary_elements(payload))
+    elements.extend(_validator_verdict_elements(payload))
     elements.append({"tag": "hr"})
+    # BLOCK 时通过按钮加警示文案,保留操作权但视觉提醒。
+    pass_button_text = (
+        "⚠️ 忽略阻断并通过" if verdict_conclusion == "BLOCK" else "通过"
+    )
     elements.append(
         {
             "tag": "button",
-            "text": {"tag": "plain_text", "content": "通过"},
+            "text": {"tag": "plain_text", "content": pass_button_text},
             "type": "primary_filled",
             "width": "fill",
             "behaviors": [
@@ -260,6 +331,7 @@ def build_hc_resolved_card(
             }
         )
     elements.extend(_payload_summary_elements(payload))
+    elements.extend(_validator_verdict_elements(payload))
     elements.append({"tag": "hr"})
     resolved_line = f"{decision_emoji} **{decision_label}** · {operator_label} · {resolved_at}"
     if note:

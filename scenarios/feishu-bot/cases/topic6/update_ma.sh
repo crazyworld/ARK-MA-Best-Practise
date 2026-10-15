@@ -2,8 +2,8 @@
 # Topic 6 MA 资源全量更新入口。只更新资源，不停止或重启 Gateway。
 #
 # ID 变化规则:
-#   - 6 个 Skills:强制重新上传，ID 会变化
-#   - Annotator / Insighter / Coordinator:删除同名旧 Agent 后重建，ID 会变化
+#   - 7 个 Skills:强制重新上传，ID 会变化
+#   - Annotator / Validator / Insighter / Coordinator:删除同名旧 Agent 后重建，ID 会变化
 #   - Environment / Memory Store:按名称原地更新，ID 不变
 #   - 飞书 App / Vault:本脚本不创建或更新，ID 不变
 # Coordinator 新 ID 会自动回写 config.env，因此脚本结束后必须手动重启 Gateway。
@@ -123,7 +123,7 @@ grep -E '^TOPIC6_(COORDINATOR_AGENT_ID|ENVIRONMENT_ID|MEMORY_STORE_ID)=' "$CONFI
 cat <<EOF
 
 Topic 6 MA 资源更新完成。
-ID 变化:Skills 和 3 个 Agents 已更新为新 ID；Environment 和 Memory Store 保持原 ID。
+ID 变化:Skills 和 4 个 Agents 已更新为新 ID；Environment 和 Memory Store 保持原 ID。
 Coordinator 新 ID 已回写 ${CONFIG_FILE}。
 update_ma.sh 不会代替具体用户完成 OAuth。每位妙搭发布人首次使用前运行:
   cd "${FEISHU_BOT_DIR}"
