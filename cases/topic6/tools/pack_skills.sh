@@ -23,6 +23,7 @@ SKILLS=(
   "ma-resources/skills/topic6-event-registry|topic6-event-registry.zip|topic6-event-registry"
   "ma-resources/skills/topic6-web-report|topic6-web-report.zip|topic6-web-report"
   "ma-resources/skills/miaoda-web-publish|miaoda-web-publish.zip|miaoda-web-publish"
+  "ma-resources/skills/validator|validator.zip|validator"
 )
 
 MAX_UPLOAD=$((30 * 1024 * 1024))
