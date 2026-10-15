@@ -36,15 +36,16 @@ from arkagent.ark import ArkClient  # noqa: E402
 from artifact_sync import Topic6ArtifactSync  # noqa: E402
 
 
-def resolve_session_id(job_id: str, db_path: str) -> str:
+def resolve_session_id(job_id: str, db_path: str = "") -> str:
     """从 pipeline DB 查 job_id 对应的 ma_session_id。"""
     from pipeline_store import PipelineStore  # noqa: E402
 
-    store = PipelineStore(db_path)
+    # db_path 为空则让 PipelineStore 自己解析（TOPIC6_PIPELINE_DB_PATH env → DEFAULT_PIPELINE_DB_PATH）
+    store = PipelineStore(db_path if db_path else None)
+    print(f"  pipeline DB:  {store._path}")
     job = store.get_job(job_id)
     if job is None:
         print(f"错误: pipeline DB 中找不到 job_id={job_id}", file=sys.stderr)
-        print(f"  DB 路径: {db_path}", file=sys.stderr)
         sys.exit(1)
     print(f"Job 信息:")
     print(f"  job_id:         {job.job_id}")
@@ -137,11 +138,7 @@ def main() -> None:
         job_id = args.job_id or f"manual_{session_id[:16]}"
     else:
         job_id = args.job_id
-        db_path = args.db_path or os.environ.get("TOPIC6_PIPELINE_DB_PATH", "").strip()
-        if not db_path:
-            # 默认路径: feishu-bot/data/topic6_pipeline.db
-            db_path = str(FEISHU_BOT_DIR / "data" / "topic6_pipeline.db")
-        session_id = resolve_session_id(job_id, db_path)
+        session_id = resolve_session_id(job_id, args.db_path)
 
     sync_root = Path(args.output_dir)
     print(f"\n开始同步:")
