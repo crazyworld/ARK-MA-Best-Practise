@@ -11,9 +11,7 @@
     # 指定输出目录（默认 data/artifacts）
     python tools/manual_artifact_sync.py job_e295dbb74cf6 --output-dir /tmp/artifacts
 
-环境变量:
-    ARK_API_KEY      方舟 API Key（必填）
-    ARK_BASE_URL     方舟 API 地址（可选，默认 https://ark.cn-beijing.volces.com/api/v3）
+自动加载 ~/.arkagent/cases/topic6/config.env（与 `arkagent run --case topic6` 完全一致）。
 
 脚本复用 artifact_sync.py 的 Topic6ArtifactSync.sync_once，行为与线上轮询完全一致：
 增量下载（fingerprint 未变 + 本地文件存在则跳过）、原子写入、manifest 物化。
@@ -106,10 +104,21 @@ def main() -> None:
     if not args.job_id and not args.session_id:
         parser.error("必须指定 job_id 或 --session-id")
 
-    # 环境变量
+    # ---- 加载 config.env（与 arkagent run --case topic6 完全一致）----
+    from arkagent.config import load_config_file  # noqa: E402
+    from arkagent.paths import get_case_paths  # noqa: E402
+
+    case_paths = get_case_paths("topic6")
+    config_env_path = case_paths.config_path
+    if os.path.exists(config_env_path):
+        load_config_file(config_env_path)
+        print(f"已加载配置: {config_env_path}")
+    else:
+        print(f"警告: 配置文件不存在: {config_env_path}", file=sys.stderr)
+
     api_key = os.environ.get("ARK_API_KEY", "").strip()
     if not api_key:
-        print("错误: 缺少环境变量 ARK_API_KEY", file=sys.stderr)
+        print("错误: 缺少 ARK_API_KEY（config.env 中也没有）", file=sys.stderr)
         sys.exit(1)
     base_url = (
         os.environ.get("ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3")
