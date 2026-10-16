@@ -315,7 +315,8 @@ def test_idle_without_hc_or_final_url_is_not_marked_done(loop, tmp_path):
 
     reloaded = store.get_job(job.job_id)
     assert reloaded.status == STATUS_STOPPED
-    assert reloaded.last_error == "Session 已结束，但 Phase H 未返回有效的妙搭 online_url"
+    assert "Phase A" in reloaded.last_error
+    assert "中断" in reloaded.last_error
 
 
 def test_idle_does_not_treat_feishu_doc_url_as_phase_h_result(loop, tmp_path):

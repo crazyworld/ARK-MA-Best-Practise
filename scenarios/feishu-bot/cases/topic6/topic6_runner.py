@@ -54,6 +54,13 @@ TRIGGER_KEYWORDS = ("热点报告", "热点周报")
 MODE_DEMO_KEYWORDS = ("demo", "演示")
 # 旧 test 触发词保留为 full 的兼容别名，但不再作为内部 mode 值。
 MODE_FULL_KEYWORDS = ("full", "完整", "正式", "test", "小样本", "试跑")
+
+# ---- idle 自动续跑 ----
+# Agent 在 pipeline 中途偶发 end_turn 后，Runner 通过 MA send_message 注入催促
+# 消息唤醒 idle session。最多重试 MAX_IDLE_NUDGES 次，超限才判终态。
+MAX_IDLE_NUDGES = 2
+# HC 卡点的 idle 是正常业务行为（等人审），不做自动催促。
+_HC_PHASE_PREFIXES = tuple(HC_KINDS)
 MODE_SKIP_SAMPLING_KEYWORDS = (
     "skip_sampling",
     "skip-sampling",
@@ -294,6 +301,7 @@ class _ProgressState:
     overflow: int = 0
     last_patch_at: float = 0.0
     last_signature: str = ""
+    idle_nudge_count: int = 0
 
     def push_tool_line(self, line: str) -> None:
         if len(self.tool_lines) == self.tool_lines.maxlen:
@@ -606,7 +614,30 @@ class Topic6Runner:
 
         # idle：用完整消息历史重建 HC 或 Phase H 的最终结果。recovering=True
         # 会复用已有的未决 HC 事件，避免 Gateway 重启时重复生成审核卡。
-        await self._handle_idle(job.job_id, messages, recovering=True)
+        nudge_msg = await self._handle_idle(job.job_id, messages, recovering=True)
+        if nudge_msg is not None:
+            # Agent 偶发 idle + Gateway 恰好重启 → 注入催促消息并恢复 SSE 订阅。
+            try:
+                await self._ark.send_message(job.ma_session_id, nudge_msg)
+                log.info(
+                    "topic6 recovery nudge sent job=%s session=%s",
+                    job.job_id, job.ma_session_id,
+                )
+            except Exception as err:  # noqa: BLE001
+                log.error(
+                    "topic6 recovery nudge failed job=%s: %s", job.job_id, err,
+                )
+                self._store.mark_failed(
+                    job.job_id, f"恢复续跑失败：{err!s}"[:400],
+                )
+                await self._render_and_patch(
+                    job.job_id, status=STATUS_FAILED,
+                    error=f"恢复续跑失败：{err!s}"[:400], force=True,
+                )
+                current = self._store.get_job(job.job_id)
+                return current.status if current is not None else "failed"
+            self._restore_stream(job)
+            return "nudged"
         current = self._store.get_job(job.job_id)
         return current.status if current is not None else "missing"
 
@@ -761,20 +792,47 @@ class Topic6Runner:
                 )
                 return True
 
-            # 空闲终态:HC 或最终完成。
+            # 空闲终态:HC 或最终完成——也可能是 Agent 偶发提前 idle。
             if etype == "session.status_idle" and not event_requires_action(event):
-                await self._handle_idle(job_id, collected_messages)
-                return True
+                nudge_msg = await self._handle_idle(
+                    job_id, collected_messages,
+                )
+                if nudge_msg is None:
+                    # 真正的终态（HC / done / 超限 stopped），退出事件循环。
+                    return True
+                # L1 自动续跑：Agent 偶发中断，注入催促消息唤醒 session。
+                # send_message 会让 idle session 切回 running，SSE 继续收到新事件。
+                job = self._store.get_job(job_id)
+                if not job:
+                    return True
+                try:
+                    await self._ark.send_message(job.ma_session_id, nudge_msg)
+                except Exception as err:  # noqa: BLE001
+                    log.error(
+                        "topic6 idle nudge send_message failed job=%s session=%s: %s",
+                        job_id, job.ma_session_id, err,
+                    )
+                    reason = f"自动续跑失败（send_message 异常）：{err!s}"[:400]
+                    self._store.mark_failed(job_id, reason)
+                    await self._render_and_patch(
+                        job_id, status=STATUS_FAILED, error=reason, force=True,
+                    )
+                    return True
         return False
 
     async def _handle_idle(
         self, job_id: str, collected: list[str], *, recovering: bool = False
-    ) -> None:
-        """Session 空闲了:看最后一条 agent.message 是否落了 HC JSON。"""
+    ) -> Optional[str]:
+        """Session 空闲了:看最后一条 agent.message 是否落了 HC JSON。
+
+        返回值：
+        - None：已处理终态（HC / done / stopped），调用方应退出事件循环。
+        - str：Agent 偶发中断，返回催促消息文本，调用方注入后继续消费 SSE。
+        """
         job = self._store.get_job(job_id)
         if not job:
             log.warning("topic6 handle_idle 找不到 job=%s", job_id)
-            return
+            return None
         last = collected[-1] if collected else ""
         payload = extract_hc_payload(last)
         if payload is None:
@@ -791,6 +849,15 @@ class Topic6Runner:
                 payload = build_hc_fallback_payload(job, intent_hc, collected)
         if payload:
             hc_kind = str(payload["hc"])
+            # HC 正常识别说明之前的 nudge（如有）是成功的——Agent 已恢复并推进到
+            # 审核卡点。重置 nudge 计数器，给 HC 通过后的后续阶段同等容错额度。
+            state = self._progress.get(job_id)
+            if state is not None and state.idle_nudge_count > 0:
+                log.info(
+                    "topic6 idle nudge counter reset job=%s hc=%s (was %d)",
+                    job_id, hc_kind, state.idle_nudge_count,
+                )
+                state.idle_nudge_count = 0
             payload_project_dir = normalize_project_dir(payload.get("project_dir"))
             if payload_project_dir:
                 self._maybe_update_project_dir(
@@ -813,7 +880,7 @@ class Topic6Runner:
                     force=True,
                 )
                 await self._reply_async_by_job(job_id, f"❌ {payload_error}")
-                return
+                return None
             existing_hc = self._store.latest_hc_for_job(job_id, hc_kind)
             if recovering and existing_hc and existing_hc.resolved_at is None:
                 # Gateway 断线后本地已记下 HC，但卡片 patch 尚未送达或旧卡不可见。
@@ -839,7 +906,7 @@ class Topic6Runner:
                     hc_kind,
                     existing_hc.id,
                 )
-                return
+                return None
             event_id = self._store.append_hc_event(job_id, hc_kind, payload)
             self._store.mark_wait_hc(job_id, hc_kind)
             job = self._store.get_job(job_id) or job
@@ -850,7 +917,7 @@ class Topic6Runner:
                     job_id,
                     f"⏸️ 等你审 {hc_kind}(卡片发送器未注入,发送 /continue 注入「继续」推进该阶段)",
                 )
-                return
+                return None
             try:
                 message_id = await self._card_sender.send_hc_card(job, hc_kind, event_id, payload)
                 # HC 与运行进度复用同一个 message_id；写回事件便于回调审计与兜底反查。
@@ -865,25 +932,67 @@ class Topic6Runner:
                 await self._reply_async_by_job(
                     job_id, f"⚠️ {hc_kind} 卡片发送失败({error!s});可回复 pass/reject 手工继续"
                 )
-            return
+            return None
 
-        # 只有 Phase H 的结构化结果和妙搭域名同时有效才算完成。不能从自由文本里
-        # 抓第一个 URL，否则飞书文档链接或错误信息中的排障链接会被误当成发布结果。
+        # ---- L1 自动续跑：检测 Agent 偶发提前 idle ----
+        # 条件：不是 HC payload、不是 Phase H 最终结果、pipeline 尚未完成。
+        # 排除条件：current_phase 是 HC 卡点（HC idle 是等人审，不催）。
         online_url = extract_final_online_url(last)
-        if not online_url:
-            reason = "Session 已结束，但 Phase H 未返回有效的妙搭 online_url"
-            self._store.mark_stopped(job_id, reason)
+        if online_url:
+            # Phase H 正常完成。
+            self._store.mark_done(job_id, online_url=online_url)
             await self._render_and_patch(
-                job_id, status=STATUS_STOPPED, error=reason, force=True
+                job_id, status=STATUS_DONE, online_url=online_url, force=True
             )
-            return
-        self._store.mark_done(job_id, online_url=online_url)
-        await self._render_and_patch(
-            job_id, status=STATUS_DONE, online_url=online_url, force=True
+            self._progress.pop(job_id, None)
+            return None
+
+        state = self._progress.get(job_id)
+        phase = job.current_phase or "A"
+        is_hc_phase = phase.startswith(_HC_PHASE_PREFIXES)
+        can_nudge = (
+            state is not None
+            and state.idle_nudge_count < MAX_IDLE_NUDGES
+            and not is_hc_phase
         )
-        # done 状态卡片已经带"打开报告"按钮,不再单独发文本。
-        # 卡片本地状态在终态后可以释放,避免长期占用。
-        self._progress.pop(job_id, None)
+
+        if can_nudge:
+            assert state is not None  # guarded by can_nudge condition
+            state.idle_nudge_count += 1
+            nudge_n = state.idle_nudge_count
+            log.warning(
+                "topic6 idle nudge job=%s phase=%s nudge=%d/%d last_msg=%s",
+                job_id, phase, nudge_n, MAX_IDLE_NUDGES,
+                (last[:120] + "…") if len(last) > 120 else last,
+            )
+            # 卡片显示自动恢复状态
+            state.push_tool_line(
+                f"{time.strftime('%H:%M:%S')} · ⚡ Agent 暂停，正在自动恢复（{nudge_n}/{MAX_IDLE_NUDGES}）"
+            )
+            await self._render_and_patch(job_id, status=STATUS_RUNNING, force=True)
+            # 返回催促消息——Coordinator 读到后应从当前 phase 继续执行。
+            return (
+                f"你在 Phase {phase} 中途停止了，请从当前阶段继续执行。"
+                f"不要重复已完成的步骤，从上次输出之后的下一步继续。"
+            )
+
+        # ---- L2 结构化诊断：超限或不可催促，走终态 ----
+        nudge_count = state.idle_nudge_count if state else 0
+        last_summary = (last[:200] + "…") if len(last) > 200 else (last or "(无 agent 输出)")
+        reason = (
+            f"Pipeline 在 Phase {phase} 中断"
+            f"（自动续跑 {nudge_count}/{MAX_IDLE_NUDGES} 次后仍未恢复）。"
+            f"\n最后输出：{last_summary}"
+        )[:400]
+        log.error(
+            "topic6 pipeline stalled job=%s phase=%s nudges=%d last=%s",
+            job_id, phase, nudge_count, last_summary,
+        )
+        self._store.mark_stopped(job_id, reason)
+        await self._render_and_patch(
+            job_id, status=STATUS_STOPPED, error=reason, force=True
+        )
+        return None
 
     # ---- helper --------------------------------------------------------------
 
