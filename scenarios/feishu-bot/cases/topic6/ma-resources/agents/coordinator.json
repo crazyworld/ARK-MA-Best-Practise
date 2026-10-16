@@ -36,6 +36,7 @@
     "type": "coordinator",
     "agents": [
       {"type": "agent", "id": "${agent_id.topic6-annotator}"},
+      {"type": "agent", "id": "${agent_id.topic6-validator}"},
       {"type": "agent", "id": "${agent_id.topic6-insighter}"},
       {"type": "self"}
     ]
