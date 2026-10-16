@@ -40,7 +40,7 @@ def resolve_session_id(job_id: str, db_path: str = "") -> str:
     """从 pipeline DB 查 job_id 对应的 ma_session_id。"""
     from pipeline_store import PipelineStore  # noqa: E402
 
-    # db_path 为空则让 PipelineStore 自己解析（TOPIC6_PIPELINE_DB_PATH env → DEFAULT_PIPELINE_DB_PATH）
+    # db_path 为空则让 PipelineStore 自己解析（env → DEFAULT_PIPELINE_DB_PATH）
     store = PipelineStore(db_path if db_path else None)
     print(f"  pipeline DB:  {store._path}")
     job = store.get_job(job_id)
