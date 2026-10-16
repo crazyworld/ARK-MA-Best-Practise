@@ -1,3 +1,9 @@
+---
+name: validator
+version: 1.0.0
+description: 通用质量验证 Agent 知识库。承载检查清单、验证规则、审计能力定义和辅助脚本。由 Validator sub-agent 在 HC 卡点前按 task 路由加载对应规则执行审计。
+---
+
 # Validator · 通用质量验证 Agent 知识库
 
 > **版本**: v1.0
