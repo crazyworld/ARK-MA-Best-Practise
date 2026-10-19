@@ -176,7 +176,7 @@ Coordinator 后台执行完整 C2。必须先发出 5 个委派，再立刻启�
   如实回报错误并停止。`--demo-fast` 用一次批量事件归并直接生成 C2 两列结果。该快速
   路径仅用于 50 条样本的流程演示，不得用于 full/skip_sampling 或正式业务结论。
 - 单入口内部固定执行正确的跨平台拓扑：四平台并行 `00_clean_titles.py` → `x0_merge_platforms.py` → merged 目录统一执行 `01→02→03→04→05→06→07→x2→x3→x4`。严禁在 x0 前按平台执行 01~04；x0 只读取阶段 00 的 `clean_titles.jsonl`，提前执行的 01~04 不会被合库。
-- C2 Chat 模型读取 `$C2_CHAT_MODEL_ID`，默认 `doubao-seed-evolving`；Embedding 模型读取 `$EMBEDDING_MODEL_ID`，默认 `doubao-embedding-vision-251215`。二者都不是 DataHub 的 `Doubao-Seed-1.6-lite`。
+- C2 Chat 模型读取 `$C2_CHAT_MODEL_ID`，默认 `Doubao-Seed-Evolving`；Embedding 模型读取 `$EMBEDDING_MODEL_ID`，默认 `Doubao-embedding`。二者都不是 DataHub 的 `Doubao-Seed-1.6-lite`。
 - 等待 R1~R5 的同一时期可读取 `04_标注/C2_事件归档/c2_run/c2_status.json`
   查看 C2 进度。若状态为 `running`，只读取状态，禁止重复启动；若 Session 恢复，
   可再次调用同一入口，它会按 `completed_stages` 续跑。

@@ -263,6 +263,8 @@ def test_relay_appends_resource_to_versioned_ark_base_url(monkeypatch):
             ]
         )
 
+    monkeypatch.delenv("LLM_RELAY_BASE_URL", raising=False)
+    monkeypatch.delenv("LLM_RELAY_API_KEY", raising=False)
     monkeypatch.setenv("ARK_BASE_URL", "https://ark.example/api/v3/")
     monkeypatch.setenv("ARK_API_KEY", "test-key")
     monkeypatch.setattr(module.urllib.request, "urlopen", fake_urlopen)
@@ -271,6 +273,29 @@ def test_relay_appends_resource_to_versioned_ark_base_url(monkeypatch):
     assert requested_urls == ["https://ark.example/api/v3/chat/completions"]
     assert requested_bodies[0]["stream"] is True
     assert requested_bodies[0]["stream_options"] == {"include_usage": True}
+
+
+def test_relay_prefers_llm_relay_env_over_ark_env(monkeypatch):
+    """BYOK Direct 模式：LLM_RELAY_* 必须优先于 ARK_*，后者仍专职方舟控制面。"""
+    module = _load_relay_module()
+    requested_urls = []
+
+    def fake_urlopen(request, timeout):
+        requested_urls.append(request.full_url)
+        assert request.headers["Authorization"] == "Bearer relay-key"
+        return _FakeStreamingHttpResponse(
+            [{"usage": {"prompt_tokens": 1, "completion_tokens": 1},
+              "choices": [{"finish_reason": "stop", "delta": {"content": "ok"}}]}]
+        )
+
+    monkeypatch.setenv("LLM_RELAY_BASE_URL", "https://bmc-llm-relay.example.com/v1")
+    monkeypatch.setenv("LLM_RELAY_API_KEY", "relay-key")
+    monkeypatch.setenv("ARK_BASE_URL", "https://ark.example/api/v3")
+    monkeypatch.setenv("ARK_API_KEY", "ark-control-plane-key")
+    monkeypatch.setattr(module.urllib.request, "urlopen", fake_urlopen)
+
+    module.Relay("test-model", 10, "system").call("hello")
+    assert requested_urls == ["https://bmc-llm-relay.example.com/v1/chat/completions"]
 
 
 def test_vision_embedder_uses_multimodal_protocol_one_text_per_request(monkeypatch):
@@ -290,9 +315,13 @@ def test_vision_embedder_uses_multimodal_protocol_one_text_per_request(monkeypat
     monkeypatch.setenv("ARK_API_KEY", "test-key")
     monkeypatch.delenv("EMBEDDING_BASE_URL", raising=False)
     monkeypatch.delenv("EMBEDDING_API_KEY", raising=False)
+    monkeypatch.delenv("LLM_RELAY_BASE_URL", raising=False)
+    monkeypatch.delenv("LLM_RELAY_API_KEY", raising=False)
     monkeypatch.setattr(module.urllib.request, "urlopen", fake_urlopen)
 
-    assert module.Embedder().embed(["hello", "world"], batch=64) == [
+    assert module.Embedder(model="doubao-embedding-vision-251215").embed(
+        ["hello", "world"], batch=64
+    ) == [
         [0.1, 0.2],
         [0.1, 0.2],
     ]
@@ -336,6 +365,8 @@ def test_embedder_keeps_standard_batch_protocol_for_legacy_override(monkeypatch)
     monkeypatch.setenv("ARK_API_KEY", "test-key")
     monkeypatch.delenv("EMBEDDING_BASE_URL", raising=False)
     monkeypatch.delenv("EMBEDDING_API_KEY", raising=False)
+    monkeypatch.delenv("LLM_RELAY_BASE_URL", raising=False)
+    monkeypatch.delenv("LLM_RELAY_API_KEY", raising=False)
     monkeypatch.setattr(module.urllib.request, "urlopen", fake_urlopen)
 
     embedder = module.Embedder(model="text-embedding-3-small")
@@ -547,7 +578,7 @@ def test_agent_prompts_use_canonical_model_id_and_allow_one_retry():
     assert "`Doubao-Seed-1.6-lite`" in coordinator
     assert '--model-id "$DATAHUB_MODEL_ID"' in annotator
     assert "C2_CHAT_MODEL_ID" in coordinator
-    assert "`doubao-seed-evolving`" in coordinator
+    assert "`Doubao-Seed-Evolving`" in coordinator
     assert "最多重试 1 次" in annotator
     assert "`Doubao-pro-32k`" not in coordinator
     assert "--model-id Doubao-pro-32k" not in annotator
@@ -1614,11 +1645,12 @@ def test_environment_preinstalls_openai_for_insight_pipeline():
     assert "openai>=1.0" in environment["config"]["packages"]["pip"]
     assert "httpx>=0.27" in environment["config"]["packages"]["pip"]
     assert environment["config"]["env"]["DATAHUB_MODEL_ID"] == "Doubao-Seed-1.6-lite"
-    assert environment["config"]["env"]["C2_CHAT_MODEL_ID"] == "doubao-seed-evolving"
+    assert environment["config"]["env"]["C2_CHAT_MODEL_ID"] == "Doubao-Seed-Evolving"
     assert (
         environment["config"]["env"]["EMBEDDING_MODEL_ID"]
-        == "doubao-embedding-vision-251215"
+        == "Doubao-embedding"
     )
+    assert environment["config"]["env"]["EMBEDDING_IS_MULTIMODAL"] == "false"
 
 
 def test_pipeline_f_does_not_duplicate_date_range_in_period_label():

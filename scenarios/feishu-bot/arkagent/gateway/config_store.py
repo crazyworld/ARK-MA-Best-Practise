@@ -71,6 +71,14 @@ class DigitalEmployee:
     name: str
     identity_prompt: str = ""
     model_id: str = "doubao-seed-evolving"
+    # BYOK Direct 模式（见《火山 Managed Agent BYOK 模型接入指南》）：model_mode="byok_direct" 时，
+    # model_provider/model_base_url/model_protocol/model_token_limits 均为必填，组装进 Agent 的
+    # model 字段；model_id 此时表示企业自有模型的实际 ID，而非方舟豆包目录里的 ID。
+    model_mode: str = "ark"
+    model_provider: Optional[str] = None
+    model_base_url: Optional[str] = None
+    model_protocol: Optional[str] = None
+    model_token_limits: Optional[dict] = None
     bundle_id: Optional[str] = None
     ark_agent_id: str = ""
     ark_agent_version: str = ""
@@ -150,6 +158,7 @@ class ConfigStore:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._create_schema()
+        self._migrate_schema()
         self._protect_files()
 
     def _create_schema(self) -> None:
@@ -171,6 +180,11 @@ class ConfigStore:
                 name TEXT NOT NULL,
                 identity_prompt TEXT NOT NULL DEFAULT '',
                 model_id TEXT NOT NULL DEFAULT 'doubao-seed-evolving',
+                model_mode TEXT NOT NULL DEFAULT 'ark',
+                model_provider TEXT,
+                model_base_url TEXT,
+                model_protocol TEXT,
+                model_token_limits_json TEXT,
                 bundle_id TEXT,
                 ark_agent_id TEXT NOT NULL DEFAULT '',
                 ark_agent_version TEXT NOT NULL DEFAULT '',
@@ -218,6 +232,23 @@ class ConfigStore:
             );
             """
         )
+
+    def _migrate_schema(self) -> None:
+        """对已存在的旧库补齐新增列（`CREATE TABLE IF NOT EXISTS` 对已存在表不生效）。"""
+        existing = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(digital_employee)").fetchall()
+        }
+        added_columns = {
+            "model_mode": "TEXT NOT NULL DEFAULT 'ark'",
+            "model_provider": "TEXT",
+            "model_base_url": "TEXT",
+            "model_protocol": "TEXT",
+            "model_token_limits_json": "TEXT",
+        }
+        for column, ddl in added_columns.items():
+            if column not in existing:
+                self._conn.execute(f"ALTER TABLE digital_employee ADD COLUMN {column} {ddl}")
 
     def _protect_files(self) -> None:
         for path in (
@@ -307,14 +338,20 @@ class ConfigStore:
             self._conn.execute(
                 """
                 INSERT INTO digital_employee
-                    (id, name, identity_prompt, model_id, bundle_id, ark_agent_id,
-                     ark_agent_version, sync_status, synced_at, sync_error,
+                    (id, name, identity_prompt, model_id, model_mode, model_provider,
+                     model_base_url, model_protocol, model_token_limits_json, bundle_id,
+                     ark_agent_id, ark_agent_version, sync_status, synced_at, sync_error,
                      created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     name=excluded.name,
                     identity_prompt=excluded.identity_prompt,
                     model_id=excluded.model_id,
+                    model_mode=excluded.model_mode,
+                    model_provider=excluded.model_provider,
+                    model_base_url=excluded.model_base_url,
+                    model_protocol=excluded.model_protocol,
+                    model_token_limits_json=excluded.model_token_limits_json,
                     bundle_id=excluded.bundle_id,
                     ark_agent_id=excluded.ark_agent_id,
                     ark_agent_version=excluded.ark_agent_version,
@@ -328,6 +365,13 @@ class ConfigStore:
                     employee.name,
                     employee.identity_prompt,
                     employee.model_id,
+                    employee.model_mode,
+                    employee.model_provider,
+                    employee.model_base_url,
+                    employee.model_protocol,
+                    json.dumps(employee.model_token_limits, ensure_ascii=False)
+                    if employee.model_token_limits
+                    else None,
                     employee.bundle_id,
                     employee.ark_agent_id,
                     employee.ark_agent_version,
@@ -367,6 +411,11 @@ class ConfigStore:
             name=row["name"],
             identity_prompt=row["identity_prompt"],
             model_id=row["model_id"],
+            model_mode=row["model_mode"],
+            model_provider=row["model_provider"],
+            model_base_url=row["model_base_url"],
+            model_protocol=row["model_protocol"],
+            model_token_limits=_loads(row["model_token_limits_json"], None),
             bundle_id=row["bundle_id"],
             ark_agent_id=row["ark_agent_id"],
             ark_agent_version=row["ark_agent_version"],

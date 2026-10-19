@@ -12,12 +12,15 @@
 
 可选环境变量（同 create_digital_employee_agent.py）：
   GROUP_BOT_MODEL_ID      默认 doubao-seed-evolving
+  GROUP_BOT_MODEL_MODE    ark（默认）| byok_direct；byok_direct 时需同时提供
+                          GROUP_BOT_MODEL_PROVIDER/BASE_URL/PROTOCOL/TOKEN_LIMITS
   GROUP_BOT_DISPLAY_NAME  默认「数字员工阿J」，写进 system prompt 供模型识别「@谁=在叫自己」，
                           应与飞书开放平台配的机器人显示名一致。
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 
 from shared import GROUP_BOT_NAME, build_group_system
@@ -27,6 +30,26 @@ from arkagent.gateway import ConfigStore, DigitalEmployee, MAControlPlane
 
 # 与 create 脚本共用的默认 persona id。
 DEFAULT_PERSONA_ID = "emp_group_bot_default"
+
+
+def _load_byok_overrides() -> dict:
+    """读取 BYOK Direct 模式的环境变量覆盖；model_mode 非 byok_direct 时返回空 dict。"""
+    model_mode = (os.environ.get("GROUP_BOT_MODEL_MODE") or "ark").strip() or "ark"
+    overrides: dict = {"model_mode": model_mode}
+    if model_mode != "byok_direct":
+        return overrides
+    token_limits_raw = (os.environ.get("GROUP_BOT_MODEL_TOKEN_LIMITS") or "").strip()
+    try:
+        token_limits = json.loads(token_limits_raw) if token_limits_raw else None
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"GROUP_BOT_MODEL_TOKEN_LIMITS 不是合法 JSON：{exc}") from exc
+    overrides.update(
+        model_provider=(os.environ.get("GROUP_BOT_MODEL_PROVIDER") or "").strip() or None,
+        model_base_url=(os.environ.get("GROUP_BOT_MODEL_BASE_URL") or "").strip() or None,
+        model_protocol=(os.environ.get("GROUP_BOT_MODEL_PROTOCOL") or "").strip() or None,
+        model_token_limits=token_limits,
+    )
+    return overrides
 
 
 async def _main() -> None:
@@ -42,6 +65,7 @@ async def _main() -> None:
         )
     base_url = (os.environ.get("ARK_BASE_URL") or "https://ark.cn-beijing.volces.com/api/v3").rstrip("/")
     model_id = (os.environ.get("GROUP_BOT_MODEL_ID") or "doubao-seed-evolving").strip()
+    byok_overrides = _load_byok_overrides()
     # bot 在飞书群里的显示名，写进 system prompt 供模型识别「@谁=在叫自己」；应与开放平台一致。
     bot_name = (os.environ.get("GROUP_BOT_DISPLAY_NAME") or "数字员工阿J").strip()
 
@@ -57,6 +81,8 @@ async def _main() -> None:
         persona.name = GROUP_BOT_NAME
         persona.identity_prompt = build_group_system(bot_name)
         persona.model_id = model_id
+        for field_name, value in byok_overrides.items():
+            setattr(persona, field_name, value)
         persona.ark_agent_id = agent_id  # 以入口 env 指定的现有 Agent 为准
         persona = await plane.sync_employee(persona)
     finally:

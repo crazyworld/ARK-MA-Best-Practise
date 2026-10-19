@@ -33,6 +33,7 @@ from shared import (
     GroupConversationKey,
     PreparedAttachment,
     SqliteSessionMap,
+    build_byok_extra_headers,
     build_lark_session_env,
     build_windowed_input,
     collect_round_resources,
@@ -183,6 +184,8 @@ class TopicSessionBot:
         self._sender = sender
         self._loop = loop
         self._execution_mode = execution_mode
+        # BYOK Direct 模式：按请求动态附加的模型鉴权 Header；config 未配置时为 None（原豆包模式）。
+        self._extra_headers = build_byok_extra_headers(config)
         default_db_path = (
             DEFAULT_TOPIC_DB_PATH
             if execution_mode == "serial"
@@ -358,6 +361,7 @@ class TopicSessionBot:
                     custom_tool_handler=lambda name, arguments: self._memory.handle_tool(
                         session_id, name, arguments
                     ),
+                    extra_headers=self._extra_headers,
                 )
             except ArkError as error:
                 if error.status_code != 404:
@@ -371,6 +375,7 @@ class TopicSessionBot:
                     custom_tool_handler=lambda name, arguments: self._memory.handle_tool(
                         session_id, name, arguments
                     ),
+                    extra_headers=self._extra_headers,
                 )
 
             if result.authorization_required:
@@ -554,7 +559,7 @@ class TopicSessionBot:
         delay = BACKOFF_BASE_S
         for attempt in range(MAX_409_RETRIES + 1):
             try:
-                await self._ark.send_message(session_id, actor_input)
+                await self._ark.send_message(session_id, actor_input, extra_headers=self._extra_headers)
                 log.info(
                     "%s 已直发 Session=%s，input 长度=%d",
                     message_log_tag(message),
@@ -643,6 +648,7 @@ class TopicSessionBot:
                                 custom_call["id"],
                                 output,
                                 is_error=is_error,
+                                extra_headers=self._extra_headers,
                             )
                         elif event_type == "agent.message":
                             text = event_text(event)
@@ -900,6 +906,7 @@ class TopicSessionBot:
             custom_tool_handler=lambda name, arguments: self._memory.handle_tool(
                 replacement, name, arguments
             ),
+            extra_headers=self._extra_headers,
         )
         if result.authorization_required:
             raise RuntimeError("授权后新 Session 仍未获得用户凭据，请联系管理员")
@@ -943,7 +950,7 @@ class TopicSessionBot:
             await self._mount_attachments(replacement, prepared)
             self._ensure_consumer(key, replacement, trigger)
             self._native_authorizing.discard(key_str)
-            await self._ark.send_message(replacement, actor_input)
+            await self._ark.send_message(replacement, actor_input, extra_headers=self._extra_headers)
 
         try:
             await self._request_user_authorization(trigger, authorization, _resume)

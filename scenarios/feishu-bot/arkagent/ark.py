@@ -162,10 +162,19 @@ class ArkClient:
     async def aclose(self) -> None:
         await self._client.aclose()
 
-    async def _request(self, method: str, path: str, body: Optional[dict] = None) -> dict:
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        body: Optional[dict] = None,
+        *,
+        extra_headers: Optional[dict] = None,
+    ) -> dict:
         headers = {"Accept": "application/json", "Authorization": f"Bearer {self.api_key}"}
         if body is not None:
             headers["Content-Type"] = "application/json"
+        if extra_headers:
+            headers.update(extra_headers)
         response = await self._client.request(
             method,
             f"{self.base_url}{path}",
@@ -624,8 +633,19 @@ class ArkClient:
             {"type": "file", "file_id": file_id, "mount_path": mount_path},
         )
 
-    async def send_message(self, session_id: str, text: str, system_message: Optional[str] = None) -> None:
-        """发送 user.message；若给了 system_message，追加为数组最后一个元素（卡点 C 动态系统提示词）。"""
+    async def send_message(
+        self,
+        session_id: str,
+        text: str,
+        system_message: Optional[str] = None,
+        *,
+        extra_headers: Optional[dict] = None,
+    ) -> None:
+        """发送 user.message；若给了 system_message，追加为数组最后一个元素（卡点 C 动态系统提示词）。
+
+        extra_headers：BYOK Direct 模式下按请求携带的模型鉴权 Header
+        （如 ``X-User-Model-Header-Authorization``），不写入 Agent/Session 的持久配置。
+        """
         events: list[dict] = [{"type": "user.message", "content": [{"type": "text", "text": text}]}]
         if system_message:
             events.append({"type": "system.message", "content": [{"type": "text", "text": system_message}]})
@@ -633,6 +653,7 @@ class ArkClient:
             "POST",
             f"/sessions/{quote(session_id, safe='')}/events",
             {"events": events},
+            extra_headers=extra_headers,
         )
 
     async def list_session_events(self, session_id: str, limit: int = 200) -> list[dict]:
@@ -667,6 +688,7 @@ class ArkClient:
         output: str,
         *,
         is_error: bool = False,
+        extra_headers: Optional[dict] = None,
     ) -> None:
         """回传客户端执行的 Custom Tool 结果，继续对应 Session 的 Agent 运行。"""
         await self._request(
@@ -682,6 +704,7 @@ class ArkClient:
                     }
                 ]
             },
+            extra_headers=extra_headers,
         )
 
     async def run(
@@ -694,6 +717,8 @@ class ArkClient:
         custom_tool_handler: Optional[
             Callable[[str, dict], Awaitable[tuple[str, bool]]]
         ] = None,
+        *,
+        extra_headers: Optional[dict] = None,
     ) -> RunResult:
         started_at = _now_ms()
         messages: list[str] = []
@@ -708,7 +733,9 @@ class ArkClient:
                 first_message_logged = False
                 async with self._open_event_stream(session_id) as stream:
                     with time_block("ark.run.send_message", session=session_id):
-                        await self.send_message(session_id, text, system_message=system_message)
+                        await self.send_message(
+                            session_id, text, system_message=system_message, extra_headers=extra_headers
+                        )
                     # 从「消息已发出」开始计时，衡量方舟侧首字节/首条消息/到终态的等待。
                     sw = Stopwatch()
                     async for event in stream:
@@ -737,6 +764,7 @@ class ArkClient:
                                 custom_call["id"],
                                 output,
                                 is_error=is_error,
+                                extra_headers=extra_headers,
                             )
                         elif event.get("type") == "agent.message":
                             body = event_text(event)

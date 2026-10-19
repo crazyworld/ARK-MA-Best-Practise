@@ -623,12 +623,12 @@ def main() -> int:
     parser.add_argument("--input")
     parser.add_argument(
         "--chat-model",
-        default=os.environ.get("C2_CHAT_MODEL_ID") or "doubao-seed-evolving",
+        default=os.environ.get("C2_CHAT_MODEL_ID") or "Doubao-Seed-Evolving",
     )
     parser.add_argument(
         "--embedding-model",
         default=os.environ.get("EMBEDDING_MODEL_ID")
-        or "doubao-embedding-vision-251215",
+        or "Doubao-embedding",
     )
     parser.add_argument(
         "--x2-verdict",

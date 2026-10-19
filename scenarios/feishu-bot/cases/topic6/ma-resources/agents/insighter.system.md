@@ -62,7 +62,7 @@
    python /mnt/skills/topic6-annotation/tool/cost-tracker/cost_tracker.py \
      --project-dir "/workspace/Projects/{project_dir}" \
      --phase E --task "{section}" --tool direct-llm \
-     --model doubao-seed-2-1-pro-260628 \
+     --model Doubao-Seed-Evolving \
      --input-tokens {N} --output-tokens {N}
    ```
 

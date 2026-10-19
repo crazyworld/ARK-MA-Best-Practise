@@ -6,8 +6,10 @@ E 阶段洞察生成 pipeline（MA 版）
 MA 适配要点：
   - 删掉 PROJECT_ROOT.parents[1] 上溯（MA 沙箱下 skill 路径 /mnt/skills/topic6-insight/，
     项目路径独立在 /workspace/Projects/ 下）
-  - anthropic SDK → openai 兼容 SDK（AsyncOpenAI），走火山方舟 endpoint
-    * ARK_BASE_URL / ARK_API_KEY（fallback OPENAI_BASE_URL / OPENAI_API_KEY）
+  - anthropic SDK → openai 兼容 SDK（AsyncOpenAI），走方舟/企业网关 endpoint
+    * LLM_RELAY_BASE_URL / LLM_RELAY_API_KEY（fallback ARK_BASE_URL / ARK_API_KEY，
+      再 fallback OPENAI_BASE_URL / OPENAI_API_KEY）。接入企业网关请用 LLM_RELAY_*，
+      不要改 ARK_*——那两个同时被部署脚本用来调方舟控制面。
   - cost-tracker 从 topic6-annotation skill 挂载路径调用（annotation/insight 共用同一份）
 
 设计原则：
@@ -720,13 +722,17 @@ async def run_all_sections(
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     reuse_completed: bool = True,
 ) -> list:
-    api_key = os.environ.get("ARK_API_KEY") or os.environ.get("OPENAI_API_KEY")
+    api_key = (os.environ.get("LLM_RELAY_API_KEY")
+               or os.environ.get("ARK_API_KEY")
+               or os.environ.get("OPENAI_API_KEY"))
     if not api_key:
-        raise EnvironmentError("ARK_API_KEY / OPENAI_API_KEY 均未设置")
+        raise EnvironmentError("LLM_RELAY_API_KEY / ARK_API_KEY / OPENAI_API_KEY 均未设置")
 
-    base_url = os.environ.get("ARK_BASE_URL") or os.environ.get("OPENAI_BASE_URL")
+    base_url = (os.environ.get("LLM_RELAY_BASE_URL")
+                or os.environ.get("ARK_BASE_URL")
+                or os.environ.get("OPENAI_BASE_URL"))
     if not base_url:
-        raise EnvironmentError("ARK_BASE_URL / OPENAI_BASE_URL 均未设置")
+        raise EnvironmentError("LLM_RELAY_BASE_URL / ARK_BASE_URL / OPENAI_BASE_URL 均未设置")
 
     semaphore = asyncio.Semaphore(max_workers)
 
@@ -921,8 +927,8 @@ def main():
         default="skip_sampling",
     )
     parser.add_argument("--publish-date", default=None)
-    parser.add_argument("--model", default="doubao-seed-evolving",
-                        help="LLM 模型 ID(MA 环境请传火山方舟 endpoint id)")
+    parser.add_argument("--model", default="Doubao-Seed-Evolving",
+                        help="LLM 模型 ID(MA 环境请传网关实际接受的模型标识,大小写需完全一致)")
     parser.add_argument("--version", type=int, default=None)
     parser.add_argument("--skip-data-prep", action="store_true")
     parser.add_argument("--data-run-id", type=int, default=None)
