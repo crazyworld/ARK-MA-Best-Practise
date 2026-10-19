@@ -363,6 +363,56 @@ class ArkClient:
         )
         return _response_id(payload, "Credential")
 
+    async def create_env_oauth_credential(
+        self,
+        vault_id: str,
+        display_name: str,
+        secret_name: str,
+        access_token: str,
+        expires_at_iso: str,
+        *,
+        token_endpoint: str,
+        client_id: str,
+        client_secret: str,
+        refresh_token: str,
+        scope: str = "",
+    ) -> str:
+        """创建 env_oauth 凭据——平台在 access_token 临近过期时自动调 token_endpoint 刷新。
+
+        与 environment_variable 的区别：平台在沙箱出站请求使用该凭据时检测过期窗口
+        （expires_at 前 5 分钟），自动调 refresh.token_endpoint 换取新 access_token，
+        整个 Session 生命周期内无需 Gateway 侧手动轮换。
+
+        secret_name 决定了沙箱内注入的环境变量名（如 LARKSUITE_CLI_USER_ACCESS_TOKEN）。
+        """
+        refresh: dict = {
+            "token_endpoint": token_endpoint,
+            "client_id": client_id,
+            "refresh_token": refresh_token,
+            "token_endpoint_auth": {
+                "type": "client_secret_post",
+                "client_secret": client_secret,
+            },
+        }
+        if scope:
+            refresh["scope"] = scope
+        payload = await self._request(
+            "POST",
+            f"/vaults/{quote(vault_id, safe='')}/credentials",
+            {
+                "display_name": display_name,
+                "auth": {
+                    "type": "env_oauth",
+                    "access_token": access_token,
+                    "expires_at": expires_at_iso,
+                    "refresh": refresh,
+                    "secret_name": secret_name,
+                    "networking": {"type": "unrestricted"},
+                },
+            },
+        )
+        return _response_id(payload, "Credential")
+
     async def update_environment_credential(
         self, vault_id: str, credential_id: str, secret_value: str
     ) -> None:

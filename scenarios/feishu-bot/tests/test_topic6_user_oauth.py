@@ -51,6 +51,7 @@ class FakeArk:
         self.credentials = []
         self.created_vaults = []
         self.created_credentials = []
+        self.deleted_credentials = []
         self.updated = []
         self.session_vault_ids = None
 
@@ -82,6 +83,31 @@ class FakeArk:
         )
         return credential_id
 
+    async def create_env_oauth_credential(
+        self, vault_id, display_name, secret_name, access_token, expires_at_iso,
+        *, token_endpoint, client_id, client_secret, refresh_token, scope="",
+    ):
+        credential_id = f"cred-{len(self.credentials) + 1}"
+        item = {
+            "id": credential_id,
+            "vault_id": vault_id,
+            "display_name": display_name,
+            "secret_name": secret_name,
+            "type": "env_oauth",
+        }
+        self.credentials.append(item)
+        self.created_credentials.append(
+            (vault_id, display_name, secret_name, "env_oauth")
+        )
+        return credential_id
+
+    async def delete_credential(self, vault_id, credential_id):
+        self.deleted_credentials.append((vault_id, credential_id))
+        self.credentials = [
+            c for c in self.credentials
+            if not (c.get("vault_id") == vault_id and c.get("id") == credential_id)
+        ]
+
     async def update_environment_credential(
         self, vault_id, credential_id, secret_value
     ):
@@ -106,6 +132,8 @@ class FakeOAuth:
         self.poll_count = 0
         self.refresh_count = 0
         self.requested_scopes = []
+        self.app_id = "fake-app-id"
+        self.app_secret = "fake-app-secret"
 
     async def begin(self, scopes):
         self.requested_scopes.append(scopes)
@@ -154,8 +182,10 @@ async def test_authorize_auto_detects_open_id_and_is_idempotent(tmp_path):
     assert saved["refresh_token"] == "refresh-2"
     assert saved["scopes"] == APPS_USER_SCOPES
     assert len(ark.created_vaults) == 1
-    assert len(ark.created_credentials) == 1
-    assert ark.updated == [("vlt-1", "cred-1", "access-2")]
+    # 第一次 authorize 创建 env_oauth；第二次 authorize 删旧 + 重建 env_oauth。
+    assert len(ark.created_credentials) == 2
+    assert len(ark.deleted_credentials) == 1
+    assert ark.updated == []
     store.close()
 
 

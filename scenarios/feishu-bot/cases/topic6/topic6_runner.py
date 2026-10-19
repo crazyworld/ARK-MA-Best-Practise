@@ -58,7 +58,7 @@ MODE_FULL_KEYWORDS = ("full", "完整", "正式", "test", "小样本", "试跑")
 # ---- idle 自动续跑 ----
 # Agent 在 pipeline 中途偶发 end_turn 后，Runner 通过 MA send_message 注入催促
 # 消息唤醒 idle session。最多重试 MAX_IDLE_NUDGES 次，超限才判终态。
-MAX_IDLE_NUDGES = 2
+MAX_IDLE_NUDGES = 3
 # HC 卡点的 idle 是正常业务行为（等人审），不做自动催促。
 _HC_PHASE_PREFIXES = tuple(HC_KINDS)
 MODE_SKIP_SAMPLING_KEYWORDS = (
@@ -1188,13 +1188,14 @@ def extract_final_online_url(text: str) -> str:
             (hostname == "feishuapp.cn" or hostname.endswith(".feishuapp.cn"))
             and re.fullmatch(r"/app/app_[A-Za-z0-9]+/?", parsed.path) is not None
         )
+        is_blueai_cdn = hostname.endswith(".bluemediacdn.com")
         if (
             parsed.scheme == "https"
             and parsed.query == ""
             and parsed.fragment == ""
             and parsed.username is None
             and parsed.password is None
-            and (is_aiforce or is_feishuapp)
+            and (is_aiforce or is_feishuapp or is_blueai_cdn)
         ):
             return candidate
     return ""
