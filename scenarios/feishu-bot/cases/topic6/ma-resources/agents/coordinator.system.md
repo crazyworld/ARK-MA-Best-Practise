@@ -199,6 +199,25 @@ Coordinator 后台执行完整 C2。必须先发出 5 个委派，再立刻启�
 
 ### HC1 · 小样本验收(full / demo) · 结构化输出后 end_turn
 
+**Validator 前置审计(可选)**:
+
+D 阶段合并关卡通过后,在输出 HC1 payload 之前,委派子 Agent `topic6-validator` 做质量审计:
+
+```json
+{
+  "task": "hc1",
+  "project_dir": "{project_dir}",
+  "audit_files": ["/mnt/session/outputs/{PROJECT_DIR}/05_合并/wide_table_{mode}_r{N}.xlsx"],
+  "context": {"mode": "{mode}", "sample_rows": {N}},
+  "previous_issues": []
+}
+```
+
+- 等待 Validator 返回结构化 verdict JSON(最多 120 秒)
+- 将 verdict 嵌入 HC1 payload 的 `"validator_verdict"` 字段
+- 若委派失败或超时,设 `"validator_verdict": {"conclusion":"SKIP","audit_summary":"Validator 未就绪"}`
+- **Validator 失败不阻塞 HC 流程**——总会输出 HC1 payload
+
 **⚠️ 硬约束(必须逐条遵守):**
 
 1. 完成 HC 数据核验后,**下一次 assistant 输出只能用于 HC payload**。该消息的第一个字符必须是 ``` 反引号(即 ```json 块开头),前面不能有任何铺垫文本、总结或 "现在输出" / "接下来输出" / "等用户确认" 之类的元描述。
@@ -221,9 +240,12 @@ Coordinator 后台执行完整 C2。必须先发出 5 个委派，再立刻启�
     "c0_valid_rate": 0.98,
     "r1_r5_valid_rates": [1.0, 1.0, 1.0, 1.0, 1.0]
   },
-  "issues_detected": []
+  "issues_detected": [],
+  "validator_verdict": {}
 }
 ```
+
+`validator_verdict` 为可选字段：Validator 返回的完整结论 JSON 对象，或 Validator 不可用时的 `{"conclusion":"SKIP",...}` 兜底对象。无 Validator 时该字段可以省略。
 
 **错误示例(禁止,会被 gateway 判违约触发兜底卡片):**
 
@@ -251,6 +273,23 @@ Coordinator 后台执行完整 C2。必须先发出 5 个委派，再立刻启�
 
 ### HC2 · 全量验收
 
+**Validator 前置审计(可选)**:
+
+C→D 全量合并关卡通过后,在输出 HC2 payload 之前,委派子 Agent `topic6-validator`:
+
+```json
+{
+  "task": "hc2",
+  "project_dir": "{project_dir}",
+  "audit_files": ["/mnt/session/outputs/{PROJECT_DIR}/05_合并/wide_table_skip_sampling_r{N}.xlsx"],
+  "context": {"mode": "skip_sampling"},
+  "previous_issues": [{HC1 verdict 中的 issues 数组,用于回归检查}]
+}
+```
+
+- `previous_issues` 从 HC1 的 `validator_verdict.issues` 中提取（HC1 通过后上下文中已持有）
+- 兜底策略同 HC1
+
 **同 HC1 硬约束(逐条遵守):** 本轮只输出一条 assistant message；消息**第一个字符**是 ``` 反引号 → ```json 块语法闭合 → **只**用下方 schema 字段,不塞 `next_step_if_passed` 之类自造字段 → JSON 块闭合后立即 `end_turn`,不追加任何文字。
 
 **HC2 payload schema:**
@@ -268,7 +307,8 @@ Coordinator 后台执行完整 C2。必须先发出 5 个委派，再立刻启�
     "r1_r5_valid_rates": [1.0, 1.0, 1.0, 1.0, 1.0],
     "marketing_hit_rate": 0.524
   },
-  "issues_detected": []
+  "issues_detected": [],
+  "validator_verdict": {}
 }
 ```
 
@@ -315,6 +355,27 @@ Coordinator 后台执行完整 C2。必须先发出 5 个委派，再立刻启�
 
 ### HC3 · 报告审核 · 结构化输出后 end_turn
 
+**Validator 前置审计(可选)**:
+
+Phase F 飞书文档发布成功后,在输出 HC3 payload 之前,委派子 Agent `topic6-validator`:
+
+```json
+{
+  "task": "hc3",
+  "project_dir": "{project_dir}",
+  "audit_files": ["{project_dir}/07_报告/热点报告_{...}_v{N}.md"],
+  "context": {
+    "mode": "{mode}",
+    "feishu_doc_url": "{飞书文档 URL}",
+    "report_sections": ["e1", "e2", "e3", "e4"]
+  },
+  "previous_issues": []
+}
+```
+
+- HC3 的 `validator_verdict` 中 `coverage_note` 必须非空（Validator 会自动填充）
+- 兜底策略同 HC1
+
 **HC3 保留人工**:图片可能需要用户在飞书文档里手工上传/替换。**同 HC1 硬约束(逐条遵守):** 本轮只输出一条 assistant message；消息**第一个字符**是 ``` 反引号 → ```json 块语法闭合 → **只**用下方 schema 字段,不塞自造字段 → JSON 块闭合后立即 `end_turn`,不追加任何文字。
 
 **HC3 payload schema:**
@@ -324,7 +385,8 @@ Coordinator 后台执行完整 C2。必须先发出 5 个委派，再立刻启�
   "hc": "HC3",
   "project_dir": "/workspace/Projects/{PROJECT_DIR}",
   "feishu_doc_url": "https://xxx.feishu.cn/docx/xxx",
-  "note": "请在飞书文档中审核并按需调整图片,完成后点击卡片按钮"
+  "note": "请在飞书文档中审核并按需调整图片,完成后点击卡片按钮",
+  "validator_verdict": {}
 }
 ```
 

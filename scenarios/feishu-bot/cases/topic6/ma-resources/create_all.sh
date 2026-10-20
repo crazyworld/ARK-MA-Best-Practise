@@ -327,6 +327,13 @@ annotator_resp=$(ark_post "/agents" "$annotator_payload")
 AGENT_ANNOTATOR_ID=$(extract_id "$annotator_resp")
 echo "AGENT_ANNOTATOR_ID=$AGENT_ANNOTATOR_ID"
 
+step "5.5) 创建子 Agent topic6-validator"
+delete_agent_if_exists "topic6-validator"
+validator_payload=$(render_agent_json validator.json validator.system.md)
+validator_resp=$(ark_post "/agents" "$validator_payload")
+AGENT_VALIDATOR_ID=$(extract_id "$validator_resp")
+echo "AGENT_VALIDATOR_ID=$AGENT_VALIDATOR_ID"
+
 step "6) 创建子 Agent topic6-insighter"
 INSIGHTER_NAME="$(suffixed topic6-insighter)"
 delete_agent_if_exists "$INSIGHTER_NAME"
@@ -341,10 +348,11 @@ step "7) 创建协调器 topic6-coordinator"
 COORDINATOR_NAME="$(suffixed topic6-coordinator)"
 delete_agent_if_exists "$COORDINATOR_NAME"
 coordinator_payload=$(render_agent_json coordinator.json coordinator.system.md \
-  | jq --arg a "$AGENT_ANNOTATOR_ID" --arg i "$AGENT_INSIGHTER_ID" --arg name "$COORDINATOR_NAME" '
+  | jq --arg a "$AGENT_ANNOTATOR_ID" --arg i "$AGENT_INSIGHTER_ID" --arg v "$AGENT_VALIDATOR_ID" '
       (.. | strings) |= (
           gsub("\\$\\{agent_id.topic6-annotator\\}"; $a) |
-          gsub("\\$\\{agent_id.topic6-insighter\\}"; $i)
+          gsub("\\$\\{agent_id.topic6-insighter\\}"; $i) |
+          gsub("\\$\\{agent_id.topic6-validator\\}"; $v)
       )
       | .name = $name
   ')
@@ -359,7 +367,8 @@ cat >"$ROOT/created_ids.json" <<EOF
   "memory_store_id": "$MEMORY_STORE_ID",
   "agent_coordinator_id": "$AGENT_COORDINATOR_ID",
   "agent_annotator_id": "$AGENT_ANNOTATOR_ID",
-  "agent_insighter_id": "$AGENT_INSIGHTER_ID"
+  "agent_insighter_id": "$AGENT_INSIGHTER_ID",
+  "agent_validator_id": "$AGENT_VALIDATOR_ID"
 }
 EOF
 echo -e "\n完成。ID 落盘: $ROOT/created_ids.json"

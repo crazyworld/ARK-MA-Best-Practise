@@ -24,6 +24,10 @@ APPS_USER_SCOPES = (
 MAX_VAULT_SECRET_BYTES = 4096
 # 给 Vault 周期性重新解析留出传播窗口，避免长任务在 Phase H 临界过期。
 REFRESH_EARLY_MS = 15 * 60_000
+# 飞书 OAuth token endpoint（v2 接口，返回标准 JSON）。
+FEISHU_TOKEN_ENDPOINT = "https://open.feishu.cn/open-apis/authen/v2/oauth/token"
+# expires_at 存储为 0 表示"该凭据由 Ark 平台自动刷新，Gateway 不做手动 refresh"。
+PLATFORM_MANAGED_EXPIRES_AT = 0
 
 
 class UserAuthorizationRequired(RuntimeError):
@@ -57,6 +61,14 @@ class FeishuOAuth:
         self._app_id = app_id
         self._app_secret = app_secret
         self._client = client
+
+    @property
+    def app_id(self) -> str:
+        return self._app_id
+
+    @property
+    def app_secret(self) -> str:
+        return self._app_secret
 
     async def begin(
         self, scopes: tuple[str, ...] = APPS_USER_SCOPES
@@ -187,25 +199,36 @@ class Topic6UserAuthorization:
             raise RuntimeError(
                 "扫码账号与 --expected-open-id 不一致，未写入任何凭据"
             )
-        credential = await self._ensure_credential(open_id, tokens.access_token)
+        credential = await self._ensure_credential(
+            open_id, tokens.access_token, tokens.refresh_token, tokens.expires_at,
+        )
         self._store.save_user_oauth(
             open_id,
             credential["vault_id"],
             credential["credential_id"],
             tokens.refresh_token,
-            tokens.expires_at,
+            PLATFORM_MANAGED_EXPIRES_AT,
             APPS_USER_SCOPES,
         )
         return open_id
 
     async def vault_id(self, open_id: str) -> str:
-        """返回该用户的可用 Vault；必要时先刷新短期 access token。"""
+        """返回该用户的可用 Vault。
+
+        env_oauth 凭据由平台自动刷新（expires_at == PLATFORM_MANAGED_EXPIRES_AT），
+        Gateway 不再手动 refresh，直接返回 vault_id。
+        仅对旧的 environment_variable 凭据保留手动 refresh 兼容路径。
+        """
         current = self._store.get_user_oauth(open_id)
         if not current or not current.get("refresh_token"):
             raise UserAuthorizationRequired(
                 "当前飞书账号尚未授权妙搭发布。请先在 Gateway 主机运行 "
                 "`python cases/topic6/authorize_miaoda_user.py` 完成扫码授权。"
             )
+        # env_oauth 凭据：平台自动刷新，Gateway 不介入。
+        if current["expires_at"] == PLATFORM_MANAGED_EXPIRES_AT:
+            return current["vault_id"]
+        # 旧 environment_variable 凭据：沿用手动 refresh 兼容路径。
         if current["expires_at"] - _now_ms() > REFRESH_EARLY_MS:
             return current["vault_id"]
 
@@ -246,18 +269,53 @@ class Topic6UserAuthorization:
             return current["vault_id"]
 
     async def _ensure_credential(
-        self, open_id: str, access_token: str
+        self,
+        open_id: str,
+        access_token: str,
+        refresh_token: str,
+        expires_at_ms: int,
     ) -> dict[str, str]:
+        """确保 Vault 中有 env_oauth 凭据。
+
+        - 首次授权：创建 Vault + env_oauth credential。
+        - 重复授权：更新已有 credential（删旧建新，因为 secret_name 是结构性字段不可改类型）。
+        - 旧 environment_variable → 自动迁移为 env_oauth。
+        """
+        expires_at_iso = (
+            time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(expires_at_ms / 1000))
+        )
+        scope = " ".join(APPS_USER_SCOPES)
         current = self._store.get_user_oauth(open_id)
         if current:
-            await self._ark.update_environment_credential(
-                current["vault_id"], current["credential_id"], access_token
+            # 删除旧凭据（无论 environment_variable 还是旧 env_oauth），重建为最新配置。
+            # secret_name 是结构性字段（创建后锁定），凭据类型不可原地更改，必须删后重建。
+            try:
+                await self._ark.delete_credential(
+                    current["vault_id"], current["credential_id"],
+                )
+            except Exception:  # noqa: BLE001 - 旧凭据可能已不存在
+                log.warning(
+                    "topic6 delete old credential failed vault=%s cred=%s (may already be gone)",
+                    current["vault_id"], current["credential_id"],
+                )
+            credential_id = await self._ark.create_env_oauth_credential(
+                current["vault_id"],
+                USER_CREDENTIAL_NAME,
+                USER_ACCESS_TOKEN_ENV,
+                access_token,
+                expires_at_iso,
+                token_endpoint=FEISHU_TOKEN_ENDPOINT,
+                client_id=self._oauth.app_id,
+                client_secret=self._oauth.app_secret,
+                refresh_token=refresh_token,
+                scope=scope,
             )
             return {
                 "vault_id": current["vault_id"],
-                "credential_id": current["credential_id"],
+                "credential_id": credential_id,
             }
 
+        # 首次授权：创建 Vault + env_oauth credential。
         safe_open_id = re.sub(r"[^a-z0-9-]+", "-", open_id.lower()).strip("-")
         vault_name = f"ark-topic6-miaoda-user-{safe_open_id or 'user'}"[:100]
         vault_id = next(
@@ -271,7 +329,8 @@ class Topic6UserAuthorization:
         if not vault_id:
             vault_id = await self._ark.create_vault(vault_name)
 
-        credential_id = next(
+        # 清理 Vault 中可能残留的同名旧凭据（环境迁移 / 手动重试后的遗留）。
+        existing_credential_id = next(
             (
                 str(credential["id"])
                 for credential in await self._ark.list_credentials(vault_id)
@@ -279,17 +338,27 @@ class Topic6UserAuthorization:
             ),
             "",
         )
-        if credential_id:
-            await self._ark.update_environment_credential(
-                vault_id, credential_id, access_token
-            )
-        else:
-            credential_id = await self._ark.create_environment_variable_credential(
-                vault_id,
-                USER_CREDENTIAL_NAME,
-                USER_ACCESS_TOKEN_ENV,
-                access_token,
-            )
+        if existing_credential_id:
+            try:
+                await self._ark.delete_credential(vault_id, existing_credential_id)
+            except Exception:  # noqa: BLE001
+                log.warning(
+                    "topic6 delete stale credential failed vault=%s cred=%s",
+                    vault_id, existing_credential_id,
+                )
+
+        credential_id = await self._ark.create_env_oauth_credential(
+            vault_id,
+            USER_CREDENTIAL_NAME,
+            USER_ACCESS_TOKEN_ENV,
+            access_token,
+            expires_at_iso,
+            token_endpoint=FEISHU_TOKEN_ENDPOINT,
+            client_id=self._oauth.app_id,
+            client_secret=self._oauth.app_secret,
+            refresh_token=refresh_token,
+            scope=scope,
+        )
         return {"vault_id": vault_id, "credential_id": credential_id}
 
 

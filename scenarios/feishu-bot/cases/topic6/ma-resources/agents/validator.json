@@ -1,0 +1,14 @@
+{
+  "name": "topic6-validator",
+  "description": "通用质量验证子 Agent。由 Coordinator 在 HC 卡点前委派，按检查清单审计数据/报告质量，返回结构化 verdict。",
+  "model": {
+    "id": "doubao-seed-2-1-pro-260628"
+  },
+  "system_file": "validator.system.md",
+  "skills": [
+    {"type": "custom", "skill_id": "${skill_id.validator}", "version": "${version.validator}"}
+  ],
+  "tools": [
+    {"type": "agent_toolset_20260701"}
+  ]
+}
