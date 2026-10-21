@@ -70,6 +70,7 @@ class Gateway:
         memory_manager: Optional[MemoryManager] = None,
         before_create_session: Optional[Callable[[], Awaitable[None]]] = None,
         loop: Optional[asyncio.AbstractEventLoop] = None,
+        extra_headers: Optional[dict] = None,
     ) -> None:
         self._store = store
         self._ark = ark
@@ -85,6 +86,8 @@ class Gateway:
         self._before_create_session = before_create_session
         self._loop = loop
         self._queue = KeyedQueue()
+        # BYOK Direct 模式：按请求动态附加的模型鉴权 Header；未配置时为 None（原豆包模式）。
+        self._extra_headers = extra_headers
 
     def accept(self, message: IncomingMessage) -> bool:
         """同步入口（可能被 WS 线程调用）：去重后把处理协程调度到事件循环。"""
@@ -177,7 +180,10 @@ class Gateway:
         try:
             # 不传 on_progress：避免把 tool_use/tool_result 转成进度消息刷屏。
             with time_block("gateway.run", session=session_id, first=first_message):
-                result = await self._ark.run(session_id, message.text, self._timeout_ms, system_message=system_message)
+                result = await self._ark.run(
+                session_id, message.text, self._timeout_ms, system_message=system_message,
+                extra_headers=self._extra_headers,
+            )
         finally:
             if progress_task is not None:
                 progress_task.cancel()

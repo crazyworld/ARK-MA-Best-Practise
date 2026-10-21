@@ -413,6 +413,11 @@ def build_gateway(config: Topic6Config, ark, sender, loop: asyncio.AbstractEvent
             vault_ids=(config.vault_id,) if config.vault_id else (),
         ),
         loop=loop,
+        extra_headers=(
+            {f"X-User-Model-Header-{config.model_auth_header_name}": config.model_auth_header_value}
+            if config.model_auth_header_name and config.model_auth_header_value
+            else None
+        ),
     )
     hitl = Topic6Hitl(Topic6HitlDeps(store=pipeline_store, runner=runner))
     runner.bind_card_sender(hitl)

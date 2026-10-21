@@ -20,6 +20,10 @@ DEFAULT_MODEL_ID = "doubao-seed-evolving"
 DEFAULT_METADATA = {"created_via": "group-bot-demo", "scenario": "feishu-digital-employee"}
 DEFAULT_BUILTIN_TOOLS = ("web_search", "web_fetch")
 
+# BYOK Direct 模式仅支持这两种协议，详见《火山 Managed Agent BYOK 模型接入指南》。
+BYOK_SUPPORTED_PROTOCOLS = ("openai_chat_completions", "anthropic_messages")
+BYOK_TOKEN_LIMIT_KEYS = ("context_window", "max_input_token_length", "max_output_token_length")
+
 
 def build_memory_custom_tools() -> list[dict]:
     """长期记忆 4 个 Custom Tool。作用域由外部网关强制绑定，工具不接受 store/scope 参数。"""
@@ -112,6 +116,47 @@ def _builtin_tool_configs(toggles: dict) -> list[dict]:
     return configs
 
 
+def _build_model_field(employee: DigitalEmployee) -> dict:
+    """装配 ``model`` 字段：``model_mode="ark"`` 走方舟豆包目录；``"byok_direct"`` 走企业自有 Endpoint。"""
+    if employee.model_mode != "byok_direct":
+        return {"id": employee.model_id or DEFAULT_MODEL_ID}
+
+    missing = [
+        field_name
+        for field_name, value in (
+            ("model_id", employee.model_id),
+            ("model_provider", employee.model_provider),
+            ("model_base_url", employee.model_base_url),
+            ("model_protocol", employee.model_protocol),
+            ("model_token_limits", employee.model_token_limits),
+        )
+        if not value
+    ]
+    if missing:
+        raise ValueError(
+            f"数字员工 {employee.id} 配置为 byok_direct 模式但缺少必填字段：{', '.join(missing)}"
+        )
+    if employee.model_protocol not in BYOK_SUPPORTED_PROTOCOLS:
+        raise ValueError(
+            f"数字员工 {employee.id} 的 model_protocol={employee.model_protocol!r} 不受支持，"
+            f"仅支持 {BYOK_SUPPORTED_PROTOCOLS}"
+        )
+    token_limits = employee.model_token_limits or {}
+    for key in BYOK_TOKEN_LIMIT_KEYS:
+        if not isinstance(token_limits.get(key), int) or token_limits[key] <= 0:
+            raise ValueError(
+                f"数字员工 {employee.id} 的 model_token_limits.{key} 必须是大于 0 的整数"
+            )
+
+    return {
+        "id": employee.model_id,
+        "provider": employee.model_provider,
+        "base_url": employee.model_base_url,
+        "protocol": employee.model_protocol,
+        "token_limits": {key: token_limits[key] for key in BYOK_TOKEN_LIMIT_KEYS},
+    }
+
+
 def build_agent_config(
     employee: DigitalEmployee,
     bundle: Optional[CapabilityBundle] = None,
@@ -119,7 +164,8 @@ def build_agent_config(
     """从数字员工 + 能力包装配方舟 Agent 定义 dict。
 
     - ``employee.identity_prompt`` → ``system``（persona 的完整系统提示词，由上游渲染好）。
-    - ``employee.model_id`` → ``model.id``。
+    - ``employee.model_id`` → ``model.id``；``model_mode="byok_direct"`` 时额外装配
+      ``provider``/``base_url``/``protocol``/``token_limits``（企业自有模型 Direct 接入）。
     - ``bundle.skills`` → ``skills[]``；``bundle.mcp_servers`` → ``mcp_servers[]`` + ``mcp_toolset`` 工具。
     - ``bundle.builtin_tool_toggles`` → ``agent_toolset_20260701.configs``。
     - 始终追加 memory 4 个 custom 工具。
@@ -148,7 +194,7 @@ def build_agent_config(
     config: dict = {
         "name": employee.name,
         "description": DEFAULT_AGENT_DESCRIPTION,
-        "model": {"id": employee.model_id or DEFAULT_MODEL_ID},
+        "model": _build_model_field(employee),
         "system": employee.identity_prompt,
         "tools": tools,
         "skills": list(bundle.skills) if (bundle and bundle.skills) else [],

@@ -40,6 +40,7 @@ class FakeArk:
         self.last_vaults = None
         self.last_resources = None
         self.last_system_message = "unset"
+        self.last_extra_headers = "unset"
         self._run_result = run_result or RunResult(terminal="idle", messages=["回复"])
 
     async def create_session(self, agent_id, environment_id, vault_ids=None, env_overrides=None, resources=None):
@@ -49,9 +50,10 @@ class FakeArk:
         self.last_resources = resources
         return f"session-{self.creates}"
 
-    async def run(self, session_id, text, timeout_ms, on_progress=None, system_message=None):
+    async def run(self, session_id, text, timeout_ms, on_progress=None, system_message=None, extra_headers=None):
         self.runs += 1
         self.last_system_message = system_message
+        self.last_extra_headers = extra_headers
         return self._run_result
 
 
@@ -106,6 +108,28 @@ async def test_gateway_dedupes_and_reuses_session():
     assert ark.creates == 1
     assert ark.runs == 2
     assert replies == ["已收到，正在处理。首次启动可能需要几分钟。", "回复", "回复"]
+
+
+async def test_gateway_without_extra_headers_passes_none_to_run():
+    store = GatewayStore(":memory:")
+    ark = FakeArk()
+    replies: list[str] = []
+    gw = _gateway(store, ark, replies)
+    gw.accept(message())
+    await asyncio.sleep(0.05)
+    assert ark.last_extra_headers is None
+
+
+async def test_gateway_forwards_byok_extra_headers_to_run():
+    """BYOK Direct 模式：Gateway 构造时传入的鉴权 Header 应逐次透传给 ark.run()。"""
+    store = GatewayStore(":memory:")
+    ark = FakeArk()
+    replies: list[str] = []
+    headers = {"X-User-Model-Header-Authorization": "Bearer enterprise-token"}
+    gw = _gateway(store, ark, replies, extra_headers=headers)
+    gw.accept(message())
+    await asyncio.sleep(0.05)
+    assert ark.last_extra_headers == headers
 
 
 async def test_gateway_binds_openid_via_env_overrides_and_vault():
@@ -167,7 +191,7 @@ async def test_reused_slow_session_gets_delayed_progress():
     replies: list[str] = []
 
     class SlowArk(FakeArk):
-        async def run(self, session_id, text, timeout_ms, on_progress=None, system_message=None):
+        async def run(self, session_id, text, timeout_ms, on_progress=None, system_message=None, extra_headers=None):
             await asyncio.sleep(0.03)
             return RunResult(terminal="idle", messages=["回复"])
 

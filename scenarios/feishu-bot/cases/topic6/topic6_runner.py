@@ -320,6 +320,7 @@ class Topic6Runner:
         config: Topic6Config,
         loop: Optional[asyncio.AbstractEventLoop] = None,
         card_sender: Optional["Topic6CardSenderProtocol"] = None,
+        extra_headers: Optional[dict] = None,
     ):
         self._ark = ark
         self._feishu = feishu
@@ -327,6 +328,8 @@ class Topic6Runner:
         self._config = config
         self._loop = loop
         self._card_sender = card_sender  # 由 topic6_hitl 注入
+        # BYOK Direct 模式：按请求动态附加的模型鉴权 Header；未配置时为 None（原豆包模式）。
+        self._extra_headers = extra_headers
         # 串行化“检查活跃任务 → 创建 Session → 落 Job”，避免两个同时到达的触发
         # 都在落库前通过检查并各自创建一条长任务。
         self._start_lock = asyncio.Lock()
@@ -679,7 +682,9 @@ class Topic6Runner:
                 try:
                     async with self._ark._open_event_stream(session_id) as stream:
                         if not sent_initial_message:
-                            await self._ark.send_message(session_id, first_user_message)
+                            await self._ark.send_message(
+                                session_id, first_user_message, extra_headers=self._extra_headers
+                            )
                             sent_initial_message = True
                         terminal = await self._consume_events(
                             job_id, stream, seen_event_ids=seen_event_ids

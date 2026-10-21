@@ -529,7 +529,7 @@ def test_sse_reconnect_does_not_resend_initial_message(loop, tmp_path, monkeypat
             self.connects += 1
             return _Stream()
 
-        async def send_message(self, _session_id, message):
+        async def send_message(self, _session_id, message, extra_headers=None):
             self.sent_messages.append(message)
 
     store = PipelineStore(str(tmp_path / "topic6.db"))

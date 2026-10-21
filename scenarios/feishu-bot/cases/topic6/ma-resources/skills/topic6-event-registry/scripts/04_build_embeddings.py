@@ -39,11 +39,11 @@ def main() -> int:
     ap.add_argument(
         "--model",
         default=os.environ.get(
-            "EMBEDDING_MODEL_ID", "doubao-embedding-vision-251215"
+            "EMBEDDING_MODEL_ID", "Doubao-embedding"
         ),
-        help="默认使用 doubao-embedding-vision-251215；可通过 "
-             "EMBEDDING_MODEL_ID 或 --model 覆盖。vision 模型走方舟 "
-             "/embeddings/multimodal，文本逐条请求并由 --concurrency 并发。"
+        help="默认使用 Doubao-embedding；可通过 "
+             "EMBEDDING_MODEL_ID 或 --model 覆盖。多模态模型走 "
+             "/embeddings/multimodal(由 EMBEDDING_IS_MULTIMODAL 或模型名判断)，文本逐条请求并由 --concurrency 并发。"
              "模型变化会使旧向量缓存自动失效。",
     )
     ap.add_argument("--batch-size", type=int, default=64)

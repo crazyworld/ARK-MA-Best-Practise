@@ -50,6 +50,10 @@ from arkagent.gateway import (
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 
+# BYOK Direct 模式仅支持这两种协议，详见《火山 Managed Agent BYOK 模型接入指南》。
+BYOK_SUPPORTED_PROTOCOLS = ("openai_chat_completions", "anthropic_messages")
+BYOK_TOKEN_LIMIT_KEYS = ("context_window", "max_input_token_length", "max_output_token_length")
+
 
 # ---- 序列化辅助 ------------------------------------------------------------
 
@@ -79,6 +83,23 @@ async def _body(request: Request) -> dict:
 
 class _BadRequest(Exception):
     """handler 内抛出，统一转 400。"""
+
+
+def _validate_byok_fields(emp: DigitalEmployee) -> Optional[str]:
+    """``model_mode="byok_direct"`` 时校验必填字段；返回错误信息，``None`` 表示校验通过。"""
+    if emp.model_mode != "byok_direct":
+        return None
+    if not emp.model_provider:
+        return "model_mode=byok_direct 时 model_provider 不能为空"
+    if not emp.model_base_url:
+        return "model_mode=byok_direct 时 model_base_url 不能为空"
+    if emp.model_protocol not in BYOK_SUPPORTED_PROTOCOLS:
+        return f"model_protocol 必须是 {BYOK_SUPPORTED_PROTOCOLS} 之一"
+    limits = emp.model_token_limits or {}
+    for key in BYOK_TOKEN_LIMIT_KEYS:
+        if not isinstance(limits.get(key), int) or limits[key] <= 0:
+            return f"model_token_limits.{key} 必须是大于 0 的整数"
+    return None
 
 
 # ---- 鉴权中间件 ------------------------------------------------------------
@@ -132,8 +153,16 @@ def create_app(
             name=name,
             identity_prompt=str(body.get("identity_prompt") or ""),
             model_id=str(body.get("model_id") or "doubao-seed-evolving"),
+            model_mode=str(body.get("model_mode") or "ark").strip() or "ark",
+            model_provider=body.get("model_provider") or None,
+            model_base_url=body.get("model_base_url") or None,
+            model_protocol=body.get("model_protocol") or None,
+            model_token_limits=body.get("model_token_limits") or None,
             bundle_id=body.get("bundle_id") or None,
         )
+        error = _validate_byok_fields(emp)
+        if error:
+            return _err(error)
         return _ok(_as_dict(store.upsert_employee(emp)), status=201)
 
     async def get_employee(request: Request) -> Response:
@@ -152,8 +181,21 @@ def create_app(
             emp.identity_prompt = str(body["identity_prompt"] or "")
         if "model_id" in body:
             emp.model_id = str(body["model_id"] or "").strip() or emp.model_id
+        if "model_mode" in body:
+            emp.model_mode = str(body["model_mode"] or "").strip() or "ark"
+        if "model_provider" in body:
+            emp.model_provider = body["model_provider"] or None
+        if "model_base_url" in body:
+            emp.model_base_url = body["model_base_url"] or None
+        if "model_protocol" in body:
+            emp.model_protocol = body["model_protocol"] or None
+        if "model_token_limits" in body:
+            emp.model_token_limits = body["model_token_limits"] or None
         if "bundle_id" in body:
             emp.bundle_id = body["bundle_id"] or None
+        error = _validate_byok_fields(emp)
+        if error:
+            return _err(error)
         return _ok(_as_dict(store.upsert_employee(emp)))
 
     async def delete_employee(request: Request) -> Response:

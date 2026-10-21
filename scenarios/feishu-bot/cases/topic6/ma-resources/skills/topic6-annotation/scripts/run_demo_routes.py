@@ -598,10 +598,14 @@ def run(
         print("[demo-routes] cache hit: R1-R5 already complete", flush=True)
         return summary
 
-    api_key = os.environ.get("ARK_API_KEY") or os.environ.get("OPENAI_API_KEY")
-    base_url = os.environ.get("ARK_BASE_URL") or os.environ.get("OPENAI_BASE_URL")
+    api_key = (os.environ.get("LLM_RELAY_API_KEY")
+               or os.environ.get("ARK_API_KEY")
+               or os.environ.get("OPENAI_API_KEY"))
+    base_url = (os.environ.get("LLM_RELAY_BASE_URL")
+                or os.environ.get("ARK_BASE_URL")
+                or os.environ.get("OPENAI_BASE_URL"))
     if not api_key or not base_url:
-        raise EnvironmentError("ARK_API_KEY/ARK_BASE_URL are required")
+        raise EnvironmentError("LLM_RELAY_API_KEY/LLM_RELAY_BASE_URL (or ARK_API_KEY/ARK_BASE_URL) are required")
 
     update_run_config(
         project,
@@ -734,7 +738,7 @@ def main() -> int:
         "--model",
         default=os.environ.get("DEMO_CHAT_MODEL_ID")
         or os.environ.get("C2_CHAT_MODEL_ID")
-        or "doubao-seed-evolving",
+        or "Doubao-Seed-Evolving",
     )
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
     parser.add_argument("--max-workers", type=int, default=DEFAULT_MAX_WORKERS)

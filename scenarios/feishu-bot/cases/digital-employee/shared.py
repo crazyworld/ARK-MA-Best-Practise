@@ -803,6 +803,11 @@ class GroupBotConfig:
     # lark-cli：挂到 Session 上的 Vault（内含短期 tenant token 环境变量凭据）。
     # 空则不挂——Agent 仍能对话，只是 lark-cli 拿不到 Bot 凭据、跑飞书命令会鉴权失败。
     lark_vault_id: str = ""
+    # BYOK Direct 模式：企业自有模型的鉴权凭证，按请求以
+    # ``X-User-Model-Header-{model_auth_header_name}`` 动态附加，不写入方舟侧持久配置
+    # （见《火山 Managed Agent BYOK 模型接入指南》3.2 节）。两者均为空则不附加，等价于走原豆包模式。
+    model_auth_header_name: str = ""
+    model_auth_header_value: str = ""
 
 
 def lark_cli_enabled(config: GroupBotConfig) -> bool:
@@ -813,6 +818,16 @@ def lark_cli_enabled(config: GroupBotConfig) -> bool:
     Agent 退回纯对话（避免 prompt 里承诺了 lark-cli 却没凭据用）。
     """
     return bool(config.lark_vault_id)
+
+
+def build_byok_extra_headers(config: GroupBotConfig) -> Optional[dict]:
+    """BYOK Direct 模式下，按请求附加到 ``send_message``/``run`` 的模型鉴权 Header。
+
+    两者均缺省时返回 ``None``（走原豆包模式，不附加任何额外 Header）。
+    """
+    if not config.model_auth_header_name or not config.model_auth_header_value:
+        return None
+    return {f"X-User-Model-Header-{config.model_auth_header_name}": config.model_auth_header_value}
 
 
 def load_group_bot_config() -> GroupBotConfig:
@@ -871,6 +886,8 @@ def load_group_bot_config() -> GroupBotConfig:
         # 可选：initialize_digital_employee.py 建好 Vault 后写回 GROUP_BOT_LARK_VAULT_ID；
         # 缺失则不启用 lark-cli。
         lark_vault_id=(os.environ.get("GROUP_BOT_LARK_VAULT_ID") or "").strip(),
+        model_auth_header_name=(os.environ.get("BYOK_MODEL_AUTH_HEADER_NAME") or "").strip(),
+        model_auth_header_value=(os.environ.get("BYOK_MODEL_AUTH_HEADER_VALUE") or "").strip(),
     )
 
 

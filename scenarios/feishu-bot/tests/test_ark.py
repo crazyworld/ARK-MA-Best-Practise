@@ -378,6 +378,32 @@ async def test_send_message_appends_system_message_last():
     assert sent["events"][-1]["content"][0]["text"] == "你现在是销售经理"
 
 
+# ---- BYOK Direct 模式：按请求动态附加模型鉴权 Header ----
+@respx.mock
+async def test_send_message_merges_extra_headers_for_byok():
+    route = respx.post(f"{BASE}/sessions/sesn-1/events").mock(return_value=httpx.Response(200, json={"data": []}))
+    client = _client()
+    await client.send_message(
+        "sesn-1",
+        "你好",
+        extra_headers={"X-User-Model-Header-Authorization": "Bearer enterprise-token"},
+    )
+    await client.aclose()
+    sent_headers = route.calls.last.request.headers
+    assert sent_headers["X-User-Model-Header-Authorization"] == "Bearer enterprise-token"
+    # 方舟平台鉴权与模型鉴权互相独立，不应被覆盖。
+    assert sent_headers["Authorization"] == "Bearer key"
+
+
+@respx.mock
+async def test_send_message_without_extra_headers_unchanged():
+    route = respx.post(f"{BASE}/sessions/sesn-1/events").mock(return_value=httpx.Response(200, json={"data": []}))
+    client = _client()
+    await client.send_message("sesn-1", "你好")
+    await client.aclose()
+    assert "X-User-Model-Header-Authorization" not in route.calls.last.request.headers
+
+
 # ---- static bearer (卡点 A) ----
 @respx.mock
 async def test_create_static_bearer_credential_shape():
@@ -610,6 +636,28 @@ async def test_run_opens_stream_before_sending_message():
     assert order == ["stream", "events"]
     assert result.terminal == "idle"
     assert result.messages == ["完成"]
+
+
+@respx.mock
+async def test_run_forwards_extra_headers_to_send_message():
+    respx.get(f"{BASE}/sessions/session-1/events/stream").mock(
+        return_value=httpx.Response(
+            200,
+            text=": ready\n\n"
+            'data: {"type":"agent.message","content":[{"type":"text","text":"完成"}]}\n\n'
+            'data: {"type":"session.status_idle"}\n\n',
+            headers={"Content-Type": "text/event-stream"},
+        )
+    )
+    route = respx.post(f"{BASE}/sessions/session-1/events").mock(return_value=httpx.Response(200, json={"data": []}))
+
+    client = _client()
+    await client.run(
+        "session-1", "你好", 5_000,
+        extra_headers={"X-User-Model-Header-Authorization": "Bearer enterprise-token"},
+    )
+    await client.aclose()
+    assert route.calls.last.request.headers["X-User-Model-Header-Authorization"] == "Bearer enterprise-token"
 
 
 @respx.mock

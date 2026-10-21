@@ -7,10 +7,18 @@
 #   - MemoryStore 按 name 查找,存在则复用(重建代价大且没意义)
 #   - 3 个 Agent 每次都重建(prompt/skill 更新是主要驱动),同名旧 Agent 先删后建
 #
+# 多环境隔离:
+#   方舟按 name 查找/删除资源是全账号范围的,不区分"是哪个环境/部署实例创建的"。
+#   同一账号下如果跑多套 topic6(如 dev/staging/prod,或多人各自开发),固定名称
+#   ("topic6-coordinator"/"topic6-prod-env" 等)会互相撞车——按 name 删除 Agent
+#   可能删掉别的环境的;按 name 复用 Environment/MemoryStore 可能用上别人的配置。
+#   用 TOPIC6_RESOURCE_SUFFIX 给本环境的资源名加专属后缀即可隔离,留空=原行为不变。
+#
 # 使用:
 #   ./create_all.sh                    # 幂等运行,首次全建、后续只重建 Agent
 #   ./create_all.sh --update-memory    # 已存在的 MemoryStore 也强制覆盖 memories(用于磁盘 md 改动后同步)
 #   ./create_all.sh --update-env       # 已存在的 Environment 也强制刷新 config(用于新增/改动沙箱环境变量)
+#   TOPIC6_RESOURCE_SUFFIX="-dev" ./create_all.sh   # 本环境专属资源名,避免跟其他环境撞车
 #
 # 前置: 先跑 tools/pack_skills.sh + tools/upload_skills.py,让 skill_ids.json 有值
 set -euo pipefail
@@ -22,7 +30,7 @@ for arg in "$@"; do
     --update-memory) UPDATE_MEMORY=1 ;;
     --update-env) UPDATE_ENV=1 ;;
     -h|--help)
-      sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *) echo "未知参数: $arg" >&2; exit 2 ;;
@@ -49,6 +57,10 @@ ARK_BETA_HEADER="X-Ark-Beta: agentic-2026-06-01"
 : "${HOT_TOPICS_MCP_URL:?please export HOT_TOPICS_MCP_URL(topic6 数据源 MCP endpoint)}"
 : "${LARK_APP_ID:?please export LARK_APP_ID or FEISHU_APP_ID}"
 : "${LARK_APP_SECRET:?please export LARK_APP_SECRET or FEISHU_APP_SECRET}"
+
+# 本环境专属资源名后缀,隔离多环境/多人共用同一方舟账号时的 name 撞车。留空=不加后缀。
+RESOURCE_SUFFIX="${TOPIC6_RESOURCE_SUFFIX:-}"
+suffixed() { printf '%s%s' "$1" "$RESOURCE_SUFFIX"; }
 
 require() { command -v "$1" >/dev/null || { echo "缺少 $1"; exit 1; }; }
 require curl
@@ -154,7 +166,7 @@ ark_delete() {
 
 # ---- 1. Environment ----
 step "1) 创建 Environment(幂等:优先按 ID 复用,其次按 name 查找;--update-env 时原地更新 config)"
-env_name=$(jq -r '.name' "$ROOT/environment.json")
+env_name=$(suffixed "$(jq -r '.name' "$ROOT/environment.json")")
 ENVIRONMENT_ID=""
 if [ -n "${TOPIC6_ENVIRONMENT_ID:-}" ]; then
   existing_id=$(find_environment_by_id "$TOPIC6_ENVIRONMENT_ID" 2>/dev/null || true)
@@ -172,14 +184,14 @@ fi
 # 方舟不做二次插值,不展开就把 "${DATAHUB_ENDPOINT}" 死字符串灌进沙箱。
 # macOS 默认不带 envsubst,改用 jq 遍历字符串值做 ${VAR} 替换(未 export 的变量替成空串,与 envsubst 行为一致)。
 env_payload="$(
-  jq '
+  jq --arg name "$env_name" '
     def subst:
       if type == "string" then
         gsub("\\$\\{(?<name>[A-Z_][A-Z0-9_]*)\\}"; env[.name] // "")
       elif type == "object" then with_entries(.value |= subst)
       elif type == "array"  then map(subst)
       else . end;
-    subst
+    subst | .name = $name
   ' "$ROOT/environment.json"
 )"
 if [ -n "$ENVIRONMENT_ID" ]; then
@@ -199,7 +211,7 @@ fi
 
 # ---- 2. Memory Store ----
 step "2) 创建 Memory Store(幂等:按 name 查找,存在复用)"
-mem_name=$(jq -r '.name' "$ROOT/memory-store.json")
+mem_name=$(suffixed "$(jq -r '.name' "$ROOT/memory-store.json")")
 MEMORY_STORE_ID=$(find_by_name "memory_stores" "$mem_name" || true)
 if [ -n "$MEMORY_STORE_ID" ]; then
   if [ "$UPDATE_MEMORY" = "1" ]; then
@@ -209,7 +221,7 @@ if [ -n "$MEMORY_STORE_ID" ]; then
   fi
   MEMORY_ALREADY_EXISTS=1
 else
-  mem_payload=$(jq '{name, description}' "$ROOT/memory-store.json")
+  mem_payload=$(jq --arg name "$mem_name" '{name: $name, description}' "$ROOT/memory-store.json")
   mem_resp=$(ark_post "/memory_stores" "$mem_payload")
   MEMORY_STORE_ID=$(extract_id "$mem_resp")
   echo "已创建: $mem_name -> $MEMORY_STORE_ID"
@@ -307,8 +319,10 @@ delete_agent_if_exists() {
 }
 
 step "5) 创建子 Agent topic6-annotator"
-delete_agent_if_exists "topic6-annotator"
-annotator_payload=$(render_agent_json annotator.json annotator.system.md)
+ANNOTATOR_NAME="$(suffixed topic6-annotator)"
+delete_agent_if_exists "$ANNOTATOR_NAME"
+annotator_payload=$(render_agent_json annotator.json annotator.system.md \
+  | jq --arg name "$ANNOTATOR_NAME" '.name = $name')
 annotator_resp=$(ark_post "/agents" "$annotator_payload")
 AGENT_ANNOTATOR_ID=$(extract_id "$annotator_resp")
 echo "AGENT_ANNOTATOR_ID=$AGENT_ANNOTATOR_ID"
@@ -321,15 +335,18 @@ AGENT_VALIDATOR_ID=$(extract_id "$validator_resp")
 echo "AGENT_VALIDATOR_ID=$AGENT_VALIDATOR_ID"
 
 step "6) 创建子 Agent topic6-insighter"
-delete_agent_if_exists "topic6-insighter"
-insighter_payload=$(render_agent_json insighter.json insighter.system.md)
+INSIGHTER_NAME="$(suffixed topic6-insighter)"
+delete_agent_if_exists "$INSIGHTER_NAME"
+insighter_payload=$(render_agent_json insighter.json insighter.system.md \
+  | jq --arg name "$INSIGHTER_NAME" '.name = $name')
 insighter_resp=$(ark_post "/agents" "$insighter_payload")
 AGENT_INSIGHTER_ID=$(extract_id "$insighter_resp")
 echo "AGENT_INSIGHTER_ID=$AGENT_INSIGHTER_ID"
 
 # ---- 7. 创建协调器 ----
 step "7) 创建协调器 topic6-coordinator"
-delete_agent_if_exists "topic6-coordinator"
+COORDINATOR_NAME="$(suffixed topic6-coordinator)"
+delete_agent_if_exists "$COORDINATOR_NAME"
 coordinator_payload=$(render_agent_json coordinator.json coordinator.system.md \
   | jq --arg a "$AGENT_ANNOTATOR_ID" --arg i "$AGENT_INSIGHTER_ID" --arg v "$AGENT_VALIDATOR_ID" '
       (.. | strings) |= (
@@ -337,6 +354,7 @@ coordinator_payload=$(render_agent_json coordinator.json coordinator.system.md \
           gsub("\\$\\{agent_id.topic6-insighter\\}"; $i) |
           gsub("\\$\\{agent_id.topic6-validator\\}"; $v)
       )
+      | .name = $name
   ')
 coordinator_resp=$(ark_post "/agents" "$coordinator_payload")
 AGENT_COORDINATOR_ID=$(extract_id "$coordinator_resp")

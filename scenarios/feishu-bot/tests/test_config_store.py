@@ -1,6 +1,10 @@
 """P1：配置库 DAO + 参数化 Agent 定义装配单测。"""
 from __future__ import annotations
 
+import sqlite3
+
+import pytest
+
 from arkagent.gateway import (
     CapabilityBundle,
     ConfigStore,
@@ -76,6 +80,89 @@ def test_employee_default_writable_categories_full(tmp_path):
     store = _store(tmp_path)
     project = store.upsert_project(Project(id="", name="项目A"))
     assert project.writable_memory_categories == list(MEMORY_CATEGORIES)
+
+
+# ---- digital_employee：BYOK Direct 模式字段 ----
+def test_employee_byok_fields_roundtrip(tmp_path):
+    store = _store(tmp_path)
+    emp = store.upsert_employee(
+        DigitalEmployee(
+            id="",
+            name="企业模型员工",
+            model_id="internal-gpt-4",
+            model_mode="byok_direct",
+            model_provider="modelcenter_A",
+            model_base_url="https://inner-gw.company.com/v1/chat/completions",
+            model_protocol="openai_chat_completions",
+            model_token_limits={
+                "context_window": 128000,
+                "max_input_token_length": 128000,
+                "max_output_token_length": 4096,
+            },
+        )
+    )
+    fetched = store.get_employee(emp.id)
+    assert fetched.model_mode == "byok_direct"
+    assert fetched.model_provider == "modelcenter_A"
+    assert fetched.model_base_url == "https://inner-gw.company.com/v1/chat/completions"
+    assert fetched.model_protocol == "openai_chat_completions"
+    assert fetched.model_token_limits == {
+        "context_window": 128000,
+        "max_input_token_length": 128000,
+        "max_output_token_length": 4096,
+    }
+
+
+def test_employee_defaults_to_ark_mode_with_no_byok_fields(tmp_path):
+    store = _store(tmp_path)
+    emp = store.upsert_employee(DigitalEmployee(id="", name="豆包员工", model_id="doubao-seed-evolving"))
+    fetched = store.get_employee(emp.id)
+    assert fetched.model_mode == "ark"
+    assert fetched.model_provider is None
+    assert fetched.model_base_url is None
+    assert fetched.model_protocol is None
+    assert fetched.model_token_limits is None
+
+
+def test_schema_migration_adds_byok_columns_to_existing_db(tmp_path):
+    """模拟改造前建的旧库（无 BYOK 列），确认 ConfigStore 打开时能自动补列，不丢数据。"""
+    db_path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(
+        """
+        CREATE TABLE digital_employee (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            identity_prompt TEXT NOT NULL DEFAULT '',
+            model_id TEXT NOT NULL DEFAULT 'doubao-seed-evolving',
+            bundle_id TEXT,
+            ark_agent_id TEXT NOT NULL DEFAULT '',
+            ark_agent_version TEXT NOT NULL DEFAULT '',
+            sync_status TEXT NOT NULL DEFAULT 'pending',
+            synced_at INTEGER,
+            sync_error TEXT NOT NULL DEFAULT '',
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO digital_employee (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)",
+        ("emp_legacy", "旧员工", 1, 1),
+    )
+    conn.commit()
+    conn.close()
+
+    store = ConfigStore(db_path=str(db_path))
+    legacy = store.get_employee("emp_legacy")
+    assert legacy.name == "旧员工"
+    assert legacy.model_mode == "ark"
+    assert legacy.model_token_limits is None
+    # 迁移后新增字段可正常写入。
+    legacy.model_mode = "byok_direct"
+    legacy.model_provider = "modelcenter_A"
+    store.upsert_employee(legacy)
+    assert store.get_employee("emp_legacy").model_provider == "modelcenter_A"
 
 
 # ---- project ----
@@ -191,3 +278,85 @@ def test_build_agent_config_with_bundle_wires_skills_mcp_toggles():
     assert toggles["web_search"] is True
     assert toggles["web_fetch"] is False
     assert config["metadata"]["digital_employee_id"] == "emp_2"
+
+
+# ---- build_agent_config：BYOK Direct 模式 ----
+def test_build_agent_config_byok_direct_produces_full_model_field():
+    emp = DigitalEmployee(
+        id="emp_byok",
+        name="企业模型员工",
+        identity_prompt="sys",
+        model_id="internal-gpt-4",
+        model_mode="byok_direct",
+        model_provider="modelcenter_A",
+        model_base_url="https://inner-gw.company.com/v1/chat/completions",
+        model_protocol="openai_chat_completions",
+        model_token_limits={
+            "context_window": 128000,
+            "max_input_token_length": 128000,
+            "max_output_token_length": 4096,
+        },
+    )
+    config = build_agent_config(emp, None)
+    assert config["model"] == {
+        "id": "internal-gpt-4",
+        "provider": "modelcenter_A",
+        "base_url": "https://inner-gw.company.com/v1/chat/completions",
+        "protocol": "openai_chat_completions",
+        "token_limits": {
+            "context_window": 128000,
+            "max_input_token_length": 128000,
+            "max_output_token_length": 4096,
+        },
+    }
+
+
+def test_build_agent_config_byok_direct_missing_field_raises():
+    emp = DigitalEmployee(
+        id="emp_byok_bad",
+        name="企业模型员工",
+        model_id="internal-gpt-4",
+        model_mode="byok_direct",
+        model_provider="modelcenter_A",
+        # 缺 model_base_url / model_protocol / model_token_limits。
+    )
+    with pytest.raises(ValueError, match="缺少必填字段"):
+        build_agent_config(emp, None)
+
+
+def test_build_agent_config_byok_direct_rejects_unsupported_protocol():
+    emp = DigitalEmployee(
+        id="emp_byok_proto",
+        name="企业模型员工",
+        model_id="internal-gpt-4",
+        model_mode="byok_direct",
+        model_provider="modelcenter_A",
+        model_base_url="https://inner-gw.company.com/v1/chat/completions",
+        model_protocol="grpc",
+        model_token_limits={
+            "context_window": 128000,
+            "max_input_token_length": 128000,
+            "max_output_token_length": 4096,
+        },
+    )
+    with pytest.raises(ValueError, match="不受支持"):
+        build_agent_config(emp, None)
+
+
+def test_build_agent_config_byok_direct_rejects_non_positive_token_limit():
+    emp = DigitalEmployee(
+        id="emp_byok_limit",
+        name="企业模型员工",
+        model_id="internal-gpt-4",
+        model_mode="byok_direct",
+        model_provider="modelcenter_A",
+        model_base_url="https://inner-gw.company.com/v1/chat/completions",
+        model_protocol="openai_chat_completions",
+        model_token_limits={
+            "context_window": 128000,
+            "max_input_token_length": 128000,
+            "max_output_token_length": 0,
+        },
+    )
+    with pytest.raises(ValueError, match="必须是大于 0 的整数"):
+        build_agent_config(emp, None)

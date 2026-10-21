@@ -3,13 +3,21 @@
 
 所有阶段脚本都走这里，不要各自造轮子。
 凭据只从环境变量读取。鉴权按以下顺序取第一个非空值：
-  BASE_URL：ARK_BASE_URL → OPENAI_BASE_URL（火山方舟 OpenAI 兼容 endpoint）
-  Key：ARK_API_KEY → OPENAI_API_KEY
-Embedding 另需：EMBEDDING_BASE_URL / EMBEDDING_API_KEY（缺省沿用上面两个）
+  BASE_URL：LLM_RELAY_BASE_URL → ARK_BASE_URL → OPENAI_BASE_URL
+  Key：LLM_RELAY_API_KEY → ARK_API_KEY → OPENAI_API_KEY
+Embedding 另需：EMBEDDING_BASE_URL / EMBEDDING_API_KEY（优先级最高，缺省沿用上面的链路）
+
+接入企业自有模型（BYOK）：务必用 LLM_RELAY_BASE_URL/LLM_RELAY_API_KEY 指向企业网关，
+不要改 ARK_BASE_URL/ARK_API_KEY —— 后两者同时被 update_ma.sh/create_all.sh 用来调
+方舟 Managed Agent 控制面（创建/更新 Agent、Environment），企业网关不支持那些接口，
+改了会直接把部署脚本打挂。本模块代码无需为换模型再改。另有两个可选开关：
+  EMBEDDING_IS_MULTIMODAL  true/false，显式指定是否走 /embeddings/multimodal 协议；
+                           未设置时按模型名是否以 doubao-embedding-vision 开头猜测。
+  PRICING_OVERRIDE_JSON    JSON object，追加企业模型的单价到 PRICING（未知模型默认按 0 计费）。
 
 2026-09-28 从 Anthropic 原生 /v1/messages 切到方舟 OpenAI 兼容
-chat/completions。ARK_BASE_URL / OPENAI_BASE_URL 应包含版本前缀（如
-https://ark.cn-beijing.volces.com/api/v3），本模块只追加资源路径。
+chat/completions。BASE_URL 应包含版本前缀（如
+https://ark.cn-beijing.volces.com/api/v3 或 https://<企业网关>/v1），本模块只追加资源路径。
 system 从顶层字段挪到 messages[0]{role=system}，
 usage 字段从 input_tokens/output_tokens 换成 prompt_tokens/completion_tokens，
 停止原因从 stop_reason 换成 finish_reason。prompt caching 暂不支持，缓存
@@ -43,11 +51,25 @@ PRICING = {
     "text-embedding-3-small": (0.02, 0.0),
     "Doubao-embedding": (0.0, 0.0),
 }
+# 企业自有模型（BYOK）不在上表中：可通过 PRICING_OVERRIDE_JSON 环境变量追加单价，
+# 格式同 PRICING（JSON object，value 为 [input_price, output_price]）；未配置时未知模型按 (0.0, 0.0) 计费。
+_pricing_override_raw = os.environ.get("PRICING_OVERRIDE_JSON")
+if _pricing_override_raw:
+    PRICING.update(
+        {key: tuple(value) for key, value in json.loads(_pricing_override_raw).items()}
+    )
 
 
 def api_url(base: str, resource: str) -> str:
     """把资源路径追加到已含版本前缀的 OpenAI 兼容 API 根地址。"""
     return f"{base.rstrip('/')}/{resource.lstrip('/')}"
+
+
+def _env_bool(name: str) -> bool | None:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return None
+    return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
 def price_of(model: str) -> tuple[float, float]:
@@ -62,14 +84,16 @@ class Relay:
 
     def __init__(self, model: str, max_tokens: int, system: str,
                  temperature: float = 0.0, timeout: int = 600, retries: int = 3):
-        self.base = (os.environ.get("ARK_BASE_URL")
+        self.base = (os.environ.get("LLM_RELAY_BASE_URL")
+                     or os.environ.get("ARK_BASE_URL")
                      or os.environ.get("OPENAI_BASE_URL") or "").rstrip("/")
-        self.key = (os.environ.get("ARK_API_KEY")
+        self.key = (os.environ.get("LLM_RELAY_API_KEY")
+                    or os.environ.get("ARK_API_KEY")
                     or os.environ.get("OPENAI_API_KEY") or "")
         if not self.base or not self.key:
             raise SystemExit(
-                "缺少凭据。需要 ARK_BASE_URL 或 OPENAI_BASE_URL，以及 "
-                "ARK_API_KEY 或 OPENAI_API_KEY。凭据只从环境变量读取，"
+                "缺少凭据。需要 LLM_RELAY_BASE_URL / ARK_BASE_URL / OPENAI_BASE_URL 之一，以及 "
+                "LLM_RELAY_API_KEY / ARK_API_KEY / OPENAI_API_KEY 之一。凭据只从环境变量读取，"
                 "不要写进文件。")
         self.model = model
         self.max_tokens = max_tokens
@@ -204,18 +228,21 @@ class Embedder:
     timeout=600 完整跑完 955 条。调 batch 或并发都无效，只能放宽等待。
     """
 
-    def __init__(self, model: str = "doubao-embedding-vision-251215",
+    def __init__(self, model: str = "Doubao-embedding",
                  cache_path: Path | None = None, timeout: int = 600,
                  retries: int = 4):
         self.base = (os.environ.get("EMBEDDING_BASE_URL")
+                     or os.environ.get("LLM_RELAY_BASE_URL")
                      or os.environ.get("ARK_BASE_URL")
                      or os.environ.get("OPENAI_BASE_URL", "")).rstrip("/")
         self.key = (os.environ.get("EMBEDDING_API_KEY")
+                    or os.environ.get("LLM_RELAY_API_KEY")
                     or os.environ.get("ARK_API_KEY")
                     or os.environ.get("OPENAI_API_KEY", ""))
         if not self.base or not self.key:
             raise SystemExit("缺少 embedding 凭据。需要 EMBEDDING_BASE_URL / "
-                             "EMBEDDING_API_KEY，或沿用 ARK_BASE_URL 加 "
+                             "EMBEDDING_API_KEY，或沿用 LLM_RELAY_BASE_URL / "
+                             "LLM_RELAY_API_KEY，或 ARK_BASE_URL / "
                              "ARK_API_KEY / OPENAI_API_KEY 之一。")
         self.model = model
         self.timeout = timeout
@@ -241,10 +268,19 @@ class Embedder:
         `/embeddings/multimodal` 会把同一 input 列表融合为一个向量，不能把多条
         独立文本塞进一次请求。这里强制切成单条，再由 concurrency 控制并发。
         显式指定旧 embedding 模型时仍沿用标准 `/embeddings` 批量协议。
+
+        企业自有模型（BYOK）名称不遵循 `doubao-embedding-vision-*` 命名规则，
+        无法靠模型名判断是否走多模态协议；可用环境变量 EMBEDDING_IS_MULTIMODAL
+        （true/false）显式指定，优先级高于按模型名猜测。
         """
         pending = [t for t in texts if self._key(t) not in self.cache]
         unique = list(dict.fromkeys(pending))
-        is_multimodal = self.model.lower().startswith("doubao-embedding-vision")
+        override = _env_bool("EMBEDDING_IS_MULTIMODAL")
+        is_multimodal = (
+            override
+            if override is not None
+            else self.model.lower().startswith("doubao-embedding-vision")
+        )
         effective_batch = 1 if is_multimodal else batch
         chunks = [
             unique[i:i + effective_batch]

@@ -31,6 +31,11 @@ class Topic6Config:
     vault_id: str
     authorized_open_ids: tuple[str, ...]
     skip_miaoda_oauth: bool
+    # BYOK Direct 模式：企业自有模型的鉴权凭证，按请求以
+    # X-User-Model-Header-{model_auth_header_name} 动态附加，不写入方舟侧持久配置。
+    # 两者均为空则不附加，等价于走原豆包模式。
+    model_auth_header_name: str = ""
+    model_auth_header_value: str = ""
 
 
 def load_case_config(env: Optional[Mapping[str, str]] = None) -> Topic6Config:
@@ -65,4 +70,6 @@ def load_case_config(env: Optional[Mapping[str, str]] = None) -> Topic6Config:
         skip_miaoda_oauth=(
             environ.get("TOPIC6_SKIP_MIAODA_OAUTH") or ""
         ).strip().lower() in ("1", "true", "yes"),
+        model_auth_header_name=(environ.get("BYOK_MODEL_AUTH_HEADER_NAME") or "").strip(),
+        model_auth_header_value=(environ.get("BYOK_MODEL_AUTH_HEADER_VALUE") or "").strip(),
     )

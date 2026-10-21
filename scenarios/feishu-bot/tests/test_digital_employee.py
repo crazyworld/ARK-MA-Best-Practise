@@ -779,7 +779,7 @@ class NativeFakeArk(FakeArk):
         self.stream_opens: list[str] = []
         self.custom_tool_results: list[tuple[str, str, str, bool]] = []
 
-    async def send_message(self, session_id: str, actor_input: str) -> None:
+    async def send_message(self, session_id: str, actor_input: str, *, extra_headers=None) -> None:
         index = len(self.send_calls)
         self.send_calls.append((session_id, actor_input))
         if self.send_hook is not None:
@@ -796,6 +796,7 @@ class NativeFakeArk(FakeArk):
         output: str,
         *,
         is_error: bool = False,
+        extra_headers=None,
     ) -> None:
         self.custom_tool_results.append(
             (session_id, custom_tool_use_id, output, is_error)
