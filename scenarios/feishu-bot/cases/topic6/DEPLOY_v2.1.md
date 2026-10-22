@@ -143,14 +143,20 @@ git pull origin main    # 或你的部署分支
 ## 5. 更新方舟 MA 资源
 
 ```bash
-cd scenarios/feishu-bot/cases/topic6/ma-resources
+cd scenarios/feishu-bot/cases/topic6
 
-# 全量更新：Skill 上传 + Environment 更新 + Agent 重建
-./create_all.sh --update-env
-
-# --update-env 确保 environment.json 的变更（DATAHUB_MODEL_ID 改值）写入方舟
-# Agent 总是重建的（先删再建），所以 validator.json 的模型变更自动生效
+# 一条命令完成：全量测试 → Skill 打包上传 → Environment 更新 → Agent 重建 → 资源 ID 校验
+./update_ma.sh
 ```
+
+`update_ma.sh` 内部依次执行 5 步：
+1. `pytest -q` 全量测试（失败则中止）
+2. `pack_skills.sh` 打包 7 个 Skills
+3. `upload_skills.py --force` 强制上传
+4. `create_all.sh --update-env --update-memory` 更新 Environment（`DATAHUB_MODEL_ID` 值变更）+ Memory + 重建 4 个 Agent（validator 模型切换生效）
+5. 校验 `created_ids.json` 完整性 + 回写 Coordinator 新 ID 到 `config.env`
+
+> 注意：`update_ma.sh` 不重启 Gateway，脚本结束后需手动重启（见步骤 8）。
 
 **验证资源更新成功：**
 
@@ -184,13 +190,13 @@ TOPIC6_DOCS_FOLDER_TOKEN=fldcnXXXXXXXXX
 
 ---
 
-## 7. 运行测试
+## 7. 运行测试（update_ma.sh 已自动执行，此处为手动补验）
+
+> `update_ma.sh` 的第 1 步已经运行了 `pytest -q` 全量测试，通过才会继续后续步骤。
+> 如果需要单独验证，可以手动执行：
 
 ```bash
 cd /home/ada/agents/ada-claw/workspace
-
-# 如果线上有 conda 环境
-conda activate arkagent  # 或对应的环境名
 
 PYTHONPATH=scenarios/feishu-bot:scenarios/feishu-bot/cases/topic6 \
   python -m pytest scenarios/feishu-bot/tests/test_topic6*.py \

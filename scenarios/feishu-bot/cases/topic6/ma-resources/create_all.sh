@@ -348,7 +348,7 @@ step "7) 创建协调器 topic6-coordinator"
 COORDINATOR_NAME="$(suffixed topic6-coordinator)"
 delete_agent_if_exists "$COORDINATOR_NAME"
 coordinator_payload=$(render_agent_json coordinator.json coordinator.system.md \
-  | jq --arg a "$AGENT_ANNOTATOR_ID" --arg i "$AGENT_INSIGHTER_ID" --arg v "$AGENT_VALIDATOR_ID" '
+  | jq --arg a "$AGENT_ANNOTATOR_ID" --arg i "$AGENT_INSIGHTER_ID" --arg v "$AGENT_VALIDATOR_ID" --arg name "$COORDINATOR_NAME" '
       (.. | strings) |= (
           gsub("\\$\\{agent_id.topic6-annotator\\}"; $a) |
           gsub("\\$\\{agent_id.topic6-insighter\\}"; $i) |
