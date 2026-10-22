@@ -22,8 +22,10 @@ import json
 import logging
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Optional
 
+from job_notifier import JobNotifier
 from pipeline_store import HcEvent, PipelineJob, PipelineStore
 from topic6_runner import Topic6CardSenderProtocol, Topic6Runner
 
@@ -433,10 +435,11 @@ def build_hc3_card(job: PipelineJob, event_id: int, payload: dict,
 @dataclass
 class Topic6HitlDeps:
     store: PipelineStore
-    runner: Topic6Runner
+    runner: "Topic6Runner"
     publisher: Optional["FeishuDocPublisher"] = None
     artifact_sync: Optional["Topic6ArtifactSync"] = None
-    sync_root: Optional["Path"] = None
+    sync_root: Optional[Path] = None
+    notifier: Optional["JobNotifier"] = None
 
 
 class Topic6Hitl(Topic6CardSenderProtocol):
@@ -454,6 +457,7 @@ class Topic6Hitl(Topic6CardSenderProtocol):
         self._publisher = deps.publisher
         self._artifact_sync = deps.artifact_sync
         self._sync_root = deps.sync_root
+        self._notifier = deps.notifier
 
     # ---- SendHcCard(runner → hitl)----------------------------------------
 
@@ -466,27 +470,43 @@ class Topic6Hitl(Topic6CardSenderProtocol):
     ) -> Optional[str]:
         # [P0-2] HC 发卡前：强制触发 artifact_sync + 发布产物到飞书
         published_urls: dict | None = None
-        if (
-            self._publisher is not None
-            and self._publisher.enabled
-            and _job.docs_folder_token
-        ):
-            # 强制同步产物到本地（默认 60 秒轮询可能还没跑到）
-            if self._artifact_sync is not None:
+        if self._publisher is not None and self._publisher.enabled:
+            # 补建 docs_folder_token（旧 job 或 start_job 时创建失败的兜底）
+            if not _job.docs_folder_token:
                 try:
-                    await self._artifact_sync.sync_once(_job.job_id, _job.ma_session_id)
+                    folder_token = await asyncio.get_event_loop().run_in_executor(
+                        None, self._publisher.create_job_folder, _job,
+                    )
+                    if folder_token:
+                        self._store.update_docs_folder_token(_job.job_id, folder_token)
+                        _job.docs_folder_token = folder_token
+                        log.info("topic6 hc card: late-created docs folder job=%s token=%s",
+                                 _job.job_id, folder_token)
                 except Exception as err:  # noqa: BLE001
-                    log.warning("topic6 pre-hc artifact sync failed: %s", err)
-            # 发布产物到飞书
-            try:
-                published_urls = await self._publisher.publish_hc_artifacts(
-                    _job, _hc_kind, _payload,
-                    sync_root=self._sync_root,
-                    job_folder_token=_job.docs_folder_token,
-                )
-            except Exception as err:  # noqa: BLE001
-                log.warning("topic6 publish_hc_artifacts failed: %s", err)
-                published_urls = None
+                    log.warning("topic6 hc card: late folder creation failed: %s", err)
+
+            if _job.docs_folder_token:
+                # 强制同步产物到本地（默认 60 秒轮询可能还没跑到）
+                if self._artifact_sync is not None:
+                    try:
+                        synced = await self._artifact_sync.sync_once(_job.job_id, _job.ma_session_id)
+                        log.info("topic6 pre-hc artifact sync done job=%s synced=%d", _job.job_id, synced)
+                    except Exception as err:  # noqa: BLE001
+                        log.warning("topic6 pre-hc artifact sync failed: %s", err)
+                # 发布产物到飞书
+                try:
+                    published_urls = await self._publisher.publish_hc_artifacts(
+                        _job, _hc_kind, _payload,
+                        sync_root=self._sync_root,
+                        job_folder_token=_job.docs_folder_token,
+                    )
+                    log.info(
+                        "topic6 publish_hc_artifacts result job=%s hc=%s urls=%s",
+                        _job.job_id, _hc_kind, published_urls,
+                    )
+                except Exception as err:  # noqa: BLE001
+                    log.warning("topic6 publish_hc_artifacts failed: %s", err)
+                    published_urls = None
 
         card = build_hc_card(_job, _hc_kind, _event_id, _payload, published_urls)
 
@@ -514,6 +534,14 @@ class Topic6Hitl(Topic6CardSenderProtocol):
             "topic6 hc card shown job=%s hc=%s message_id=%s",
             _job.job_id, _hc_kind, message_id,
         )
+
+        # HC 卡片已发出，主动 @ 通知审核人（任务可能运行了几小时，需要即时感知）
+        if self._notifier is not None:
+            try:
+                self._notifier.notify_hc_ready(_job, _hc_kind)
+            except Exception as err:  # noqa: BLE001
+                log.warning("topic6 hc reviewer notification failed: %s", err)
+
         return message_id
 
     # ---- HandleCardAction(orchestrator → hitl)----------------------------
@@ -772,6 +800,7 @@ class Topic6Hitl(Topic6CardSenderProtocol):
             self._runner._feishu.send_to_chat(chat_id, text)  # noqa: SLF001
         except Exception as error:  # noqa: BLE001
             log.warning("topic6 hitl reply failed chat=%s: %s", chat_id, error)
+
 
 
 # ---- 纯函数:回调 payload 解析 ---------------------------------------------

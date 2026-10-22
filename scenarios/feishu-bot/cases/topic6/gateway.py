@@ -15,6 +15,7 @@ from arkagent.store import GatewayStore
 
 from artifact_sync import Topic6ArtifactSync
 from feishu_doc_publisher import FeishuDocPublisher
+from job_notifier import JobNotifier
 from pipeline_store import (
     STATUS_RUNNING,
     STATUS_WAIT_HC,
@@ -565,6 +566,8 @@ def build_gateway(config: Topic6Config, ark, sender, loop: asyncio.AbstractEvent
         ark,
         FeishuOAuth(config.feishu_app_id, config.feishu_app_secret),
     )
+    # 统一通知器（@ 发起人通知 HC 审核/完成/失败/中断）——只依赖 sender，可以在 runner 前创建
+    notifier = JobNotifier(sender)
     runner = Topic6Runner(
         ark,
         sender,
@@ -581,6 +584,7 @@ def build_gateway(config: Topic6Config, ark, sender, loop: asyncio.AbstractEvent
             if config.model_auth_header_name and config.model_auth_header_value
             else None
         ),
+        notifier=notifier,
     )
     # [P0-2] 飞书文档发布器
     publisher = FeishuDocPublisher(sender, config.docs_folder_token)
@@ -590,12 +594,14 @@ def build_gateway(config: Topic6Config, ark, sender, loop: asyncio.AbstractEvent
         pipeline_store.get_job,
         poll_interval_sec=config.artifact_poll_interval_sec,
     )
+    # 注入 notifier 到 hitl（runner 已通过构造函数注入）
     hitl = Topic6Hitl(Topic6HitlDeps(
         store=pipeline_store,
         runner=runner,
         publisher=publisher,
         artifact_sync=artifact_sync,
         sync_root=Path(config.artifact_sync_dir),
+        notifier=notifier,
     ))
     runner.bind_card_sender(hitl)
 

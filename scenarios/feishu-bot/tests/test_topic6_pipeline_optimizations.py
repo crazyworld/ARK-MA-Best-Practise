@@ -1591,8 +1591,10 @@ def test_coordinator_uses_demo_fast_paths_and_single_insight_entry():
     coordinator = COORDINATOR_PROMPT.read_text(encoding="utf-8")
 
     assert "run_demo_routes.py" in coordinator
-    assert "--mode demo --run-id {N} --demo-fast" in coordinator
-    assert "C2_事件归档/c2_run/c2_status.json" in coordinator
+    assert "run_demo_batch2.py" in coordinator
+    assert "wait_c2_complete.py" in coordinator
+    assert "launch_c2_background.py" in coordinator
+    assert "publish_report_to_feishu.py" in coordinator
     assert "不再委派 4 个 `topic6-insighter`" in coordinator
     assert "--publish-date \"{publish_date}\" --version {N}" in coordinator
     assert "最多重跑一次同一正式入口" in coordinator
@@ -1632,7 +1634,7 @@ def test_phase_f_uses_runtime_identity_and_response_url_without_secret_output():
     assert "--perm edit --as bot --yes" in prompt
     assert "严禁执行 `lark-cli auth login`" in prompt
     assert "降级为 `--as user`" in prompt
-    assert "任一步失败不得输出 HC3" in coordinator
+    assert "任一步失败不得输出 HC3" in coordinator or "Phase F 失败，不输出 HC3" in coordinator
     assert "FEISHU_HOTREPORT_FOLDER_TOKEN" not in prompt
     assert "CC_SESSION_KEY" not in prompt
     assert "bluefocus.feishu.cn" not in prompt

@@ -33,6 +33,7 @@ from urllib.parse import unquote, urlsplit
 
 from arkagent.ark import ArkClient, event_error, event_progress, event_requires_action, event_text
 from arkagent.feishu import FeishuSender
+from job_notifier import JobNotifier
 from pipeline_store import (
     HC_KINDS,
     STATUS_DONE,
@@ -61,6 +62,10 @@ MODE_FULL_KEYWORDS = ("full", "完整", "正式", "test", "小样本", "试跑")
 MAX_IDLE_NUDGES = 3
 # HC 卡点的 idle 是正常业务行为（等人审），不做自动催促。
 _HC_PHASE_PREFIXES = tuple(HC_KINDS)
+
+# model_request_failed_error 的自动重试上限和退避策略。
+# Provider 侧临时故障（速率限制/超载）不应直接终止 pipeline。
+_MAX_PROVIDER_RETRIES = 5
 MODE_SKIP_SAMPLING_KEYWORDS = (
     "skip_sampling",
     "skip-sampling",
@@ -320,6 +325,7 @@ class _ProgressState:
     last_patch_at: float = 0.0
     last_signature: str = ""
     idle_nudge_count: int = 0
+    provider_retry_count: int = 0
 
     def push_tool_line(self, line: str) -> None:
         if len(self.tool_lines) == self.tool_lines.maxlen:
@@ -339,6 +345,7 @@ class Topic6Runner:
         loop: Optional[asyncio.AbstractEventLoop] = None,
         card_sender: Optional["Topic6CardSenderProtocol"] = None,
         extra_headers: Optional[dict] = None,
+        notifier: Optional["JobNotifier"] = None,
     ):
         self._ark = ark
         self._feishu = feishu
@@ -348,6 +355,7 @@ class Topic6Runner:
         self._card_sender = card_sender  # 由 topic6_hitl 注入
         # BYOK Direct 模式：按请求动态附加的模型鉴权 Header；未配置时为 None（原豆包模式）。
         self._extra_headers = extra_headers
+        self._notifier = notifier  # 由 gateway 装配时注入
         # 串行化“检查活跃任务 → 创建 Session → 落 Job”，避免两个同时到达的触发
         # 都在落库前通过检查并各自创建一条长任务。
         self._start_lock = asyncio.Lock()
@@ -493,7 +501,12 @@ class Topic6Runner:
         prev = self._active_streams.get(job.ma_session_id)
         if prev is not None and not prev.done():
             prev.cancel()
-        self._store.resume_running(job.job_id, next_phase=job.current_phase)
+        # HC 通过后 phase 应脱离 HC 前缀，否则后续 idle 会被误判为"等人审"而跳过 nudge。
+        # 用 "post-HCx" 标记过渡态，Agent 实际输出 [phase] 后会被 _maybe_update_phase 覆盖。
+        next_phase = job.current_phase
+        if next_phase in HC_KINDS:
+            next_phase = f"post-{next_phase}"
+        self._store.resume_running(job.job_id, next_phase=next_phase)
         # 复用同一张进度卡片(state 若已回收就重建,避免续跑丢卡)。
         if job.job_id not in self._progress:
             self._progress[job.job_id] = _ProgressState()
@@ -802,9 +815,53 @@ class Topic6Runner:
                     if etype == "session.status_terminated"
                     else "session_failed"
                 )
-                # 这条终态分支过去是静默的(只改库+刷卡),导致日志里无法区分
-                # “真·Session 终态(failed/terminated)”和其他本地收口的假失败
-                # (SSE 断线/契约错/reject)。补一行 error 日志作为真失败实锤。
+                # model_request_failed_error 是 provider 侧临时问题（速率限制/超载），
+                # 不是 session 的永久终态。延迟后自动重试，避免频繁请求加剧速率限制。
+                if etype == "session.error" and "model_request_failed" in error:
+                    _state = self._progress.get(job_id)
+                    _job = self._store.get_job(job_id)
+                    if (
+                        _state is not None
+                        and _job is not None
+                        and _state.provider_retry_count < _MAX_PROVIDER_RETRIES
+                    ):
+                        _state.provider_retry_count += 1
+                        delay = min(30 * (2 ** (_state.provider_retry_count - 1)), 300)
+                        log.warning(
+                            "topic6 provider error (retry %d/%d in %ds) job=%s: %s",
+                            _state.provider_retry_count, _MAX_PROVIDER_RETRIES,
+                            delay, job_id, error[:200],
+                        )
+                        await self._render_and_patch(
+                            job_id, status=STATUS_RUNNING,
+                            error=f"模型服务暂时不可用，{delay}s 后自动重试（{_state.provider_retry_count}/{_MAX_PROVIDER_RETRIES}）",
+                            force=True,
+                        )
+                        await asyncio.sleep(delay)
+                        try:
+                            await self._ark.send_message(
+                                _job.ma_session_id,
+                                "[系统] 模型服务已恢复，请继续执行当前阶段。",
+                            )
+                            log.info(
+                                "topic6 provider retry sent job=%s retry=%d",
+                                job_id, _state.provider_retry_count,
+                            )
+                        except Exception as retry_err:  # noqa: BLE001
+                            log.error(
+                                "topic6 provider retry send_message failed job=%s: %s",
+                                job_id, retry_err,
+                            )
+                            self._store.mark_failed(job_id, f"自动重试失败：{retry_err!s}"[:400])
+                            await self._render_and_patch(
+                                job_id, status=STATUS_FAILED,
+                                error=f"自动重试失败：{retry_err!s}"[:400], force=True,
+                            )
+                            return True
+                        # 重试成功——不 return，继续 SSE 消费循环
+                        continue
+
+                # 非 provider 错误，或重试次数耗尽——走终态
                 log.error(
                     "topic6 session terminal job=%s etype=%s error=%s",
                     job_id, etype, error[:400],
@@ -1202,6 +1259,18 @@ class Topic6Runner:
             return
         state.last_patch_at = now
         state.last_signature = signature
+
+        # 终态统一通知：@ 任务发起人告知结果
+        if status in (STATUS_DONE, STATUS_FAILED, STATUS_STOPPED) and self._notifier is not None:
+            try:
+                if status == STATUS_DONE:
+                    self._notifier.notify_done(job, online_url=online_url)
+                elif status == STATUS_FAILED:
+                    self._notifier.notify_failed(job, error=error)
+                elif status == STATUS_STOPPED:
+                    self._notifier.notify_stopped(job, reason=error)
+            except Exception as notify_err:  # noqa: BLE001
+                log.warning("topic6 terminal notification failed job=%s: %s", job_id, notify_err)
 
     async def patch_job_card(self, job_id: str, card: dict) -> Optional[str]:
         """串行 patch 当前任务唯一的交互卡片；没有 message_id 时返回 None。"""

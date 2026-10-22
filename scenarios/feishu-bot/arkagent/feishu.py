@@ -820,57 +820,63 @@ class FeishuSender:
 
         走 `POST /open-apis/drive/v1/permissions/{token}/members?type={token_type}`。
         perm: full_access / can_edit / can_view。
+        使用 requests 直接调用。
         """
-        from lark_channel import AccessTokenType, BaseRequest, HttpMethod
+        import requests as _requests
 
-        body = json.dumps({
+        access_token = self._get_tenant_access_token()
+        url = f"https://open.feishu.cn/open-apis/drive/v1/permissions/{token}/members?type={token_type}"
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json; charset=utf-8",
+        }
+        body = {
             "member_type": "openid",
             "member_id": member_open_id,
             "perm": perm,
-        })
-        request = (
-            BaseRequest.builder()
-            .http_method(HttpMethod.POST)
-            .uri(f"/open-apis/drive/v1/permissions/{token}/members?type={token_type}")
-            .token_types({AccessTokenType.TENANT})
-            .body(body)
-            .build()
-        )
-        response = self._client.request(request)
-        if not response.success():
-            msg = f"{response.code}: {response.msg}"
+        }
+        resp = _requests.post(url, headers=headers, json=body, timeout=30)
+        if resp.status_code != 200:
+            text = resp.text[:300]
+            if "already" in text.lower():
+                return
+            raise RuntimeError(f"飞书 add_permission HTTP {resp.status_code}: {text}")
+        data = resp.json()
+        code = data.get("code", -1)
+        if code != 0:
+            msg = data.get("msg", "")
             if "already" in msg.lower():
                 return  # 幂等：已有权限不报错
-            raise RuntimeError(f"飞书 add_permission 失败 {msg}")
+            raise RuntimeError(f"飞书 add_permission 失败 code={code}: {msg[:200]}")
 
     def create_folder(self, parent_token: str, name: str) -> str:
         """在指定文件夹下创建子文件夹，返回子文件夹 token。
 
         走 `POST /open-apis/drive/v1/files/create_folder`。
+        使用 requests 直接调用（BaseRequest 对 JSON body 的传递可能不稳定）。
         """
-        from lark_channel import AccessTokenType, BaseRequest, HttpMethod
+        import requests as _requests
 
-        body = json.dumps({
-            "name": name,
-            "folder_token": parent_token,
-        })
-        request = (
-            BaseRequest.builder()
-            .http_method(HttpMethod.POST)
-            .uri("/open-apis/drive/v1/files/create_folder")
-            .token_types({AccessTokenType.TENANT})
-            .body(body)
-            .build()
-        )
-        response = self._client.request(request)
-        if not response.success():
-            raise RuntimeError(f"飞书创建文件夹失败 {response.code}: {response.msg}")
-        raw = response.raw.content if response.raw else None
-        try:
-            payload = json.loads(raw) if raw else {}
-        except (TypeError, ValueError, json.JSONDecodeError):
-            payload = {}
-        return str((payload.get("data") or {}).get("token") or "")
+        token = self._get_tenant_access_token()
+        url = "https://open.feishu.cn/open-apis/drive/v1/files/create_folder"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json; charset=utf-8",
+        }
+        body = {"name": name, "folder_token": parent_token}
+        resp = _requests.post(url, headers=headers, json=body, timeout=30)
+        if resp.status_code != 200:
+            raise RuntimeError(f"飞书创建文件夹 HTTP {resp.status_code}: {resp.text[:300]}")
+        data = resp.json()
+        if data.get("code") != 0:
+            raise RuntimeError(
+                f"飞书创建文件夹失败 code={data.get('code')}: {data.get('msg', '')[:200]}"
+            )
+        inner = data.get("data") or {}
+        folder_token = str(inner.get("token") or inner.get("folder_token") or "")
+        if not folder_token:
+            raise RuntimeError(f"飞书创建文件夹成功但未返回 token: {data}")
+        return folder_token
 
     def import_spreadsheet(
         self,
@@ -878,74 +884,77 @@ class FeishuSender:
         file_path: str,
         title: str,
     ) -> str:
-        """将本地 xlsx 文件导入为飞书在线表格，返回 spreadsheet token。
+        """将本地 xlsx 文件上传到飞书 Drive 文件夹，返回 file_token。
 
-        分两步：
-        1. 上传文件到飞书 Drive（upload_all）
-        2. 用 import API 将文件转为飞书在线表格
-
-        简化实现：先用 upload_all 上传到目标文件夹，飞书会根据扩展名自动识别为表格。
-        走 `POST /open-apis/drive/v1/files/upload_all`（multipart）。
+        走 `POST /open-apis/drive/v1/files/upload_all`（multipart/form-data）。
+        SDK 的 BaseRequest 不支持 multipart，这里直接用 requests 调原始 API。
         """
         import os as _os
-
-        from lark_channel import AccessTokenType, BaseRequest, HttpMethod
+        import requests as _requests
 
         file_size = _os.path.getsize(file_path)
         file_name = _os.path.basename(file_path)
         if title and not file_name.startswith(title):
             file_name = f"{title}.xlsx" if file_name.endswith(".xlsx") else file_name
 
-        # Step 1: 上传文件
-        # 使用 multipart/form-data 上传
-        import io
-        import uuid as _uuid
+        # 获取 tenant_access_token（SDK 内部管理，通过 bot_open_id 触发一次鉴权后从 token 缓存提取）
+        token = self._get_tenant_access_token()
 
-        boundary = f"----HermesUpload{_uuid.uuid4().hex[:16]}"
-        body_parts = []
-
-        # file_name field
-        body_parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"file_name\"\r\n\r\n{file_name}")
-        # parent_type field
-        body_parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"parent_type\"\r\n\r\nexplorer")
-        # parent_node field
-        body_parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"parent_node\"\r\n\r\n{folder_token}")
-        # size field
-        body_parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"size\"\r\n\r\n{file_size}")
-
-        # 读文件内容
-        with open(file_path, "rb") as f:
-            file_content = f.read()
-
-        # file field (binary)
-        file_header = f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{file_name}\"\r\nContent-Type: application/octet-stream\r\n\r\n"
-        end_boundary = f"\r\n--{boundary}--\r\n"
-
-        # 构建完整 body
-        text_parts = "\r\n".join(body_parts) + "\r\n"
-        full_body = text_parts.encode("utf-8") + file_header.encode("utf-8") + file_content + end_boundary.encode("utf-8")
-
-        request = (
-            BaseRequest.builder()
-            .http_method(HttpMethod.POST)
-            .uri("/open-apis/drive/v1/files/upload_all")
-            .token_types({AccessTokenType.TENANT})
-            .headers({"Content-Type": f"multipart/form-data; boundary={boundary}"})
-            .body(full_body)
-            .build()
-        )
-        response = self._client.request(request)
-        if not response.success():
-            raise RuntimeError(f"飞书上传文件失败 {response.code}: {response.msg}")
-        raw = response.raw.content if response.raw else None
-        try:
-            payload = json.loads(raw) if raw else {}
-        except (TypeError, ValueError, json.JSONDecodeError):
-            payload = {}
-        file_token = str((payload.get("data") or {}).get("file_token") or "")
+        url = "https://open.feishu.cn/open-apis/drive/v1/files/upload_all"
+        headers = {"Authorization": f"Bearer {token}"}
+        fields = {
+            "file_name": (None, file_name),
+            "parent_type": (None, "explorer"),
+            "parent_node": (None, folder_token),
+            "size": (None, str(file_size)),
+            "file": (file_name, open(file_path, "rb"), "application/octet-stream"),
+        }
+        resp = _requests.post(url, headers=headers, files=fields, timeout=120)
+        if resp.status_code != 200:
+            raise RuntimeError(f"飞书上传文件 HTTP {resp.status_code}: {resp.text[:300]}")
+        data = resp.json()
+        if data.get("code") != 0:
+            raise RuntimeError(f"飞书上传文件失败 code={data.get('code')}: {data.get('msg', '')[:200]}")
+        file_token = str((data.get("data") or {}).get("file_token") or "")
         if not file_token:
-            raise RuntimeError(f"飞书上传成功但未返回 file_token: {payload}")
+            raise RuntimeError(f"飞书上传成功但未返回 file_token: {data}")
         return file_token
+
+    def _get_tenant_access_token(self) -> str:
+        """获取当前应用的 tenant_access_token。
+
+        lark_channel SDK 内部维护 token 缓存，这里通过 SDK 的内部接口获取。
+        如果获取不到，回退到直接调飞书 API。
+        """
+        # 方式1：从 SDK client 内部取（lark_channel.Client 维护 token store）
+        try:
+            token_pair = getattr(self._client, "_token_manager", None)
+            if token_pair is not None:
+                # lark_channel 的 TokenManager 有 get_tenant_access_token 方法
+                get_token = getattr(token_pair, "get_tenant_access_token", None)
+                if get_token is not None:
+                    result = get_token()
+                    if result:
+                        return str(result)
+        except Exception:
+            pass
+
+        # 方式2：直接调飞书 internal API 获取 tenant_access_token
+        import requests as _requests
+
+        resp = _requests.post(
+            "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+            json={
+                "app_id": self._client._app_id if hasattr(self._client, "_app_id") else "",
+                "app_secret": self._client._app_secret if hasattr(self._client, "_app_secret") else "",
+            },
+            timeout=10,
+        )
+        data = resp.json()
+        token = data.get("tenant_access_token", "")
+        if not token:
+            raise RuntimeError(f"获取 tenant_access_token 失败: {data}")
+        return token
 
     def load_quote_chain(self, message: "IncomingMessage") -> list["QuotedMessage"]:
         """把 message 引用的那条、及其上溯的引用链读出来（最多 MAX_QUOTE_DEPTH 层）。

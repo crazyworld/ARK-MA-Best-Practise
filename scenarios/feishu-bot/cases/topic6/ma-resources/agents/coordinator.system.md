@@ -143,29 +143,22 @@ Coordinator 后台执行完整 C2。必须先发出 5 个委派，再立刻启�
   批次完成后按上述 record-id 规则分别记录 R1~R5 成本，不得重复追加。
 - 完整 C2 不再临场拼 shell 或逐阶段调脚本。只启动一次可恢复入口:
   ```bash
-  nohup python /mnt/skills/topic6-event-registry/scripts/run_topic6_c2.py \
-    --project-dir "{project_dir}" --mode {mode} --run-id {N} \
-    > "{project_dir}/04_标注/C2_事件归档/c2_runner.log" 2>&1 &
-  echo $! > "{project_dir}/04_标注/C2_事件归档/c2_runner.pid"
+  python /mnt/skills/topic6-event-registry/scripts/launch_c2_background.py \
+    --project-dir "{project_dir}" --mode {mode} --run-id {N}
   ```
-- `mode=demo` 不创建 5 个 annotator 子线程，也不运行完整 C2 链。用一个 bash
-  同时启动两个 demo 快速入口并 `wait`，调用 bash 工具时设置 `timeout=900`，
+  脚本内部处理 nohup、日志重定向和 PID 文件写入，Agent 无需自行拼 shell。
+  幂等：C2 已在跑时返回 `already_running` 并退出 0。
+- `mode=demo` 不创建 5 个 annotator 子线程，也不运行完整 C2 链。用单入口脚本同时
+  启动 R1~R5 demo routes 和 C2 fast，调用 bash 工具时设置 `timeout=900`，
   任一失败则本阶段失败:
   ```bash
-  mkdir -p "{project_dir}/04_标注/C2_事件归档"
-  python /mnt/skills/topic6-annotation/scripts/run_demo_routes.py \
+  python /mnt/skills/topic6-annotation/scripts/run_demo_batch2.py \
     --project-dir "{project_dir}" \
     --input "{project_dir}/04_标注/_可用子集/usable_subset_demo_r{N}.xlsx" \
-    --run-id {N} > "{project_dir}/04_标注/demo_routes.log" 2>&1 &
-  ROUTES_PID=$!
-  python /mnt/skills/topic6-event-registry/scripts/run_topic6_c2.py \
-    --project-dir "{project_dir}" --mode demo --run-id {N} --demo-fast \
-    > "{project_dir}/04_标注/C2_事件归档/c2_runner.log" 2>&1 &
-  C2_PID=$!
-  wait "$ROUTES_PID"; ROUTES_RC=$?
-  wait "$C2_PID"; C2_RC=$?
-  test "$ROUTES_RC" -eq 0 -a "$C2_RC" -eq 0
+    --run-id {N}
   ```
+  脚本内部并发启动两个进程并 wait，返回结构化 JSON 结果。
+  Agent 不需要自行拼 nohup/wait/PID 或检查退出码。
   `run_demo_routes.py` 复用 R1~R5 正式 Prompt 和输出列，内部固定并发启动 R1~R5
   五个 route worker；每个 worker 内按小批次串行调用 Ark，并对每个成功批次原子
   checkpoint，重跑时只补缺失批次。它与 C2 快速入口并发，因此第二批共六路并行。
@@ -177,9 +170,15 @@ Coordinator 后台执行完整 C2。必须先发出 5 个委派，再立刻启�
   路径仅用于 50 条样本的流程演示，不得用于 full/skip_sampling 或正式业务结论。
 - 单入口内部固定执行正确的跨平台拓扑：四平台并行 `00_clean_titles.py` → `x0_merge_platforms.py` → merged 目录统一执行 `01→02→03→04→05→06→07→x2→x3→x4`。严禁在 x0 前按平台执行 01~04；x0 只读取阶段 00 的 `clean_titles.jsonl`，提前执行的 01~04 不会被合库。
 - C2 Chat 模型读取 `$C2_CHAT_MODEL_ID`，默认 `Doubao-Seed-Evolving`；Embedding 模型读取 `$EMBEDDING_MODEL_ID`，默认 `Doubao-embedding`。二者都不是 DataHub 的 `DeepSeek-V4-Flash`。
-- 等待 R1~R5 的同一时期可读取 `04_标注/C2_事件归档/c2_run/c2_status.json`
-  查看 C2 进度。若状态为 `running`，只读取状态，禁止重复启动；若 Session 恢复，
-  可再次调用同一入口，它会按 `completed_stages` 续跑。
+- 等待 R1~R5 的同一时期，用短时检查器等待 C2 完成（与 wait_datahub_batch.py 同模式）：
+  ```bash
+  python /mnt/skills/topic6-event-registry/scripts/wait_c2_complete.py \
+    --project-dir "{project_dir}" --run-id {N} --wait-seconds 105
+  ```
+  调用 bash 工具时必须显式设置 `timeout=115`。返回 `running` 时**原参数再次调用**；
+  返回 `done` 时 C2 已完成；返回 `failed` 时停止。
+  **禁止用 `sleep`、`while` 循环、`tail --pid` 或手动读 `c2_status.json` 替代此脚本。**
+  若 Session 恢复，可再次调用 `run_topic6_c2.py` 同一入口，它会按 `completed_stages` 续跑。
 - 入口完成后直接产出 `04_标注/C2_事件归档/c2_event_result_r{N}.xlsx`，供 `merge_annotations.py` 消费。
 - 禁止把 `00_seed_from_registry.py` 当成 C2 起点；它只用于有上一窗口 Registry 的跨窗口增量场景。禁止四个平台各自跑完 05~08 后再拼接，那会漏掉跨平台事件合并。
 
@@ -344,18 +343,23 @@ C→D 全量合并关卡通过后,在输出 HC2 payload 之前,委派子 Agent `
 ### Phase F · 合并发布
 
 - 执行 `python /mnt/skills/topic6-insight/scripts/pipeline_f.py --mode {demo|skip_sampling}` → 合并四版块 md
-- 用 lark-cli `--as bot` 推送到飞书云文档：应用身份动态创建分区文件夹，先给发起人
-  `edit` 协作者权限并校验成功，再转移所有权；2 位 admin（赵修源 / 袁杰松）授
-  `full_access`
-- 发起人读取 gateway 注入的 `$FEISHU_USER_OPEN_ID`;不得依赖未注入的 `CC_SESSION_KEY`
-- 严禁执行 `lark-cli auth login`、Device Flow 或降级为 `--as user`；扫码用户可能不是
-  任务发起人，会生成发起人无法访问的文档。Bot 缺 scope 时必须停在 Phase F
-- 飞书文档 URL 必须读取 lark-cli 导入响应中的 `data.url`;禁止硬编码租户域名
-- URL 写入 run_config.yaml；飞书会话通知由 Gateway 的 HC3 卡片负责,不得在沙箱内重复发消息
+- 用统一发布脚本推送到飞书云文档（一条命令完成创建文件夹→导入→授权→转移所有权）：
+  ```bash
+  python /mnt/skills/topic6-insight/scripts/publish_report_to_feishu.py \
+    --project-dir "{project_dir}" \
+    --report-file "07_报告/热点报告_{period_label}_v{N}.md" \
+    --folder-name "热点周报_{period_label}_{mode}" \
+    --doc-name "热点报告_{period_label}"
+  ```
+  脚本内部以 `--as bot` 身份执行：创建文件夹 → 导入 docx → 给 `$FEISHU_USER_OPEN_ID`
+  授 edit → 转移 owner → 给 2 位 admin 授 full_access → 校验每步 JSON `ok == true`。
+  成功时 stdout 输出 JSON `{"status":"success","doc_token":"...","doc_url":"...","folder_token":"..."}`。
+  **Agent 不需要自行拼 lark-cli 命令、解析 JSON 或编排权限步骤。**
+- 失败时脚本返回退出码 1 + JSON `{"status":"failed","error":"..."}` → Phase F 失败，不输出 HC3
 - `pipeline_f.py` 成功后发布 `node=report`,`--include "07_报告/热点报告_*_v{N}.md"`
-- 关卡:导入成功，且发起人授权、owner 转移、admin 授权的每条 JSON 均满足
-  `ok == true`；任一步失败不得输出 HC3
-- lark-cli 未配置、应用缺 scope、导入失败或 URL 为空时，Phase F 均视为失败；严禁用本地 Markdown 路径代替飞书文档并进入 HC3。
+- 将脚本输出的 `doc_url` 写入 run_config.yaml 的 `status.f.feishu_doc_url`
+- 严禁执行 `lark-cli auth login`、Device Flow 或降级为 `--as user`
+- lark-cli 未配置、发布脚本失败或 URL 为空时，Phase F 均视为失败；严禁用本地 Markdown 路径代替飞书文档并进入 HC3。
 
 ### HC3 · 报告审核 · 结构化输出后 end_turn
 
