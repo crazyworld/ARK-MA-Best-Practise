@@ -73,10 +73,11 @@ def _fmt_payload_line(label: str, value: Any) -> Optional[dict]:
     return {"tag": "markdown", "content": f"**{label}**:{value}"}
 
 
-def _payload_summary_elements(payload: dict) -> list[dict]:
+def _payload_summary_elements(payload: dict, published_urls: dict | None = None) -> list[dict]:
     """把 HC payload 的主要字段拍成一段可读摘要。字段挑选与三档 HC 通用。
 
     注意: validator_verdict 不在此处渲染,由 _validator_verdict_elements 专责。
+    published_urls: {artifact_name: feishu_url} 映射,有值时渲染"打开编辑"按钮。
     """
     fields = [
         ("模式", payload.get("mode")),
@@ -92,6 +93,16 @@ def _payload_summary_elements(payload: dict) -> list[dict]:
         node = _fmt_payload_line(label, value)
         if node:
             elements.append(node)
+    # 已发布产物的编辑链接（仅在有链接时渲染）
+    if published_urls:
+        for name, url in published_urls.items():
+            elements.append({
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": f"📝 打开编辑 {name}"},
+                "type": "default",
+                "width": "fill",
+                "behaviors": [{"type": "open_url", "default_url": url}],
+            })
     return elements
 
 
@@ -161,7 +172,8 @@ def _action_value(job_id: str, hc_kind: str, event_id: int, decision: str) -> di
     }
 
 
-def build_hc_card(job: PipelineJob, hc_kind: str, event_id: int, payload: dict) -> dict:
+def build_hc_card(job: PipelineJob, hc_kind: str, event_id: int, payload: dict,
+                  published_urls: dict | None = None) -> dict:
     """构造一张 HC 交互卡片(schema=2.0)。三档 HC 共用一套骨架,靠 _HC_META 区分。"""
     meta = _HC_META.get(hc_kind, _HC_META["HC1"])
     verdict = payload.get("validator_verdict") or {}
@@ -175,7 +187,7 @@ def build_hc_card(job: PipelineJob, hc_kind: str, event_id: int, payload: dict) 
         {
             "tag": "markdown",
             "content": (
-                f"任务 ID:`{job.job_id}`  ·  运行模式:**{job.mode}**  ·  "
+                f"任务 ID:`{job.job_id}`  ·  Session:`{job.ma_session_id}`  ·  运行模式:**{job.mode}**  ·  "
                 f"当前阶段:**{hc_kind}**"
             ),
         },
@@ -195,7 +207,7 @@ def build_hc_card(job: PipelineJob, hc_kind: str, event_id: int, payload: dict) 
                 ),
             }
         )
-    elements.extend(_payload_summary_elements(payload))
+    elements.extend(_payload_summary_elements(payload, published_urls))
     elements.extend(_validator_verdict_elements(payload))
     elements.append({"tag": "hr"})
     # BLOCK 时通过按钮加警示文案,保留操作权但视觉提醒。
@@ -261,12 +273,57 @@ def build_hc_card(job: PipelineJob, hc_kind: str, event_id: int, payload: dict) 
             ],
         }
     )
+    # P1-1: 补充说明表单（复用已有的 DECISION_REMARK 后端能力）
+    elements.append(
+        {
+            "tag": "form",
+            "name": f"remark_form_{event_id}",
+            "elements": [
+                {
+                    "tag": "input",
+                    "name": "remark_note",
+                    "required": True,
+                    "input_type": "multiline_text",
+                    "rows": 2,
+                    "auto_resize": True,
+                    "max_rows": 4,
+                    "max_length": 500,
+                    "width": "fill",
+                    "label": {"tag": "plain_text", "content": "提问 / 补充说明"},
+                    "placeholder": {
+                        "tag": "plain_text",
+                        "content": "向 Agent 提问或要求补充信息，Agent 回复后会再次发审核卡",
+                    },
+                },
+                {
+                    "tag": "button",
+                    "name": "remark_submit",
+                    "text": {
+                        "tag": "plain_text",
+                        "content": "📝 发送补充说明",
+                    },
+                    "type": "default",
+                    "width": "fill",
+                    "form_action_type": "submit",
+                    "behaviors": [
+                        {
+                            "type": "callback",
+                            "value": _action_value(
+                                job.job_id, hc_kind, event_id, DECISION_REMARK
+                            ),
+                        }
+                    ],
+                },
+            ],
+        }
+    )
     elements.append(
         {
             "tag": "markdown",
             "content": (
                 "> 通过：进入下一阶段  "
                 "  ·  打回并继续：Agent 根据原因回退或调整后重试"
+                "  ·  补充说明：Agent 回复后再次发审核卡"
             ),
         }
     )
@@ -314,7 +371,7 @@ def build_hc_resolved_card(
         {
             "tag": "markdown",
             "content": (
-                f"任务 ID:`{job.job_id}`  ·  运行模式:**{job.mode}**  ·  "
+                f"任务 ID:`{job.job_id}`  ·  Session:`{job.ma_session_id}`  ·  运行模式:**{job.mode}**  ·  "
                 f"当前阶段:**{hc_kind}**"
             ),
         },
@@ -355,16 +412,19 @@ def build_hc_resolved_card(
     }
 
 
-def build_hc1_card(job: PipelineJob, event_id: int, payload: dict) -> dict:
-    return build_hc_card(job, "HC1", event_id, payload)
+def build_hc1_card(job: PipelineJob, event_id: int, payload: dict,
+                   published_urls: dict | None = None) -> dict:
+    return build_hc_card(job, "HC1", event_id, payload, published_urls)
 
 
-def build_hc2_card(job: PipelineJob, event_id: int, payload: dict) -> dict:
-    return build_hc_card(job, "HC2", event_id, payload)
+def build_hc2_card(job: PipelineJob, event_id: int, payload: dict,
+                   published_urls: dict | None = None) -> dict:
+    return build_hc_card(job, "HC2", event_id, payload, published_urls)
 
 
-def build_hc3_card(job: PipelineJob, event_id: int, payload: dict) -> dict:
-    return build_hc_card(job, "HC3", event_id, payload)
+def build_hc3_card(job: PipelineJob, event_id: int, payload: dict,
+                   published_urls: dict | None = None) -> dict:
+    return build_hc_card(job, "HC3", event_id, payload, published_urls)
 
 
 # ---- HITL 主类 -------------------------------------------------------------
@@ -374,6 +434,9 @@ def build_hc3_card(job: PipelineJob, event_id: int, payload: dict) -> dict:
 class Topic6HitlDeps:
     store: PipelineStore
     runner: Topic6Runner
+    publisher: Optional["FeishuDocPublisher"] = None
+    artifact_sync: Optional["Topic6ArtifactSync"] = None
+    sync_root: Optional["Path"] = None
 
 
 class Topic6Hitl(Topic6CardSenderProtocol):
@@ -388,6 +451,9 @@ class Topic6Hitl(Topic6CardSenderProtocol):
     def __init__(self, deps: Topic6HitlDeps):
         self._store = deps.store
         self._runner = deps.runner
+        self._publisher = deps.publisher
+        self._artifact_sync = deps.artifact_sync
+        self._sync_root = deps.sync_root
 
     # ---- SendHcCard(runner → hitl)----------------------------------------
 
@@ -398,7 +464,31 @@ class Topic6Hitl(Topic6CardSenderProtocol):
         _event_id: int,
         _payload: dict,
     ) -> Optional[str]:
-        card = build_hc_card(_job, _hc_kind, _event_id, _payload)
+        # [P0-2] HC 发卡前：强制触发 artifact_sync + 发布产物到飞书
+        published_urls: dict | None = None
+        if (
+            self._publisher is not None
+            and self._publisher.enabled
+            and _job.docs_folder_token
+        ):
+            # 强制同步产物到本地（默认 60 秒轮询可能还没跑到）
+            if self._artifact_sync is not None:
+                try:
+                    await self._artifact_sync.sync_once(_job.job_id, _job.ma_session_id)
+                except Exception as err:  # noqa: BLE001
+                    log.warning("topic6 pre-hc artifact sync failed: %s", err)
+            # 发布产物到飞书
+            try:
+                published_urls = await self._publisher.publish_hc_artifacts(
+                    _job, _hc_kind, _payload,
+                    sync_root=self._sync_root,
+                    job_folder_token=_job.docs_folder_token,
+                )
+            except Exception as err:  # noqa: BLE001
+                log.warning("topic6 publish_hc_artifacts failed: %s", err)
+                published_urls = None
+
+        card = build_hc_card(_job, _hc_kind, _event_id, _payload, published_urls)
 
         # 正常路径复用任务启动时创建的主卡，整个 job 在会话里始终只有一张卡片。
         try:
@@ -542,8 +632,31 @@ class Topic6Hitl(Topic6CardSenderProtocol):
         # pass / reject / remark(兼容历史卡片) 都把决策注入 MA Session 继续跑。
         # reject 由 Coordinator 依据原因选择回退或调整，而不是 Gateway 直接终止任务。
         decision_message = _build_decision_message(hc_kind, decision, note)
+        # HC1/HC2 通过时：提示 Agent 回读飞书表格最新版（用户可能在表格中修改了标注数据）
+        if decision == DECISION_PASS and hc_kind in ("HC1", "HC2"):
+            wide_table_path = hc_event.payload.get("wide_table_path") or ""
+            decision_message += (
+                f"\n注意：用户可能在飞书在线表格中修改了宽表数据（修正标注、删除无效行等）。"
+                f"请从飞书在线表格下载最新版本覆盖沙箱内的 {wide_table_path or 'wide_table'} 后再继续后续阶段。"
+                f"如果飞书表格不存在或无法访问，则使用沙箱内已有的版本继续。"
+            )
         try:
             await self._runner.resume_job(job, decision_message)
+            # P1-2: resume 成功后 @ 通知任务发起人（必须在 try 内）
+            _decision_labels = {
+                DECISION_PASS: "通过",
+                DECISION_REJECT: "打回",
+                DECISION_REMARK: "补充说明",
+            }
+            label = _decision_labels.get(decision, decision)
+            try:
+                self._reply_sync(
+                    job.chat_id,
+                    f"{hc_kind} 审核结果：{label}，Pipeline 继续运行中。"
+                    f"（操作人：{operator_label}）",
+                )
+            except Exception as notify_err:  # noqa: BLE001
+                log.warning("topic6 at-user notification failed: %s", notify_err)
         except Exception as error:  # noqa: BLE001 - resume 失败也要通知飞书
             log.exception("topic6 resume_job failed job=%s: %s", job.job_id, error)
             self._reply_sync(job.chat_id, f"⚠️ {hc_kind} 续跑失败:{error!s}"[:200])

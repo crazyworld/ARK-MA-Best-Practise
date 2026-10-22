@@ -36,6 +36,8 @@ class Topic6Config:
     # 两者均为空则不附加，等价于走原豆包模式。
     model_auth_header_name: str = ""
     model_auth_header_value: str = ""
+    # 飞书共享根文件夹 token：HC 产物自动发布到此文件夹下的 job 子文件夹中
+    docs_folder_token: str = ""
 
 
 def load_case_config(env: Optional[Mapping[str, str]] = None) -> Topic6Config:
@@ -72,4 +74,5 @@ def load_case_config(env: Optional[Mapping[str, str]] = None) -> Topic6Config:
         ).strip().lower() in ("1", "true", "yes"),
         model_auth_header_name=(environ.get("BYOK_MODEL_AUTH_HEADER_NAME") or "").strip(),
         model_auth_header_value=(environ.get("BYOK_MODEL_AUTH_HEADER_VALUE") or "").strip(),
+        docs_folder_token=(environ.get("TOPIC6_DOCS_FOLDER_TOKEN") or "").strip(),
     )

@@ -2,7 +2,15 @@
   "name": "topic6-validator",
   "description": "通用质量验证子 Agent。由 Coordinator 在 HC 卡点前委派，按检查清单审计数据/报告质量，返回结构化 verdict。",
   "model": {
-    "id": "doubao-seed-2-1-pro-260628"
+    "id": "claude-sonnet-5-5",
+    "provider": "bmc-llm-relay",
+    "base_url": "https://bmc-llm-relay.bluemediagroup.cn/v1/chat/completions",
+    "protocol": "openai_chat_completions",
+    "token_limits": {
+      "context_window": 1000000,
+      "max_input_token_length": 872000,
+      "max_output_token_length": 128000
+    }
   },
   "system_file": "validator.system.md",
   "skills": [

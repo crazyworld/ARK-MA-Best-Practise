@@ -14,6 +14,7 @@ from arkagent.feishu import IncomingMessage
 from arkagent.store import GatewayStore
 
 from artifact_sync import Topic6ArtifactSync
+from feishu_doc_publisher import FeishuDocPublisher
 from pipeline_store import (
     STATUS_RUNNING,
     STATUS_WAIT_HC,
@@ -41,6 +42,7 @@ TOKEN_KEEPALIVE_INTERVAL_S = 60.0
 # in-chat 授权等待扫码的最大秒数；超过后取消 poll，用户需重新发送触发词。
 IN_CHAT_AUTH_TIMEOUT_S = 300.0
 CONTINUE_COMMAND_RE = re.compile(r"^/(?:continue|resume)(?:\s+(.*))?$", re.IGNORECASE)
+LOG_COMMAND_RE = re.compile(r"^/log(?:\s+(\S+))?$", re.IGNORECASE)
 
 
 class Topic6Gateway:
@@ -57,6 +59,7 @@ class Topic6Gateway:
         loop: asyncio.AbstractEventLoop,
         pipeline_store: PipelineStore | None = None,
         artifact_sync: Topic6ArtifactSync | None = None,
+        publisher: FeishuDocPublisher | None = None,
     ) -> None:
         self._config = config
         self._store = store
@@ -67,6 +70,7 @@ class Topic6Gateway:
         self._loop = loop
         self._pipeline_store = pipeline_store
         self._artifact_sync = artifact_sync
+        self._publisher = publisher
         self._authorized = set(config.authorized_open_ids)
         self._token_keepalive_tasks: dict[str, asyncio.Task] = {}
         # 每个 open_id 同时只允许一个 in-chat 授权流程
@@ -94,6 +98,17 @@ class Topic6Gateway:
         恢复不会发送 ``/continue`` 或任意 user.message：MA 尚在运行时只重建 SSE
         订阅；已到 HC 时重建同一张待审卡；已终态时更新本地 SQLite 与进度卡。
         """
+        # [P0-2] 启动时初始化飞书共享文件夹权限（幂等）
+        if self._publisher is not None and self._publisher.enabled:
+            try:
+                await self._loop.run_in_executor(
+                    None,
+                    self._publisher.init_folder_permissions,
+                    self._config.authorized_open_ids,
+                )
+            except Exception as err:  # noqa: BLE001
+                log.warning("topic6 init docs folder permissions failed: %s", err)
+
         if self._pipeline_store is None:
             return
         active_jobs = self._pipeline_store.list_active_jobs()
@@ -189,6 +204,14 @@ class Topic6Gateway:
                 self._store.complete_event(message.event_id, "completed")
                 return
 
+            log_match = LOG_COMMAND_RE.fullmatch(text)
+            if log_match:
+                await self._handle_log_command(
+                    message.chat_id, message.user_open_id, log_match.group(1),
+                )
+                self._store.complete_event(message.event_id, "completed")
+                return
+
             if await self._hitl.handle_remark_message(
                 chat_id=message.chat_id,
                 thread_id=message.thread_id,
@@ -202,7 +225,7 @@ class Topic6Gateway:
             if mode is None:
                 await self._reply(
                     message.chat_id,
-                    "当前 Bot 仅启用 topic6 场景。发送「热点周报 demo」(50 条出报告)、「热点周报 full」(先 500 条校准再跑全量)或「热点周报 skip_sampling」(跳过 500 条采样,直接跑全量)触发;发送 /continue 续跑最近一次任务;发送 /new 可取消当前任务。",
+                    "当前 Bot 仅启用 topic6 场景。发送「热点周报 demo」(50 条出报告)、「热点周报 full」(先 500 条校准再跑全量)或「热点周报 skip_sampling」(跳过 500 条采样,直接跑全量)触发;发送 /continue 续跑最近一次任务;发送 /new 可取消当前任务;发送 /log 查看当前任务日志，或 /log <session_id> 查看指定 Session 日志。",
                 )
                 self._store.complete_event(message.event_id, "completed")
                 return
@@ -227,6 +250,17 @@ class Topic6Gateway:
                     user_message=text,
                     user_vault_id=user_vault_id,
                 )
+                # [P0-2] 创建 job 飞书子文件夹（继承根文件夹权限）
+                if self._publisher is not None and self._publisher.enabled:
+                    try:
+                        folder_token = await self._loop.run_in_executor(
+                            None, self._publisher.create_job_folder, job,
+                        )
+                        if folder_token and self._pipeline_store:
+                            self._pipeline_store.update_docs_folder_token(job.job_id, folder_token)
+                            job.docs_folder_token = folder_token
+                    except Exception as err:  # noqa: BLE001
+                        log.warning("topic6 create job docs folder failed: %s", err)
                 if user_vault_id:
                     self._start_token_keepalive(job, user_vault_id)
                 if self._artifact_sync is not None:
@@ -236,8 +270,113 @@ class Topic6Gateway:
             self._store.complete_event(message.event_id, "completed")
         except Exception as error:  # noqa: BLE001
             self._store.complete_event(message.event_id, "failed")
-            reason = str(error)
-            await self._reply(message.chat_id, f"执行失败:{reason[:240]}")
+            # P0-1: 结构化错误信息，替代原来的纯文本截断。
+            reason = str(error)[:300]
+            phase_hint = ""
+            session_hint = ""
+            if hasattr(self, "_pipeline_store") and self._pipeline_store:
+                active = self._pipeline_store.get_active_job()
+                if active:
+                    phase_hint = f"（job={active.job_id}, phase={active.current_phase}）"
+                    session_hint = f"\nsession_id: {active.ma_session_id}（可用 /log {active.ma_session_id} 查看日志）"
+            await self._reply(
+                message.chat_id,
+                f"❌ 执行异常{phase_hint}：{reason}{session_hint}\n"
+                f"建议：发送 /continue 尝试恢复，或 /new 取消当前任务重新开始。",
+            )
+
+    async def _handle_log_command(
+        self, chat_id: str, user_open_id: str, session_id_arg: str | None,
+    ) -> None:
+        """/log [session_id]: 获取 MA Session 执行日志。
+
+        不带参数时使用当前活跃任务或最近一个任务的 session_id。
+        """
+        if not self._pipeline_store:
+            await self._reply(chat_id, "[/log] Pipeline store 未初始化。")
+            return
+
+        # 解析 session_id
+        session_id = (session_id_arg or "").strip()
+        source_job = None
+        if not session_id:
+            # 无参数：从当前活跃任务或最近任务取
+            source_job = self._pipeline_store.get_active_job()
+            if source_job is None:
+                jobs = self._pipeline_store.list_jobs(limit=1)
+                source_job = jobs[0] if jobs else None
+            if source_job is None:
+                await self._reply(chat_id, "[/log] 没有找到任何任务记录。请指定 session_id：`/log <session_id>`")
+                return
+            session_id = source_job.ma_session_id
+        else:
+            # 有参数：先检查是否是 job_id
+            source_job = self._pipeline_store.get_job(session_id)
+            if source_job:
+                session_id = source_job.ma_session_id
+            else:
+                source_job = self._pipeline_store.get_job_by_ma_session(session_id)
+
+        job_hint = f"job={source_job.job_id} " if source_job else ""
+        await self._reply(chat_id, f"[/log] 正在获取 {job_hint}session={session_id} 的执行日志…")
+
+        try:
+            from arkagent.ark import ArkClient
+            ark: ArkClient = self._runner._ark  # noqa: SLF001
+            events = await ark.list_session_events(session_id)
+        except Exception as err:
+            await self._reply(chat_id, f"[/log] 获取日志失败：{err!s}"[:500])
+            return
+
+        if not events:
+            await self._reply(chat_id, f"[/log] session={session_id} 无事件记录。")
+            return
+
+        # 格式化事件为可读文本
+        lines: list[str] = [f"📋 Session 日志 ({len(events)} 条事件)"]
+        lines.append(f"session_id: {session_id}")
+        if source_job:
+            lines.append(f"job_id: {source_job.job_id} · mode: {source_job.mode} · phase: {source_job.current_phase}")
+        lines.append("---")
+        for event in events:
+            etype = event.get("type", "")
+            # agent.message → 提取文本
+            if etype == "agent.message":
+                content = ""
+                data = event.get("data") or {}
+                if isinstance(data, dict):
+                    content = data.get("content") or ""
+                elif isinstance(event.get("message"), dict):
+                    content = event["message"].get("content") or ""
+                preview = (content[:150] + "…") if len(content) > 150 else content
+                lines.append(f"🤖 {preview}")
+            elif etype == "agent.tool_use":
+                tool = event.get("tool") or event.get("data", {})
+                if isinstance(tool, dict):
+                    name = tool.get("name") or tool.get("tool_name") or ""
+                    lines.append(f"🔧 {name}")
+                else:
+                    lines.append(f"🔧 tool_use")
+            elif etype == "user.message":
+                data = event.get("data") or {}
+                content = data.get("content") or "" if isinstance(data, dict) else ""
+                preview = (content[:100] + "…") if len(content) > 100 else content
+                lines.append(f"👤 {preview}")
+            elif etype in ("session.status_idle", "session.status_failed",
+                           "session.status_terminated", "session.error",
+                           "user.interrupt"):
+                error = event.get("error") or event.get("data", {}).get("error") or ""
+                if error:
+                    lines.append(f"⚠️ {etype}: {str(error)[:100]}")
+                else:
+                    lines.append(f"📌 {etype}")
+            # 其他事件类型（progress 等）不逐条输出，太多
+
+        # 飞书消息有字数限制，超过则截断
+        full_text = "\n".join(lines)
+        if len(full_text) > 4000:
+            full_text = full_text[:3900] + f"\n\n…（共 {len(events)} 条事件，已截断）"
+        await self._reply(chat_id, full_text)
 
     async def _ensure_user_authorized(
         self, chat_id: str, user_open_id: str
@@ -419,14 +558,22 @@ def build_gateway(config: Topic6Config, ark, sender, loop: asyncio.AbstractEvent
             else None
         ),
     )
-    hitl = Topic6Hitl(Topic6HitlDeps(store=pipeline_store, runner=runner))
-    runner.bind_card_sender(hitl)
+    # [P0-2] 飞书文档发布器
+    publisher = FeishuDocPublisher(sender, config.docs_folder_token)
     artifact_sync = Topic6ArtifactSync(
         ark,
         Path(config.artifact_sync_dir),
         pipeline_store.get_job,
         poll_interval_sec=config.artifact_poll_interval_sec,
     )
+    hitl = Topic6Hitl(Topic6HitlDeps(
+        store=pipeline_store,
+        runner=runner,
+        publisher=publisher,
+        artifact_sync=artifact_sync,
+        sync_root=Path(config.artifact_sync_dir),
+    ))
+    runner.bind_card_sender(hitl)
 
     async def reply(chat_id: str, text: str) -> None:
         await loop.run_in_executor(None, sender.send_to_chat, chat_id, text)
@@ -441,4 +588,5 @@ def build_gateway(config: Topic6Config, ark, sender, loop: asyncio.AbstractEvent
         loop,
         pipeline_store=pipeline_store,
         artifact_sync=artifact_sync,
+        publisher=publisher,
     )

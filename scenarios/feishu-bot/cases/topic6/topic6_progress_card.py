@@ -53,6 +53,7 @@ def _header(status: str, phase: str) -> dict:
 def _meta_line(job: PipelineJob, elapsed_sec: int) -> str:
     parts = [
         f"job=`{job.job_id}`",
+        f"session=`{job.ma_session_id}`",
         f"mode=`{job.mode}`",
         f"phase=`{job.current_phase}`",
         f"已运行 {_format_elapsed(elapsed_sec)}",
@@ -154,4 +155,33 @@ def build_progress_card(
     }
 
 
-__all__ = ["build_progress_card", "MAX_TOOL_LINES", "STATUS_RUNNING"]
+def build_error_diagnosis_card(
+    *,
+    error: str,
+    phase: str = "",
+    job_id: str = "",
+    suggestion: str = "",
+) -> dict:
+    """P0-1: 构造结构化错误诊断卡片，替代 gateway 异常兜底的纯文本。"""
+    elements: list[dict] = []
+    if job_id:
+        elements.append(
+            {"tag": "markdown", "content": f"任务 ID:`{job_id}`  ·  阶段:**{phase or '未知'}**"}
+        )
+    elements.append(
+        {"tag": "markdown", "content": f"**错误信息**\n{str(error)[:400]}"}
+    )
+    if suggestion:
+        elements.append({"tag": "markdown", "content": f"**建议操作**\n{suggestion}"})
+    return {
+        "schema": "2.0",
+        "config": {"width_mode": "default"},
+        "header": {
+            "title": {"tag": "plain_text", "content": "❌ Topic6 Pipeline · 执行异常"},
+            "template": "red",
+        },
+        "body": {"elements": elements},
+    }
+
+
+__all__ = ["build_progress_card", "build_error_diagnosis_card", "MAX_TOOL_LINES", "STATUS_RUNNING"]

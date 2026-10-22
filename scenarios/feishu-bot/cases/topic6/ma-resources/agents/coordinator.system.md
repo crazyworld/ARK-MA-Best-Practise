@@ -106,7 +106,7 @@ python /mnt/skills/topic6-annotation/scripts/publish_node_artifacts.py \
   调用 bash 工具时必须显式设置 `timeout=115`；这是工具调用参数，不是 shell 命令参数。
   返回 `running` 时原参数再次调用；禁止另起 `sleep`、`while`、`tail --pid`、`ps`，
   禁止读取 `.bash_bg`。返回 `failed` 立即停止；返回 `complete` 后再进入筛选
-- DataHub 模型使用 `$DATAHUB_MODEL_ID`（默认且大小写敏感的准确 ID 为 `Doubao-Seed-1.6-lite`）；这是 DataHub 的模型名，不得传给方舟 Chat API。以 completion_meta 的实际模型和 `total_consume` 记账,不得套用 MA Agent 模型价格
+- DataHub 模型使用 `$DATAHUB_MODEL_ID`（默认且大小写敏感的准确 ID 为 `DeepSeek-V4-Flash-0731`）；这是 DataHub 的模型名，不得传给方舟 Chat API。以 completion_meta 的实际模型和 `total_consume` 记账,不得套用 MA Agent 模型价格
 - DataHub worker 不自行记账。批次 `complete` 后由 Coordinator 读取每路
   completion_meta 并各调用一次 cost_tracker；必须传
   `--record-id "datahub:{task}:r{N}:{mode}"`，防止恢复或重试时重复入账
@@ -176,7 +176,7 @@ Coordinator 后台执行完整 C2。必须先发出 5 个委派，再立刻启�
   如实回报错误并停止。`--demo-fast` 用一次批量事件归并直接生成 C2 两列结果。该快速
   路径仅用于 50 条样本的流程演示，不得用于 full/skip_sampling 或正式业务结论。
 - 单入口内部固定执行正确的跨平台拓扑：四平台并行 `00_clean_titles.py` → `x0_merge_platforms.py` → merged 目录统一执行 `01→02→03→04→05→06→07→x2→x3→x4`。严禁在 x0 前按平台执行 01~04；x0 只读取阶段 00 的 `clean_titles.jsonl`，提前执行的 01~04 不会被合库。
-- C2 Chat 模型读取 `$C2_CHAT_MODEL_ID`，默认 `Doubao-Seed-Evolving`；Embedding 模型读取 `$EMBEDDING_MODEL_ID`，默认 `Doubao-embedding`。二者都不是 DataHub 的 `Doubao-Seed-1.6-lite`。
+- C2 Chat 模型读取 `$C2_CHAT_MODEL_ID`，默认 `Doubao-Seed-Evolving`；Embedding 模型读取 `$EMBEDDING_MODEL_ID`，默认 `Doubao-embedding`。二者都不是 DataHub 的 `DeepSeek-V4-Flash-0731`。
 - 等待 R1~R5 的同一时期可读取 `04_标注/C2_事件归档/c2_run/c2_status.json`
   查看 C2 进度。若状态为 `running`，只读取状态，禁止重复启动；若 Session 恢复，
   可再次调用同一入口，它会按 `completed_stages` 续跑。
@@ -257,6 +257,8 @@ D 阶段合并关卡通过后,在输出 HC1 payload 之前,委派子 Agent `topi
 
 用户通过卡片按钮回复 `HC1 通过` / `HC1 打回:xxx` / `HC1 备注:xxx` 后,你会收到新的 `user.message`。
 
+**HC1 通过后回读飞书表格**:用户可能在飞书在线表格中修正了标注数据（修改 C0_有效、删除无效行等）。收到"通过"后、进入后续阶段前,如果 user.message 中包含"飞书在线表格"相关提示,需要先通过 lark-cli 或飞书 API 下载飞书表格最新版本,覆盖沙箱内的 `05_合并/wide_table_{mode}_r{N}.xlsx`,再继续。如果飞书表格不存在或无法访问,则使用沙箱内已有的版本继续。
+
 - `mode=full`:收到“通过”后进入 C→D 全量,再经过 HC2。
 - `mode=demo`:收到“通过”后**直接进入 Phase E**,使用 `wide_table_demo_r{N}.xlsx`;严禁重跑全量 C→D,跳过 HC2。demo 报告必须注明“基于 50 条分层样本,仅供流程演示,不可作为正式全量结论”。
 - `mode=skip_sampling`:初始阶段直接跑全量 C→D,不进入 HC1,完成后进入 HC2。
@@ -313,6 +315,8 @@ C→D 全量合并关卡通过后,在输出 HC2 payload 之前,委派子 Agent `
 ```
 
 违约 = gateway 触发兜底卡片,审核人看到的是空壳提示、无法据此判断,严重影响 demo 效果。
+
+**HC2 通过后回读飞书表格**:同 HC1,用户可能在飞书在线表格中修正了全量宽表数据。收到"通过"后、进入 Phase E 前,如果 user.message 中包含"飞书在线表格"相关提示,需要先通过 lark-cli 或飞书 API 下载飞书表格最新版本,覆盖沙箱内的 `05_合并/wide_table_skip_sampling_r{N}.xlsx`,再继续。如果飞书表格不存在或无法访问,则使用沙箱内已有的版本继续。
 
 ### Phase E 四路(脚本内流式有限并发)
 

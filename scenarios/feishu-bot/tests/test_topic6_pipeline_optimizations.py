@@ -575,7 +575,7 @@ def test_agent_prompts_use_canonical_model_id_and_allow_one_retry():
     coordinator = COORDINATOR_PROMPT.read_text(encoding="utf-8")
     annotator = ANNOTATOR_PROMPT.read_text(encoding="utf-8")
 
-    assert "`Doubao-Seed-1.6-lite`" in coordinator
+    assert "`DeepSeek-V4-Flash-0731`" in coordinator
     assert '--model-id "$DATAHUB_MODEL_ID"' in annotator
     assert "C2_CHAT_MODEL_ID" in coordinator
     assert "`Doubao-Seed-Evolving`" in coordinator
@@ -615,6 +615,7 @@ def test_c2_runner_uses_platform_00_then_merged_remaining_stages(tmp_path):
     )
     assert "doubao-seed-evolving" in merged_commands
     assert "Doubao-Seed-1.6-lite" not in merged_commands
+    assert "DeepSeek-V4-Flash-0731" not in merged_commands
 
 
 def test_c2_runner_parallel_stage_passes_command_and_log_path(tmp_path, monkeypatch):
@@ -1644,7 +1645,7 @@ def test_environment_preinstalls_openai_for_insight_pipeline():
 
     assert "openai>=1.0" in environment["config"]["packages"]["pip"]
     assert "httpx>=0.27" in environment["config"]["packages"]["pip"]
-    assert environment["config"]["env"]["DATAHUB_MODEL_ID"] == "Doubao-Seed-1.6-lite"
+    assert environment["config"]["env"]["DATAHUB_MODEL_ID"] == "DeepSeek-V4-Flash-0731"
     assert environment["config"]["env"]["C2_CHAT_MODEL_ID"] == "Doubao-Seed-Evolving"
     assert (
         environment["config"]["env"]["EMBEDDING_MODEL_ID"]

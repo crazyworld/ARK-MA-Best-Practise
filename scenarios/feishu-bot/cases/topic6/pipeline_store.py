@@ -83,6 +83,7 @@ class PipelineJob:
     last_error: str = ""
     online_url: str = ""  # Phase H 妙搭产物
     progress_card_message_id: str = ""  # 进度卡片飞书 message_id;用于 patch 覆写
+    docs_folder_token: str = ""  # 飞书 job 子文件夹 token;HC 产物发布到此
 
 
 @dataclass
@@ -191,6 +192,10 @@ class PipelineStore:
         if "operator_label" not in hc_cols:
             self._conn.execute(
                 "ALTER TABLE pipeline_hc_events ADD COLUMN operator_label TEXT NOT NULL DEFAULT ''"
+            )
+        if "docs_folder_token" not in cols:
+            self._conn.execute(
+                "ALTER TABLE pipeline_jobs ADD COLUMN docs_folder_token TEXT NOT NULL DEFAULT ''"
             )
 
     def _protect_files(self) -> None:
@@ -480,6 +485,14 @@ class PipelineStore:
                 (message_id or "", _now(), job_id),
             )
 
+    def update_docs_folder_token(self, job_id: str, folder_token: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE pipeline_jobs SET docs_folder_token = ?, updated_at = ? "
+                "WHERE job_id = ?",
+                (folder_token, _now(), job_id),
+            )
+
     # ---- hc_events ---------------------------------------------------------
 
     def append_hc_event(
@@ -595,6 +608,11 @@ class PipelineStore:
             progress_card_message_id=(
                 row["progress_card_message_id"]
                 if "progress_card_message_id" in row.keys()
+                else ""
+            ),
+            docs_folder_token=(
+                row["docs_folder_token"]
+                if "docs_folder_token" in row.keys()
                 else ""
             ),
         )

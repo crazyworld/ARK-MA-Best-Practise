@@ -29,7 +29,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Optional
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from arkagent.ark import ArkClient, event_error, event_progress, event_requires_action, event_text
 from arkagent.feishu import FeishuSender
@@ -264,9 +264,27 @@ def build_hc_fallback_payload(
 
 
 def validate_hc_payload(payload: dict) -> Optional[str]:
-    """返回 HC payload 的契约错误；合法时返回 None。"""
-    if payload.get("hc") == "HC3" and not str(payload.get("feishu_doc_url") or "").strip():
-        return "HC3 缺少 feishu_doc_url：Phase F 飞书发布未完成"
+    """返回 HC payload 的契约错误；合法时返回 None。
+
+    P1-4 扩展：
+    - HC3: 保留 feishu_doc_url 必填。Validator BLOCK 不在此处 reject（已有
+      build_hc_card 红色警示 + "忽略阻断并通过"按钮处理）。
+    - HC1/HC2: 对非 fallback payload 检查 wide_table_path。
+      fallback payload（__fallback__=True）跳过——build_hc_fallback_payload 在
+      project_dir 未解析时不填充此字段，强制校验会打断原有兜底机制。
+    """
+    hc = payload.get("hc")
+
+    if hc == "HC3":
+        if not str(payload.get("feishu_doc_url") or "").strip():
+            return "HC3 缺少 feishu_doc_url：Phase F 飞书发布未完成"
+
+    if hc in ("HC1", "HC2"):
+        if not payload.get("__fallback__"):
+            wide_table = str(payload.get("wide_table_path") or "").strip()
+            if not wide_table:
+                return f"{hc} 缺少 wide_table_path"
+
     return None
 
 
@@ -870,6 +888,11 @@ class Topic6Runner:
                 )
                 job = self._store.get_job(job_id) or job
             payload_error = validate_hc_payload(payload)
+            # Recovery 路径已有 pending HC 时跳过校验——该 payload 创建时已通过验证，
+            # 重新验证可能因为缺少运行时字段（如 wide_table_path）而误 reject。
+            existing_hc = self._store.latest_hc_for_job(job_id, hc_kind)
+            if recovering and existing_hc and existing_hc.resolved_at is None:
+                payload_error = None
             if payload_error:
                 log.error(
                     "topic6 invalid HC payload job=%s hc=%s: %s",
@@ -886,7 +909,6 @@ class Topic6Runner:
                 )
                 await self._reply_async_by_job(job_id, f"❌ {payload_error}")
                 return None
-            existing_hc = self._store.latest_hc_for_job(job_id, hc_kind)
             if recovering and existing_hc and existing_hc.resolved_at is None:
                 # Gateway 断线后本地已记下 HC，但卡片 patch 尚未送达或旧卡不可见。
                 # 重建同一条审核事件，不能 append，否则同一个按钮会生成两段决策审计。
@@ -952,8 +974,47 @@ class Topic6Runner:
             self._progress.pop(job_id, None)
             return None
 
-        state = self._progress.get(job_id)
+        # P0-4: Phase H idle 但无 online_url → 妙搭发布专项诊断，直接走终态。
         phase = job.current_phase or "A"
+        if phase == "H" and not online_url:
+            last_summary = (last[:300] + "…") if len(last) > 300 else (last or "(无输出)")
+            reason = (
+                f"Phase H 妙搭发布失败：Agent idle 但未输出有效 online_url。"
+                f"\n最后输出：{last_summary}"
+            )[:400]
+            log.error(
+                "topic6 phase_h publish failed job=%s last=%s",
+                job_id, last_summary,
+            )
+            self._store.mark_failed(job_id, reason)
+            await self._render_and_patch(
+                job_id, status=STATUS_FAILED, error=reason, force=True
+            )
+            await self._reply_async_by_job(
+                job_id,
+                f"❌ 妙搭发布失败，Agent 未输出有效的发布链接。\n"
+                f"可发送 /continue 重试，或联系管理员检查 skill 配置。",
+            )
+            return None
+
+        # P0-1 第三优先级：结构化诊断（在 HC + Phase H 之后，nudge 之前）
+        requires_human, diagnosis_summary = self._diagnose_interruption(
+            job_id, phase, collected,
+        )
+        if requires_human:
+            reason = diagnosis_summary[:400]
+            log.error(
+                "topic6 diagnosis requires_human job=%s phase=%s: %s",
+                job_id, phase, reason,
+            )
+            self._store.mark_stopped(job_id, reason)
+            await self._render_and_patch(
+                job_id, status=STATUS_STOPPED, error=reason, force=True
+            )
+            await self._reply_async_by_job(job_id, f"⚠️ {reason}")
+            return None
+
+        state = self._progress.get(job_id)
         is_hc_phase = phase.startswith(_HC_PHASE_PREFIXES)
         can_nudge = (
             state is not None
@@ -1038,6 +1099,42 @@ class Topic6Runner:
             return
         ts = time.strftime("%H:%M:%S", time.localtime())
         state.push_tool_line(f"{ts} · {progress}")
+
+    def _diagnose_interruption(
+        self, job_id: str, phase: str, collected: list[str],
+    ) -> tuple[bool, str]:
+        """P0-1 结构化诊断：分析 idle 中断原因，返回 (requires_human, summary)。
+
+        requires_human=True 时调用方应标记 stopped 而非 nudge。
+        插入位置：HC 和 Phase H 检测之后、nudge 之前（第三优先级）。
+        """
+        state = self._progress.get(job_id)
+        elapsed = time.time() - state.started_at_wall if state else 0
+        last = collected[-1] if collected else ""
+        nudge_count = state.idle_nudge_count if state else 0
+
+        # 启动阶段失败：Session 创建 <60 秒就 idle，collected 为空
+        if elapsed < 60 and not collected:
+            return True, (
+                f"Pipeline 在启动阶段（Phase {phase}）即中断，"
+                f"Session 创建后 {int(elapsed)} 秒内无任何 Agent 输出。"
+                f"请检查环境配置、Agent ID 和飞书授权状态。"
+            )
+
+        # 错误模式检测：Agent 最后输出含明确错误关键词
+        error_patterns = ("error", "failed", "超时", "timeout", "quota", "rate limit", "异常")
+        last_lower = last.lower()
+        if any(p in last_lower for p in error_patterns):
+            # 但如果 nudge 还没用完，先让 nudge 试一试（可能是临时性错误）
+            if nudge_count >= MAX_IDLE_NUDGES:
+                return True, (
+                    f"Pipeline 在 Phase {phase} 中断，Agent 输出包含错误信息"
+                    f"（自动续跑 {nudge_count} 次均未恢复）。"
+                    f"\n最后输出：{last[:200]}"
+                )
+
+        # 默认不阻断，让 nudge 机制继续尝试
+        return False, ""
 
     def _review_lines(self, job_id: str) -> list[str]:
         """格式化已落库的 HC 审核轨迹，供后续运行态和终态持续展示。"""
@@ -1186,6 +1283,14 @@ def extract_final_online_url(text: str) -> str:
         candidate = str(value.get("online_url") or "").strip()
         if not candidate:
             continue
+        # P0-4 URL 清洗：Agent 偶发把 JSON 结尾 "} 误拼进 URL（如 %22%7D）。
+        # 先 URL 解码还原，再清洗明确的非 URL 尾部字符。
+        decoded = unquote(candidate)
+        cleaned = re.sub(r'["\'})\]\s]+$', "", decoded)
+        if cleaned != candidate:
+            cleaned_parsed = urlsplit(cleaned)
+            if cleaned_parsed.scheme == "https" and cleaned_parsed.netloc:
+                candidate = cleaned
         parsed = urlsplit(candidate)
         hostname = (parsed.hostname or "").lower()
         is_aiforce = hostname == "aiforce.cloud" or hostname.endswith(".aiforce.cloud")
