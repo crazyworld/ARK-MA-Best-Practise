@@ -77,11 +77,11 @@ TOPIC6_DOCS_FOLDER_TOKEN=fldcnXXXXXXXXX
 |------|--------|----------|------|
 | `LLM_RELAY_API_KEY` | `sk-xxxx` | **无改动** | bmc-llm-relay API Key，沙箱内的 C2 relay 脚本使用 |
 | `LLM_RELAY_BASE_URL` | `https://bmc-llm-relay.bluemediagroup.cn/v1` | **无改动** | bmc-llm-relay 端点 |
-| `DATAHUB_MODEL_ID` | ~~`Doubao-Seed-1.6-lite`~~ → `DeepSeek-V4-Flash-0731` | **本次改动** | DataHub 标注任务的模型 ID |
+| `DATAHUB_MODEL_ID` | ~~`Doubao-Seed-1.6-lite`~~ → `DeepSeek-V4-Flash` | **本次改动** | DataHub 标注任务的模型 ID |
 | `C2_CHAT_MODEL_ID` | `Doubao-Seed-Evolving` | 无改动 | C2 事件归并的 Chat 模型 |
 | `EMBEDDING_MODEL_ID` | `Doubao-embedding` | 无改动 | 向量嵌入模型 |
 
-> `DATAHUB_MODEL_ID` 已在 environment.json 中硬编码为 `DeepSeek-V4-Flash-0731`，
+> `DATAHUB_MODEL_ID` 已在 environment.json 中硬编码为 `DeepSeek-V4-Flash`，
 > create_all.sh 不会用 `${DATAHUB_MODEL_ID}` 环境变量展开（它是固定值不是占位符），
 > 所以**本地不需要 export 这个变量**。
 
@@ -165,7 +165,7 @@ cd scenarios/feishu-bot/cases/topic6
 curl -sS "$ARK_BASE_URL/environments/$TOPIC6_ENVIRONMENT_ID" \
   -H "Authorization: Bearer $ARK_API_KEY" \
   -H "X-Ark-Beta: agentic-2026-06-01" | jq '.data.config.env.DATAHUB_MODEL_ID'
-# 期望输出: "DeepSeek-V4-Flash-0731"
+# 期望输出: "DeepSeek-V4-Flash"
 
 # 检查 Coordinator Agent 的模型
 curl -sS "$ARK_BASE_URL/agents/$TOPIC6_COORDINATOR_AGENT_ID" \

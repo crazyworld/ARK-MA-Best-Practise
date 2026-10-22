@@ -28,7 +28,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
-- **DataHub 标注模型**: `Doubao-Seed-1.6-lite` → `DeepSeek-V4-Flash-0731`。
+- **DataHub 标注模型**: `Doubao-Seed-1.6-lite` → `DeepSeek-V4-Flash`。
 - **Validator Agent 模型**: `doubao-seed-2-1-pro-260628` → `claude-sonnet-5-5` via `bmc-llm-relay`，与 coordinator/annotator/insighter 统一。
 - **`validate_hc_payload`**: HC1/HC2 新增 `wide_table_path` 存在性检查；`__fallback__` 兜底 payload 跳过校验以保持容错；HC3 的 Validator BLOCK 不再阻断卡片发送（保留已有的红色警示 + "忽略阻断并通过"按钮）。([T2-Q3])
 - **`topic6_hitl.py` send_hc_card**: 发卡前强制触发 `artifact_sync.sync_once` + `publisher.publish_hc_artifacts`，产物链接通过 `published_urls` 渲染到卡片按钮中；publisher 不可用或异常时降级为无链接卡片。
@@ -68,7 +68,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 | `coordinator.system.md` | HC1/HC2 回读飞书表格指令, DataHub 模型名更新 |
 | `annotator.system.md` | DataHub 模型名更新 |
 | `validator.json` | 模型 → claude-sonnet-5-5 via bmc-llm-relay |
-| `environment.json` | `DATAHUB_MODEL_ID` → `DeepSeek-V4-Flash-0731` |
+| `environment.json` | `DATAHUB_MODEL_ID` → `DeepSeek-V4-Flash` |
 
 **Added (6)**
 

@@ -33,7 +33,7 @@
       "ARK_BASE_URL": "${ARK_BASE_URL}",
       "LLM_RELAY_API_KEY": "${LLM_RELAY_API_KEY}",
       "LLM_RELAY_BASE_URL": "${LLM_RELAY_BASE_URL}",
-      "DATAHUB_MODEL_ID": "DeepSeek-V4-Flash-0731",
+      "DATAHUB_MODEL_ID": "DeepSeek-V4-Flash",
       "C2_CHAT_MODEL_ID": "Doubao-Seed-Evolving",
       "EMBEDDING_MODEL_ID": "Doubao-embedding",
       "EMBEDDING_IS_MULTIMODAL": "false"

@@ -333,44 +333,68 @@ class Topic6Gateway:
             return
 
         # 格式化事件为可读文本
+        # 方舟事件结构：event["type"] + event["content"] (list of {type, text}) + event["name"] (tool_use)
+        from arkagent.ark import event_text as _event_text
+
         lines: list[str] = [f"📋 Session 日志 ({len(events)} 条事件)"]
         lines.append(f"session_id: {session_id}")
         if source_job:
             lines.append(f"job_id: {source_job.job_id} · mode: {source_job.mode} · phase: {source_job.current_phase}")
         lines.append("---")
+        shown = 0
+        MAX_LOG_ITEMS = 80  # 飞书消息字数有限，控制条目数
         for event in events:
+            if shown >= MAX_LOG_ITEMS:
+                lines.append(f"\n…（已展示 {shown} 条，共 {len(events)} 条事件，后续省略）")
+                break
             etype = event.get("type", "")
-            # agent.message → 提取文本
+            # agent.message → 用 event_text 提取（与 SSE 消费一致）
             if etype == "agent.message":
-                content = ""
-                data = event.get("data") or {}
-                if isinstance(data, dict):
-                    content = data.get("content") or ""
-                elif isinstance(event.get("message"), dict):
-                    content = event["message"].get("content") or ""
-                preview = (content[:150] + "…") if len(content) > 150 else content
+                text = _event_text(event)
+                if not text:
+                    continue  # 跳过空消息
+                preview = (text[:150] + "…") if len(text) > 150 else text
                 lines.append(f"🤖 {preview}")
+                shown += 1
             elif etype == "agent.tool_use":
-                tool = event.get("tool") or event.get("data", {})
-                if isinstance(tool, dict):
-                    name = tool.get("name") or tool.get("tool_name") or ""
-                    lines.append(f"🔧 {name}")
+                # event["name"] 是工具名，event["input"]["description"] 是简述
+                name = event.get("name") or "unknown_tool"
+                tool_input = event.get("input") if isinstance(event.get("input"), dict) else {}
+                desc = str(tool_input.get("description") or "").strip()
+                if desc:
+                    lines.append(f"🔧 {name}: {desc[:100]}")
                 else:
-                    lines.append(f"🔧 tool_use")
+                    lines.append(f"🔧 {name}")
+                shown += 1
+            elif etype == "agent.tool_result":
+                # 只展示出错的 tool_result
+                if event.get("is_error") is True:
+                    text = _event_text(event)
+                    preview = (text[:100] + "…") if len(text) > 100 else (text or "(无详情)")
+                    lines.append(f"❌ 工具出错: {preview}")
+                    shown += 1
             elif etype == "user.message":
-                data = event.get("data") or {}
-                content = data.get("content") or "" if isinstance(data, dict) else ""
-                preview = (content[:100] + "…") if len(content) > 100 else content
+                text = _event_text(event)
+                if not text:
+                    continue
+                preview = (text[:100] + "…") if len(text) > 100 else text
                 lines.append(f"👤 {preview}")
+                shown += 1
             elif etype in ("session.status_idle", "session.status_failed",
                            "session.status_terminated", "session.error",
                            "user.interrupt"):
-                error = event.get("error") or event.get("data", {}).get("error") or ""
-                if error:
-                    lines.append(f"⚠️ {etype}: {str(error)[:100]}")
+                error_info = event.get("error")
+                if isinstance(error_info, dict):
+                    error_msg = error_info.get("message") or error_info.get("type") or ""
+                elif isinstance(error_info, str):
+                    error_msg = error_info
+                else:
+                    error_msg = ""
+                if error_msg:
+                    lines.append(f"⚠️ {etype}: {str(error_msg)[:150]}")
                 else:
                     lines.append(f"📌 {etype}")
-            # 其他事件类型（progress 等）不逐条输出，太多
+                shown += 1
 
         # 飞书消息有字数限制，超过则截断
         full_text = "\n".join(lines)
