@@ -122,7 +122,14 @@ def _ensure_lark_cli_configured() -> None:
             capture_output=True, text=True, timeout=15,
         )
         if proc.returncode != 0:
-            raise RuntimeError(f"lark-cli config init 失败: {proc.stderr.strip()[:200]}")
+            # 方舟沙箱环境中凭据由外部注入，config init 不可用——只要
+            # LARKSUITE_CLI_STRICT_MODE 环境变量已设置就可以正常工作。
+            if os.environ.get("LARKSUITE_CLI_STRICT_MODE"):
+                return  # 外部注入凭据 + strict-mode 环境变量，无需 config init
+            raise RuntimeError(
+                f"lark-cli config init 失败: {proc.stderr.strip()[:200]}\n"
+                "提示: 在 Environment env 中设置 LARKSUITE_CLI_STRICT_MODE=bot 可跳过 config init"
+            )
     except FileNotFoundError:
         raise RuntimeError("lark-cli 未安装")
 
@@ -261,9 +268,66 @@ def main() -> int:
         e.strip() for e in args.admin_emails.split(",") if e.strip()
     )
 
+    # 尝试 lark-cli 主路径; 不可用时 fallback 到飞书 Open API 直连
+    use_fallback = False
     try:
-        # Step 0: Ensure lark-cli is configured
         _ensure_lark_cli_configured()
+    except RuntimeError as cli_err:
+        print(f"⚠️ lark-cli 不可用({cli_err}), fallback 到飞书 Open API 直连", file=sys.stderr)
+        use_fallback = True
+
+    if use_fallback:
+        try:
+            from feishu_api_fallback import (
+                step_create_folder as fb_create_folder,
+                step_import_document as fb_import_document,
+                step_grant_operator as fb_grant_operator,
+                step_transfer_owner as fb_transfer_owner,
+                step_grant_admins as fb_grant_admins,
+            )
+        except ImportError as imp_err:
+            result = {"status": "failed", "error": f"lark-cli 和 feishu_api_fallback 均不可用: {imp_err}"}
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 1
+
+        try:
+            folder_token = fb_create_folder(args.folder_name)
+            print(f"✅ [fallback] 文件夹已创建: {folder_token}", file=sys.stderr)
+
+            doc_token, doc_url = fb_import_document(
+                str(report_path), folder_token, args.doc_name,
+            )
+            print(f"✅ [fallback] 文档已导入: {doc_url}", file=sys.stderr)
+
+            fb_grant_operator(doc_token, operator_open_id)
+            print(f"✅ [fallback] 发起人已授权 edit: {operator_open_id}", file=sys.stderr)
+
+            fb_transfer_owner(doc_token, operator_open_id)
+            print(f"✅ [fallback] 所有权已转移: {operator_open_id}", file=sys.stderr)
+
+            fb_grant_admins(doc_token, admin_emails)
+            print(f"✅ [fallback] Admin 已授权: {', '.join(admin_emails)}", file=sys.stderr)
+
+            result = {
+                "status": "success",
+                "backend": "feishu_api_fallback",
+                "doc_token": doc_token,
+                "doc_url": doc_url,
+                "folder_token": folder_token,
+                "operator": operator_open_id,
+                "admins": list(admin_emails),
+            }
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
+
+        except Exception as err:
+            result = {"status": "failed", "backend": "feishu_api_fallback", "error": str(err)}
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            print(f"❌ [fallback] {err}", file=sys.stderr)
+            return 1
+
+    try:
+        # Step 0 already done above (lark-cli configured)
 
         # Step 1: Create folder
         folder_token = step_create_folder(args.folder_name)

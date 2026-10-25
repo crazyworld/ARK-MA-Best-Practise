@@ -156,6 +156,30 @@ def run(project_dir: str, mode: str, run_id: int) -> dict:
         keep = ["row_id"] + [c for c in C3_SOURCE_COLS if c in df_c3.columns]
         df_c3 = df_c3[keep].copy()
         df_c3["提取节点"] = df_c3.apply(_filter_c3_nodes, axis=1)
+        # smoke/demo 样本量小，严格窗口期过滤可能导致「提取节点」整列为空，
+        # 此时 fallback 到原始未过滤值以确保后续流程（HC/洞察）有数据可用。
+        # runner 把 smoke 转为 full 传给脚本，所以从 run_config.yaml 读原始 mode。
+        filtered_hit = (df_c3["提取节点"].fillna("") != "").sum()
+        if filtered_hit == 0:
+            _rc_path = proj / "run_config.yaml"
+            _original_mode = mode
+            if _rc_path.exists():
+                import yaml
+                _rc = yaml.safe_load(_rc_path.read_text(encoding="utf-8")) or {}
+                _original_mode = _rc.get("mode", mode)
+            if _original_mode == "smoke":
+                # 从原始列恢复：重读 C3 postprocess 的原始「提取节点」字段
+                c3_raw = pd.read_excel(c3_file, usecols=lambda c: c in {"row_id", "提取节点"})
+                if "提取节点" in c3_raw.columns:
+                    raw_hit = (c3_raw["提取节点"].fillna("") != "").sum()
+                    if raw_hit > 0:
+                        print(
+                            f"[merge] ⚠️ C3 窗口期过滤后提取节点全空 (smoke 模式, {len(df_c3)} 行)，"
+                            f"fallback 到原始值 ({raw_hit}/{len(c3_raw)} 行有值)",
+                            file=sys.stderr,
+                        )
+                        raw_map = c3_raw.set_index("row_id")["提取节点"]
+                        df_c3["提取节点"] = df_c3["row_id"].map(raw_map)
         df = df.merge(df_c3[["row_id", "提取节点"]], on="row_id", how="left")
 
     c2_file = ann_dir / "C2_事件归档" / f"c2_event_result_r{run_id}.xlsx"

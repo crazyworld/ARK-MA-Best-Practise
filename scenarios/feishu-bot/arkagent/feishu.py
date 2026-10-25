@@ -886,12 +886,14 @@ class FeishuSender:
         file_path: str,
         title: str,
     ) -> str:
-        """将本地 xlsx 文件上传到飞书 Drive 文件夹，返回 file_token。
+        """将本地 xlsx 文件导入为飞书在线表格，返回 spreadsheet token。
 
-        走 `POST /open-apis/drive/v1/files/upload_all`（multipart/form-data）。
-        SDK 的 BaseRequest 不支持 multipart，这里直接用 requests 调原始 API。
+        两步走：
+        1. upload_all 上传原始文件到临时位置
+        2. import_tasks 将文件转换为飞书在线表格（可在线编辑）
         """
         import os as _os
+        import time as _time
         import requests as _requests
 
         file_size = _os.path.getsize(file_path)
@@ -899,11 +901,11 @@ class FeishuSender:
         if title and not file_name.startswith(title):
             file_name = f"{title}.xlsx" if file_name.endswith(".xlsx") else file_name
 
-        # 获取 tenant_access_token（SDK 内部管理，通过 bot_open_id 触发一次鉴权后从 token 缓存提取）
         token = self._get_tenant_access_token()
-
-        url = "https://open.feishu.cn/open-apis/drive/v1/files/upload_all"
         headers = {"Authorization": f"Bearer {token}"}
+
+        # Step 1: upload_all 上传原始文件
+        upload_url = "https://open.feishu.cn/open-apis/drive/v1/files/upload_all"
         fields = {
             "file_name": (None, file_name),
             "parent_type": (None, "explorer"),
@@ -911,7 +913,7 @@ class FeishuSender:
             "size": (None, str(file_size)),
             "file": (file_name, open(file_path, "rb"), "application/octet-stream"),
         }
-        resp = _requests.post(url, headers=headers, files=fields, timeout=120)
+        resp = _requests.post(upload_url, headers=headers, files=fields, timeout=120)
         if resp.status_code != 200:
             raise RuntimeError(f"飞书上传文件 HTTP {resp.status_code}: {resp.text[:300]}")
         data = resp.json()
@@ -920,7 +922,63 @@ class FeishuSender:
         file_token = str((data.get("data") or {}).get("file_token") or "")
         if not file_token:
             raise RuntimeError(f"飞书上传成功但未返回 file_token: {data}")
-        return file_token
+
+        # Step 2: import_tasks 将文件转为飞书在线表格
+        import_url = "https://open.feishu.cn/open-apis/drive/v1/import_tasks"
+        import_body = {
+            "file_extension": "xlsx",
+            "file_token": file_token,
+            "type": "sheet",
+            "file_name": title or file_name.replace(".xlsx", ""),
+            "point": {
+                "mount_type": 1,
+                "mount_key": folder_token,
+            },
+        }
+        resp = _requests.post(
+            import_url,
+            headers={**headers, "Content-Type": "application/json; charset=utf-8"},
+            json=import_body,
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"飞书导入任务 HTTP {resp.status_code}: {resp.text[:300]}")
+        data = resp.json()
+        if data.get("code") != 0:
+            raise RuntimeError(f"飞书导入任务失败 code={data.get('code')}: {data.get('msg', '')[:200]}")
+        ticket = str((data.get("data") or {}).get("ticket") or "")
+        if not ticket:
+            raise RuntimeError(f"飞书导入任务未返回 ticket: {data}")
+
+        # Step 3: 轮询 import_tasks 结果，获取在线表格 token
+        poll_url = f"https://open.feishu.cn/open-apis/drive/v1/import_tasks/{ticket}"
+        for _ in range(30):
+            _time.sleep(1)
+            resp = _requests.get(poll_url, headers=headers, timeout=10)
+            if resp.status_code != 200:
+                continue
+            result = resp.json()
+            job_status = (result.get("data") or {}).get("result", {}).get("job_status", 0)
+            if job_status == 0:  # success
+                sheet_token = (result.get("data") or {}).get("result", {}).get("token", "")
+                if sheet_token:
+                    # 清理临时上传的原始文件（已转换为在线表格，原文件不再需要）
+                    try:
+                        _requests.delete(
+                            f"https://open.feishu.cn/open-apis/drive/v1/files/{file_token}?type=file",
+                            headers=headers,
+                            timeout=10,
+                        )
+                    except Exception:
+                        pass
+                    return sheet_token
+            elif job_status == 1:  # processing
+                continue
+            else:  # failed
+                err_msg = (result.get("data") or {}).get("result", {}).get("job_error_msg", "unknown")
+                raise RuntimeError(f"飞书导入失败 status={job_status}: {err_msg}")
+
+        raise RuntimeError(f"飞书导入超时（30s）ticket={ticket}")
 
     def _get_tenant_access_token(self) -> str:
         """获取当前应用的 tenant_access_token。
