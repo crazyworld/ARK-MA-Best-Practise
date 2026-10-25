@@ -122,14 +122,25 @@ def _ensure_lark_cli_configured() -> None:
             capture_output=True, text=True, timeout=15,
         )
         if proc.returncode != 0:
-            # 方舟沙箱环境中凭据由外部注入，config init 不可用——只要
-            # LARKSUITE_CLI_STRICT_MODE 环境变量已设置就可以正常工作。
-            if os.environ.get("LARKSUITE_CLI_STRICT_MODE"):
-                return  # 外部注入凭据 + strict-mode 环境变量，无需 config init
-            raise RuntimeError(
-                f"lark-cli config init 失败: {proc.stderr.strip()[:200]}\n"
-                "提示: 在 Environment env 中设置 LARKSUITE_CLI_STRICT_MODE=bot 可跳过 config init"
+            # 方舟沙箱中 config init 被拦截（"credentials are provided externally"）。
+            # 即使环境变量齐全，lark-cli 也可能因 vault 未注入 bot token 而 token_missing。
+            # 做一次 dry-run 验证 bot 身份是否真的可用。
+            verify = subprocess.run(
+                ["lark-cli", "drive", "+create-folder", "--name", "__probe__", "--as", "bot", "--dry-run"],
+                capture_output=True, text=True, timeout=10,
             )
+            probe_ok = False
+            try:
+                probe_data = json.loads(verify.stdout.strip())
+                probe_ok = probe_data.get("ok") is True
+            except Exception:
+                pass
+            if not probe_ok:
+                # bot 身份不可用——强制走 fallback
+                raise RuntimeError(
+                    "lark-cli bot 身份不可用（config init 被拦截 + bot dry-run 失败），"
+                    "需要 fallback 到飞书 Open API 直连"
+                )
     except FileNotFoundError:
         raise RuntimeError("lark-cli 未安装")
 
@@ -299,14 +310,17 @@ def main() -> int:
             )
             print(f"✅ [fallback] 文档已导入: {doc_url}", file=sys.stderr)
 
-            fb_grant_operator(doc_token, operator_open_id)
-            print(f"✅ [fallback] 发起人已授权 edit: {operator_open_id}", file=sys.stderr)
-
-            fb_transfer_owner(doc_token, operator_open_id)
-            print(f"✅ [fallback] 所有权已转移: {operator_open_id}", file=sys.stderr)
-
-            fb_grant_admins(doc_token, admin_emails)
-            print(f"✅ [fallback] Admin 已授权: {', '.join(admin_emails)}", file=sys.stderr)
+            # 权限设置——失败不阻断（文件夹权限会继承到子文件）
+            for perm_step, perm_fn, perm_args, perm_desc in [
+                ("授权发起人", fb_grant_operator, (doc_token, operator_open_id), operator_open_id),
+                ("转移所有权", fb_transfer_owner, (doc_token, operator_open_id), operator_open_id),
+                ("授权 Admin", fb_grant_admins, (doc_token, admin_emails), ", ".join(admin_emails)),
+            ]:
+                try:
+                    perm_fn(*perm_args)
+                    print(f"✅ [fallback] {perm_step}: {perm_desc}", file=sys.stderr)
+                except Exception as perm_err:
+                    print(f"⚠️ [fallback] {perm_step}跳过（文件夹权限继承）: {perm_err}", file=sys.stderr)
 
             result = {
                 "status": "success",

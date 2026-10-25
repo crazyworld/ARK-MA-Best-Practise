@@ -78,7 +78,7 @@ step "1/5 运行 feishu-bot 全量测试"
 (
   cd "$FEISHU_BOT_DIR"
   "${PYTHON[@]}" -m pytest -q \
-    --deselect tests/test_topic6_user_oauth.py \
+    --ignore=tests/test_topic6_user_oauth.py \
     --deselect tests/test_digital_employee.py::test_direct_session_mounts_bot_and_sender_user_vault
 )
 

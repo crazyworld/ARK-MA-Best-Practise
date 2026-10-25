@@ -925,7 +925,14 @@ class Topic6Runner:
             # 兜底:Agent 违约(只在文本里说"要输出 HC JSON"但没真输出),嗅出意图后
             # 伪造一个占位 payload,防止流程被吞。占位标记 __fallback__=True 让 HC 卡片
             # 渲染层能提示用户"AI 未输出结构化载荷,请照常审阅原始输出"。
-            intent_hc = detect_hc_intent(last)
+            # 只在 HC 相关阶段触发——Phase E/F/G/H 阶段不应误判。
+            phase = (job.current_phase or "").lower()
+            is_hc_eligible = (
+                not phase
+                or phase.startswith(("c", "d", "hc", "post-hc"))
+                or phase in ("a", "b")
+            )
+            intent_hc = detect_hc_intent(last) if is_hc_eligible else None
             if intent_hc is not None:
                 log.warning(
                     "topic6 HC fallback triggered job=%s hc=%s (agent did not emit JSON, using intent detection)",

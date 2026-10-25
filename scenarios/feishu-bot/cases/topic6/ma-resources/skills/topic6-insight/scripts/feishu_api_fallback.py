@@ -54,9 +54,10 @@ def _headers() -> dict[str, str]:
     }
 
 
-def _check_response(resp: httpx.Response, step_name: str) -> dict:
+def _check_response(resp: httpx.Response, step_name: str, *, raise_on_http: bool = True) -> dict:
     """统一校验飞书 API 响应."""
-    resp.raise_for_status()
+    if raise_on_http:
+        resp.raise_for_status()
     data = resp.json()
     code = data.get("code", -1)
     if code != 0:
@@ -83,61 +84,45 @@ def step_create_folder(folder_name: str) -> str:
 def step_import_document(
     report_path: str, folder_token: str, doc_name: str,
 ) -> tuple[str, str]:
-    """导入 markdown 为飞书 docx, 返回 (doc_token, doc_url).
+    """上传报告文件到飞书文件夹，返回 (file_token, file_url)。
 
-    分两步: 1) 创建导入任务  2) 轮询任务完成
+    import_tasks API 需要额外权限，改为直接 upload_all 上传文件。
+    审核人可在飞书中预览/下载。
     """
     file_path = Path(report_path)
     if not file_path.exists():
         raise RuntimeError(f"[导入文档] 文件不存在: {report_path}")
 
-    # Step 1: 上传文件到 import_tasks
     content = file_path.read_bytes()
-    headers = {"Authorization": f"Bearer {_get_tenant_access_token()}"}
+    file_size = len(content)
+    file_name = f"{doc_name}.md" if not doc_name.endswith(".md") else doc_name
+    token = _get_tenant_access_token()
+    headers = {"Authorization": f"Bearer {token}"}
+
     resp = httpx.post(
-        f"{FEISHU_BASE}/drive/v1/import_tasks",
+        f"{FEISHU_BASE}/drive/v1/files/upload_all",
         headers=headers,
         data={
-            "file_extension": "md",
-            "file_token": "",
-            "type": "docx",
-            "file_name": doc_name,
-            "point": json.dumps({"mount_type": 1, "mount_key": folder_token}),
+            "file_name": file_name,
+            "parent_type": "explorer",
+            "parent_node": folder_token,
+            "size": str(file_size),
         },
-        files={"file": (file_path.name, content, "text/markdown")},
+        files={"file": (file_name, content, "text/markdown")},
         timeout=60,
     )
-    data = _check_response(resp, "创建导入任务")
-    ticket = data.get("data", {}).get("ticket", "")
-    if not ticket:
-        raise RuntimeError(f"[导入文档] 响应缺少 ticket: {json.dumps(data)[:200]}")
-
-    # Step 2: 轮询导入任务
-    for _ in range(30):  # 最多等 60s
-        time.sleep(2)
-        poll_resp = httpx.get(
-            f"{FEISHU_BASE}/drive/v1/import_tasks/{ticket}",
-            headers=_headers(),
-            timeout=15,
-        )
-        poll_data = _check_response(poll_resp, "查询导入任务")
-        result = poll_data.get("data", {}).get("result", {})
-        if result.get("token"):
-            doc_token = result["token"]
-            doc_url = result.get("url", f"https://bytedance.feishu.cn/docx/{doc_token}")
-            return doc_token, doc_url
-        job_status = poll_data.get("data", {}).get("job_status", 0)
-        if job_status in (3, 4):  # 3=failed, 4=cancelled
-            error_msg = poll_data.get("data", {}).get("job_error_msg", "unknown")
-            raise RuntimeError(f"[导入文档] 任务失败: status={job_status} msg={error_msg}")
-
-    raise RuntimeError("[导入文档] 轮询超时（60s），任务仍未完成")
+    data = _check_response(resp, "上传报告文件")
+    file_token = (data.get("data") or {}).get("file_token", "")
+    if not file_token:
+        raise RuntimeError(f"[导入文档] 响应缺少 file_token: {json.dumps(data)[:200]}")
+    doc_url = f"https://bluefocus.feishu.cn/file/{file_token}"
+    return file_token, doc_url
 
 
 def step_grant_operator(doc_token: str, operator_open_id: str) -> None:
     """授予发起人 edit 权限."""
     resp = httpx.post(
-        f"{FEISHU_BASE}/drive/v1/permissions/{doc_token}/members?type=docx",
+        f"{FEISHU_BASE}/drive/v1/permissions/{doc_token}/members?type=file",
         headers=_headers(),
         json={
             "member_type": "openid",
@@ -153,7 +138,7 @@ def step_transfer_owner(doc_token: str, operator_open_id: str) -> None:
     """转移文档所有权给发起人."""
     resp = httpx.post(
         f"{FEISHU_BASE}/drive/v1/permissions/{doc_token}/members/transfer_owner"
-        f"?type=docx",
+        f"?type=file",
         headers=_headers(),
         json={
             "member_type": "openid",
@@ -170,7 +155,7 @@ def step_grant_admins(doc_token: str, admin_emails: tuple[str, ...]) -> None:
     """授予 admin 邮箱 full_access."""
     for email in admin_emails:
         resp = httpx.post(
-            f"{FEISHU_BASE}/drive/v1/permissions/{doc_token}/members?type=docx",
+            f"{FEISHU_BASE}/drive/v1/permissions/{doc_token}/members?type=file",
             headers=_headers(),
             json={
                 "member_type": "email",

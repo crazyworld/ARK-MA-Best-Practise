@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
+import sys
 from pathlib import Path
 
 from arkagent.feishu import IncomingMessage
@@ -44,6 +46,8 @@ TOKEN_KEEPALIVE_INTERVAL_S = 60.0
 IN_CHAT_AUTH_TIMEOUT_S = 300.0
 CONTINUE_COMMAND_RE = re.compile(r"^/(?:continue|resume)(?:\s+(.*))?$", re.IGNORECASE)
 LOG_COMMAND_RE = re.compile(r"^/log(?:\s+(\S+))?$", re.IGNORECASE)
+TEST_FEISHU_COMMAND_RE = re.compile(r"^/test_feishu$", re.IGNORECASE)
+TEST_PHASE_F_COMMAND_RE = re.compile(r"^/test_phase_f$", re.IGNORECASE)
 
 
 class Topic6Gateway:
@@ -213,6 +217,16 @@ class Topic6Gateway:
                 self._store.complete_event(message.event_id, "completed")
                 return
 
+            if TEST_FEISHU_COMMAND_RE.fullmatch(text):
+                await self._handle_test_feishu(message.chat_id)
+                self._store.complete_event(message.event_id, "completed")
+                return
+
+            if TEST_PHASE_F_COMMAND_RE.fullmatch(text):
+                await self._handle_test_phase_f(message.chat_id, message.user_open_id)
+                self._store.complete_event(message.event_id, "completed")
+                return
+
             if await self._hitl.handle_remark_message(
                 chat_id=message.chat_id,
                 thread_id=message.thread_id,
@@ -285,6 +299,198 @@ class Topic6Gateway:
                 f"❌ 执行异常{phase_hint}：{reason}{session_hint}\n"
                 f"建议：发送 /continue 尝试恢复，或 /new 取消当前任务重新开始。",
             )
+
+    async def _handle_test_phase_f(self, chat_id: str, user_open_id: str) -> None:
+        """模拟沙箱环境测试 Phase F 飞书发布脚本。
+
+        在 Gateway 进程中用 subprocess 执行 publish_report_to_feishu.py，
+        设置和方舟沙箱一致的环境变量。测试 lark-cli fallback → feishu_api_fallback 链路。
+        """
+        import subprocess
+        import tempfile
+        await self._reply(chat_id, "[/test_phase_f] 正在构造 mock 数据并执行 publish_report_to_feishu.py...")
+
+        results: list[str] = []
+        tmp_dir = None
+        try:
+            # 构造 mock 报告
+            tmp_dir = tempfile.mkdtemp(prefix="test_phase_f_")
+            report_dir = os.path.join(tmp_dir, "07_报告")
+            os.makedirs(report_dir)
+            report_path = os.path.join(report_dir, "test_report.md")
+            with open(report_path, "w") as f:
+                f.write("# 社媒热点周刊 · Phase F 测试\n\n"
+                        "> 这是 Phase F 飞书发布功能的冒烟测试\n\n"
+                        "## 测试内容\n"
+                        "- 文件夹创建\n"
+                        "- 报告上传\n"
+                        "- 权限设置\n")
+
+            # 模拟沙箱环境变量
+            env = os.environ.copy()
+            env["LARK_APP_ID"] = self._runner._feishu._app_id  # noqa: SLF001
+            env["LARK_APP_SECRET"] = self._runner._feishu._app_secret  # noqa: SLF001
+            env["FEISHU_USER_OPEN_ID"] = user_open_id
+            env["LARKSUITE_CLI_STRICT_MODE"] = "bot"
+            env["LARKSUITE_CLI_APP_ID"] = env["LARK_APP_ID"]
+            env["LARKSUITE_CLI_APP_SECRET"] = env["LARK_APP_SECRET"]
+
+            # 脚本路径
+            script_dir = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                "ma-resources", "skills", "topic6-insight", "scripts",
+            )
+            script_path = os.path.join(script_dir, "publish_report_to_feishu.py")
+
+            # 执行
+            proc = subprocess.run(
+                [
+                    sys.executable, script_path,
+                    "--project-dir", tmp_dir,
+                    "--report-file", "07_报告/test_report.md",
+                    "--folder-name", "test_phase_f_probe",
+                    "--doc-name", "test_report_probe",
+                ],
+                capture_output=True, text=True, timeout=120,
+                env=env,
+                cwd=script_dir,
+            )
+
+            results.append(f"exit_code: {proc.returncode}")
+            if proc.stdout.strip():
+                results.append(f"stdout:\n{proc.stdout.strip()[:1500]}")
+            if proc.stderr.strip():
+                results.append(f"stderr:\n{proc.stderr.strip()[:500]}")
+
+            if proc.returncode == 0:
+                results.insert(0, "✅ Phase F 发布脚本执行成功")
+            else:
+                results.insert(0, "❌ Phase F 发布脚本执行失败")
+
+        except Exception as err:
+            results.append(f"❌ 异常: {err}")
+        finally:
+            if tmp_dir:
+                import shutil
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+
+        await self._reply(chat_id, f"[/test_phase_f] 结果\n\n" + "\n".join(results))
+
+    async def _handle_test_feishu(self, chat_id: str) -> None:
+        """飞书 Drive API 全链路冒烟测试。
+
+        在飞书群中发 /test_feishu 触发，不需要跑 pipeline。
+        测试：凭证 → 创建文件夹 → 创建在线表格 → 写入 → 上传报告 → 清理。
+        """
+        import tempfile
+        import openpyxl
+        import requests as _requests
+
+        results: list[str] = []
+        folder_token = ""
+        sheet_token = ""
+        file_token = ""
+
+        try:
+            # 1. tenant_access_token
+            token = self._runner._feishu._get_tenant_access_token()  # noqa: SLF001
+            results.append(f"✅ 1/6 tenant_access_token OK (len={len(token)})")
+
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json; charset=utf-8",
+            }
+            root_folder = self._config.docs_folder_token
+            if not root_folder:
+                results.append("❌ 2/6 TOPIC6_DOCS_FOLDER_TOKEN 未配置")
+                await self._reply(chat_id, "\n".join(results))
+                return
+
+            # 2. 创建文件夹
+            resp = _requests.post(
+                "https://open.feishu.cn/open-apis/drive/v1/files/create_folder",
+                headers=headers,
+                json={"name": "_test_feishu_probe", "folder_token": root_folder},
+                timeout=30,
+            )
+            data = resp.json()
+            folder_token = (data.get("data") or {}).get("token") or (data.get("data") or {}).get("folder_token", "")
+            if data.get("code") == 0 and folder_token:
+                results.append(f"✅ 2/6 create_folder OK token={folder_token}")
+            else:
+                results.append(f"❌ 2/6 create_folder 失败: code={data.get('code')} msg={data.get('msg','')[:100]}")
+                await self._reply(chat_id, "\n".join(results))
+                return
+
+            # 3. 创建在线表格
+            resp = _requests.post(
+                "https://open.feishu.cn/open-apis/sheets/v3/spreadsheets",
+                headers=headers,
+                json={"title": "test_wide_table", "folder_token": folder_token},
+                timeout=30,
+            )
+            data = resp.json()
+            sheet_token = (data.get("data") or {}).get("spreadsheet", {}).get("spreadsheet_token", "")
+            if data.get("code") == 0 and sheet_token:
+                results.append(f"✅ 3/6 在线表格 OK → https://bluefocus.feishu.cn/sheets/{sheet_token}")
+            else:
+                results.append(f"❌ 3/6 创建在线表格失败: code={data.get('code')} msg={data.get('msg','')[:100]}")
+                await self._reply(chat_id, "\n".join(results))
+                return
+
+            # 4. 写入数据
+            resp = _requests.get(
+                f"https://open.feishu.cn/open-apis/sheets/v3/spreadsheets/{sheet_token}/sheets/query",
+                headers=headers, timeout=10,
+            )
+            sheet_id = (resp.json().get("data") or {}).get("sheets", [{}])[0].get("sheet_id", "Sheet1")
+            test_data = [["row_id", "platform", "title", "score"], [1, "微博", "测试热搜", 95], [2, "抖音", "测试话题", 88]]
+            resp = _requests.put(
+                f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{sheet_token}/values",
+                headers=headers,
+                json={"valueRange": {"range": f"{sheet_id}!A1:D3", "values": test_data}},
+                timeout=30,
+            )
+            if resp.json().get("code") == 0:
+                results.append("✅ 4/6 写入数据 OK (3行4列)")
+            else:
+                results.append(f"⚠️ 4/6 写入数据失败: {resp.json().get('msg','')[:100]}")
+
+            # 5. 上传报告文件
+            report_content = b"# Test Report\n> This is a test report for Phase F probe.\n"
+            resp = _requests.post(
+                "https://open.feishu.cn/open-apis/drive/v1/files/upload_all",
+                headers={"Authorization": f"Bearer {token}"},
+                data={
+                    "file_name": "test_report.md",
+                    "parent_type": "explorer",
+                    "parent_node": folder_token,
+                    "size": str(len(report_content)),
+                },
+                files={"file": ("test_report.md", report_content, "text/markdown")},
+                timeout=60,
+            )
+            data = resp.json()
+            file_token = (data.get("data") or {}).get("file_token", "")
+            if data.get("code") == 0 and file_token:
+                results.append(f"✅ 5/6 上传报告 OK → https://bluefocus.feishu.cn/file/{file_token}")
+            else:
+                results.append(f"❌ 5/6 上传报告失败: code={data.get('code')} msg={data.get('msg','')[:100]}")
+
+            # 6. 清理
+            auth_headers = {"Authorization": f"Bearer {token}"}
+            if sheet_token:
+                _requests.delete(f"https://open.feishu.cn/open-apis/drive/v1/files/{sheet_token}?type=sheet", headers=auth_headers, timeout=10)
+            if file_token:
+                _requests.delete(f"https://open.feishu.cn/open-apis/drive/v1/files/{file_token}?type=file", headers=auth_headers, timeout=10)
+            if folder_token:
+                _requests.delete(f"https://open.feishu.cn/open-apis/drive/v1/files/{folder_token}?type=folder", headers=auth_headers, timeout=10)
+            results.append("✅ 6/6 清理完成")
+
+        except Exception as err:
+            results.append(f"❌ 异常: {err}")
+
+        await self._reply(chat_id, f"[/test_feishu] 飞书 Drive API 测试\n\n" + "\n".join(results))
 
     async def _handle_log_command(
         self, chat_id: str, user_open_id: str, session_id_arg: str | None,
