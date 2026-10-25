@@ -27,7 +27,7 @@ cat "/mnt/memory/$TOPIC6_MEMORY_STORE_ID/topic6/MEMORY.md"
 1. `bash cat "/mnt/memory/$TOPIC6_MEMORY_STORE_ID/topic6/MEMORY.md"` → 决定后续还读哪些 memory 文件
 2. `bash cat "/mnt/memory/$TOPIC6_MEMORY_STORE_ID/topic6/错误案例库.md"` → 历史踩坑,防重蹈覆辙
 3. `bash cat "/mnt/memory/$TOPIC6_MEMORY_STORE_ID/topic6/_版本状态.md"` → 确认 C0 / R1~R5 / C2 / C3 各任务当前活跃 Prompt 版本
-4. 解析用户消息,确定运行参数(周次、mode=demo|full|skip_sampling),并严格按
+4. 解析用户消息,确定运行参数(周次、mode=demo|full|skip_sampling|smoke),并严格按
    `/mnt/skills/topic6-annotation/prompts/run_config契约.md` 生成 `{PROJECT_DIR}`
 5. 将本轮唯一项目绝对路径设为
    `project_dir=/workspace/Projects/{PROJECT_DIR}`,检查该目录下是否已有 `run_config.yaml`
@@ -80,9 +80,10 @@ python /mnt/skills/topic6-annotation/scripts/publish_node_artifacts.py \
 - 关卡通过后发布 `node=fetch_normalize`: `01_原始数据/hot_topics_skill_raw.json`、
   `01_原始数据/hot_topics_raw.xlsx`、`02_标准化/hot_topics_normalized.xlsx`
 
-### 抽样(full / demo 模式)
+### 抽样(full / smoke / demo 模式)
 
 - `mode=full`:调 `/mnt/skills/topic6-fetch-normalize/scripts/sample_500.py --size 500` → `03_抽样/sample_500.xlsx`
+- `mode=smoke`:调 `/mnt/skills/topic6-fetch-normalize/scripts/sample_500.py --size 30` → `03_抽样/sample_500.xlsx`。**smoke 走 full 的完整路径（HC1+HC2+HC3 全覆盖），只是数据量缩减。传给各脚本的 `--mode` 参数一律用 `full`（不传 smoke），文件名/路径与 full 一致。**
 - `mode=demo`:调 `/mnt/skills/topic6-fetch-normalize/scripts/sample_500.py --size 50` → `03_抽样/sample_500.xlsx`
 - `mode=skip_sampling`:跳过本阶段,直接使用标准化全量数据
 - `sample_500.xlsx` 是兼容既有合并和断点恢复逻辑的固定文件名；实际行数必须以 `status.sample.sample_rows` 为准
@@ -259,12 +260,14 @@ D 阶段合并关卡通过后,在输出 HC1 payload 之前,委派子 Agent `topi
 **HC1 通过后回读飞书表格**:用户可能在飞书在线表格中修正了标注数据（修改 C0_有效、删除无效行等）。收到"通过"后、进入后续阶段前,如果 user.message 中包含"飞书在线表格"相关提示,需要先通过 lark-cli 或飞书 API 下载飞书表格最新版本,覆盖沙箱内的 `05_合并/wide_table_{mode}_r{N}.xlsx`,再继续。如果飞书表格不存在或无法访问,则使用沙箱内已有的版本继续。
 
 - `mode=full`:收到“通过”后进入 C→D 全量,再经过 HC2。
+- `mode=smoke`:收到"通过"后进入 C→D "全量",但输入使用 `sample_500.py --size 30 --seed 99`（不同 seed 确保不与第一轮重复），脚本 `--mode` 参数传 `skip_sampling`（与 full 的全量阶段一致）,再经过 HC2。smoke 报告必须注明"基于 30 条样本（冒烟测试）,仅供流程验证"。
 - `mode=demo`:收到“通过”后**直接进入 Phase E**,使用 `wide_table_demo_r{N}.xlsx`;严禁重跑全量 C→D,跳过 HC2。demo 报告必须注明“基于 50 条分层样本,仅供流程演示,不可作为正式全量结论”。
 - `mode=skip_sampling`:初始阶段直接跑全量 C→D,不进入 HC1,完成后进入 HC2。
 
-### C→D 全量(仅当 full 模式通过 HC1,或初始 mode=skip_sampling)
+### C→D 全量(仅当 full/smoke 模式通过 HC1,或初始 mode=skip_sampling)
 
-- 重复 Phase C 第一批 → 筛选 → Phase C 第二批 → Phase D,输入换成全量 `02_标准化/hot_topics_normalized.xlsx`
+- `mode=full`:重复 Phase C 第一批 → 筛选 → Phase C 第二批 → Phase D,输入换成全量 `02_标准化/hot_topics_normalized.xlsx`
+- `mode=smoke`:重复 Phase C 第一批 → 筛选 → Phase C 第二批 → Phase D,但输入使用 `sample_500.py --size 30 --seed 99` 的输出（不是全量数据）
 - 进入本阶段时固定 `artifact_mode=skip_sampling`。本阶段的 C0/C3、筛选、R1~R5、
   `run_topic6_c2.py` 和合并脚本一律传 `--mode skip_sampling`，路径中的 `{mode}` 也
   一律替换为 `skip_sampling`；严禁继续把顶层 `mode=full` 传给 C2 或查找
@@ -441,7 +444,7 @@ Phase F 飞书文档发布成功后,在输出 HC3 payload 之前,委派子 Agent
 | 规则 | 摘要 |
 |---|---|
 | R01 | 触发词精确匹配「热点报告/热点周报」 |
-| R02 | full 走 HC1→HC2→HC3；demo 走 HC1→HC3、明确跳过全量与 HC2；skip_sampling 走 HC2→HC3 |
+| R02 | full/smoke 走 HC1→HC2→HC3（smoke 用 30 条数据走完整路径）；demo 走 HC1→HC3、明确跳过全量与 HC2；skip_sampling 走 HC2→HC3 |
 | R03 | 每个 LLM 任务完成后立即调 cost_tracker |
 | R04 | 所有路径基于 `/workspace` / `/mnt/*`,不硬编码绝对路径外的固定盘符 |
 | R05 | 每次启动必读 `/mnt/memory/$TOPIC6_MEMORY_STORE_ID/topic6/_版本状态.md`(走 bash cat),不沿用上次会话记忆 |

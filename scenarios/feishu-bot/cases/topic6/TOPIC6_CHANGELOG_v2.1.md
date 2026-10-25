@@ -4,6 +4,74 @@ All notable changes to the Topic6 热点周报 pipeline are documented in this f
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [2.1.1] - 2026-10-23
+
+### Added
+
+- **统一任务通知器 `job_notifier.py`**: 独立通知模块，所有场景（HC 审核/完成/失败/中断）统一 @ 任务发起人。由 gateway 装配注入 runner 和 hitl，消除跨层私有属性访问。
+- **HC 审核主动 @ 通知**: HC1/HC2/HC3 卡片发出后自动 @ 发起人，确保长时间运行后审核人及时感知。
+- **终态统一通知**: 任务完成/失败/中断时自动 @ 发起人，覆盖全部 14 个终态路径，通过 `_render_and_patch` 统一拦截，零遗漏。
+- **`model_request_failed_error` 指数退避自动重试**: Provider 侧临时故障（速率限制/超载）不再直接终止 pipeline，而是 30s→60s→120s→240s→300s 退避重试，最多 5 次，期间卡片显示重试进度。
+- **C2 等待脚本 `wait_c2_complete.py`**: 与 `wait_datahub_batch.py` 同模式（≤105s 短检查），替代 Agent 自行 `sleep` 裸轮询，从根本上避免方舟 120s bash 超时导致的 session 中断。
+- **C2 后台启动脚本 `launch_c2_background.py`**: 封装 nohup/PID/日志重定向，Agent 无需自行拼复合 shell。幂等：C2 已在跑时返回 `already_running`。
+- **Demo 第二批并发脚本 `run_demo_batch2.py`**: 封装 R1~R5 routes + C2 fast 两进程并发 + wait + 退出码检查，替代 18 行 bash 代码块。
+- **Phase F 飞书发布脚本 `publish_report_to_feishu.py`**: 封装创建文件夹→导入文档→授权发起人→转移 owner→授权 admin→校验 JSON 全流程，Agent 一条命令搞定，无需自行拼 5-6 步 lark-cli。
+
+### Changed
+
+- **`coordinator.system.md` 脚本化改造**: C2 启动（nohup shell → `launch_c2_background.py`）、C2 等待（裸 sleep → `wait_c2_complete.py`）、demo 第二批（18 行 bash → `run_demo_batch2.py`）、Phase F 飞书发布（5-6 步 lark-cli → `publish_report_to_feishu.py`）。Agent 职责收窄为"按顺序调脚本 + 在 HC 点输出 JSON"。
+- **`create_all.sh`**: 修复 coordinator Agent 创建时 jq 缺少 `--arg name` 导致的 `$name is not defined` 错误。
+- **`resume_job` HC phase 脱离前缀**: HC 通过后 phase 从 "HC1" 改为 "post-HC1"，避免后续 idle 被误判为"等人审"而跳过 nudge。
+- **`/log` 命令事件解析修复**: 从错误的 `event["data"]["content"]` / `event["tool"]["name"]` 改为正确的方舟事件结构（`event_text()` / `event["name"]`），加 80 条上限。
+- **飞书 Drive API 全部改用 `requests` 直接调用**: `add_permission`、`create_folder`、`import_spreadsheet` 三个方法从 lark_channel SDK `BaseRequest`（导致 9499 Bad Request）改为 `requests` + 标准 HTTP（JSON/multipart）。自己管理 `tenant_access_token`。
+- **`send_hc_card` 自动补建 `docs_folder_token`**: 旧 job 或 start_job 时创建失败的场景，HC 发卡时自动补建飞书子文件夹，不再静默跳过整个发布链路。
+- **`DataHub 标注模型`**: `DeepSeek-V4-Flash-0731` → `DeepSeek-V4-Flash`（DataHub 尚未支持 0731 版本）。
+
+### Fixed
+
+- **Session 中断根因**: Claude 模型在 C2 等待阶段用 `sleep 117` 裸轮询（违反 prompt 禁令），触发方舟 120s bash detach 阈值，叠加 `resume_job` 后 phase 仍为 "HC1" 导致 nudge 被跳过（0/3 直接 stopped）。修复：`wait_c2_complete.py` + `post-HC` 过渡态。
+- **飞书文件夹创建 9499 Bad Request**: lark_channel SDK 的 `BaseRequest.body(json_string)` 未正确设置 Content-Type，飞书服务端解析失败。改用 `requests.post(json=body)` 解决。
+- **`create_folder` 返回值可能为空**: 静默返回空字符串导致 `docs_folder_token` 写空、发布链路跳过。改为返回空时 `raise RuntimeError`。
+
+### Not Yet Implemented
+
+- **Session 分段（方案 A）**: 当前 session 上下文在超长运行（1190 事件 / 累计 2700 万 tokens）后，方舟 MA 在构建 BYOK 请求时出现间歇性内部失败（`model_request_failed_error`，`input=0 output=0`，请求未发出）。根治方案：Gateway 在 token 消耗接近阈值时主动创建新 session + 注入上下文摘要。当前通过指数退避重试止血。
+
+---
+
+### Files Changed (v2.1.1)
+
+**Modified (7)**
+
+| File | Summary |
+|------|---------|
+| `topic6_runner.py` | `resume_job` post-HC 过渡态、`_render_and_patch` 终态通知钩子、`model_request_failed_error` 指数退避重试、`_ProgressState` 新增 `provider_retry_count` |
+| `topic6_hitl.py` | HC 审核通知→`JobNotifier`、`send_hc_card` 自动补建 `docs_folder_token`、P0-2 日志增强 |
+| `gateway.py` | 装配 `JobNotifier`、`/log` 事件解析修复 |
+| `arkagent/feishu.py` | `add_permission`/`create_folder`/`import_spreadsheet` 改用 requests、新增 `_get_tenant_access_token` |
+| `coordinator.system.md` | C2 启动/等待/demo 第二批/Phase F 全部脚本化 |
+| `create_all.sh` | coordinator jq 修复 `--arg name` |
+| `test_topic6_pipeline_optimizations.py` | 断言同步更新（新脚本名 + Phase F 措辞） |
+
+**Added (5)**
+
+| File | Summary |
+|------|---------|
+| `job_notifier.py` | 统一通知器：@ 发起人通知 HC 审核/完成/失败/中断 |
+| `wait_c2_complete.py` | C2 等待脚本（≤105s 短检查，同 `wait_datahub_batch.py` 模式） |
+| `launch_c2_background.py` | C2 后台启动封装（nohup/PID/日志/幂等） |
+| `run_demo_batch2.py` | Demo 第二批并发封装（routes + C2 fast） |
+| `publish_report_to_feishu.py` | Phase F 飞书发布全流程封装（6 步 lark-cli → 1 个脚本） |
+
+### Test Results (v2.1.1)
+
+```
+Total: 225 passed, 0 failed (2.83s)
+  topic6_*: 208 passed
+  gateway + config_store: 17 passed
+  Cross-module (+ digital_employee): 255 passed, 0 failed
+```
+
 ## [2.1.0] - 2026-10-22
 
 ### Added

@@ -285,6 +285,8 @@ class FeishuSender:
         import lark_channel as lark
 
         self._lark = lark
+        self._app_id = app_id
+        self._app_secret = app_secret
         self._client = (
             lark.Client.builder()
             .app_id(app_id)
@@ -923,30 +925,15 @@ class FeishuSender:
     def _get_tenant_access_token(self) -> str:
         """获取当前应用的 tenant_access_token。
 
-        lark_channel SDK 内部维护 token 缓存，这里通过 SDK 的内部接口获取。
-        如果获取不到，回退到直接调飞书 API。
+        直接调飞书 internal API 获取，不依赖 SDK 内部缓存。
         """
-        # 方式1：从 SDK client 内部取（lark_channel.Client 维护 token store）
-        try:
-            token_pair = getattr(self._client, "_token_manager", None)
-            if token_pair is not None:
-                # lark_channel 的 TokenManager 有 get_tenant_access_token 方法
-                get_token = getattr(token_pair, "get_tenant_access_token", None)
-                if get_token is not None:
-                    result = get_token()
-                    if result:
-                        return str(result)
-        except Exception:
-            pass
-
-        # 方式2：直接调飞书 internal API 获取 tenant_access_token
         import requests as _requests
 
         resp = _requests.post(
             "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
             json={
-                "app_id": self._client._app_id if hasattr(self._client, "_app_id") else "",
-                "app_secret": self._client._app_secret if hasattr(self._client, "_app_secret") else "",
+                "app_id": self._app_id,
+                "app_secret": self._app_secret,
             },
             timeout=10,
         )

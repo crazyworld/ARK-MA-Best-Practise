@@ -37,11 +37,13 @@ normalize_user_text = runner_mod.normalize_user_text
 validate_hc_payload = runner_mod.validate_hc_payload
 
 
-def test_parse_trigger_supports_three_current_modes():
+def test_parse_trigger_supports_four_current_modes():
     assert parse_trigger("热点周报 demo") == "demo"
     assert parse_trigger("热点报告 演示") == "demo"
     assert parse_trigger("热点周报 full") == "full"
-    assert parse_trigger("热点周报 test") == "full"
+    assert parse_trigger("热点周报 smoke") == "smoke"
+    assert parse_trigger("热点周报 冒烟测试") == "smoke"
+    assert parse_trigger("热点周报 test") == "smoke"
     assert parse_trigger("热点周报 skip_sampling") == "skip_sampling"
     assert parse_trigger("热点周报 跳过采样") == "skip_sampling"
 

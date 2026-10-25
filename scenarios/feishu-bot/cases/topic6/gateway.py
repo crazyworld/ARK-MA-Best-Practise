@@ -155,7 +155,7 @@ class Topic6Gateway:
                 if cancelled is None:
                     await self._reply(
                         message.chat_id,
-                        "[/new] 收到。当前会话没有活跃任务,可发送「热点周报 demo」「热点周报 full」或「热点周报 skip_sampling」开新一轮。",
+                        "[/new] 收到。当前会话没有活跃任务,可发送「热点周报 demo」「热点周报 full」「热点周报 smoke」或「热点周报 skip_sampling」开新一轮。",
                     )
                 else:
                     self._stop_token_keepalive(cancelled.job_id)
@@ -190,7 +190,7 @@ class Topic6Gateway:
                 if resumed is None:
                     await self._reply(
                         message.chat_id,
-                        "[/continue] 当前会话没有可续跑的任务。若要开新一轮，请发送「热点周报 demo」「热点周报 full」或「热点周报 skip_sampling」。",
+                        "[/continue] 当前会话没有可续跑的任务。若要开新一轮，请发送「热点周报 demo」「热点周报 full」「热点周报 smoke」或「热点周报 skip_sampling」。",
                     )
                 else:
                     message_hint = (
@@ -226,7 +226,7 @@ class Topic6Gateway:
             if mode is None:
                 await self._reply(
                     message.chat_id,
-                    "当前 Bot 仅启用 topic6 场景。发送「热点周报 demo」(50 条出报告)、「热点周报 full」(先 500 条校准再跑全量)或「热点周报 skip_sampling」(跳过 500 条采样,直接跑全量)触发;发送 /continue 续跑最近一次任务;发送 /new 可取消当前任务;发送 /log 查看当前任务日志，或 /log <session_id> 查看指定 Session 日志。",
+                    "当前 Bot 仅启用 topic6 场景。发送「热点周报 demo」(50 条出报告)、「热点周报 smoke」(30 条全流程冒烟测试,含 HC1+HC2+HC3)、「热点周报 full」(先 500 条校准再跑全量)或「热点周报 skip_sampling」(跳过 500 条采样,直接跑全量)触发;发送 /continue 续跑最近一次任务;发送 /new 可取消当前任务;发送 /log 查看当前任务日志，或 /log <session_id> 查看指定 Session 日志。",
                 )
                 self._store.complete_event(message.event_id, "completed")
                 return

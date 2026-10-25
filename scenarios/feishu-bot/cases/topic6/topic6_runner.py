@@ -54,7 +54,8 @@ TRIGGER_KEYWORDS = ("热点报告", "热点周报")
 # 模式关键词(用户消息里带就用,不带默认 full)。
 MODE_DEMO_KEYWORDS = ("demo", "演示")
 # 旧 test 触发词保留为 full 的兼容别名，但不再作为内部 mode 值。
-MODE_FULL_KEYWORDS = ("full", "完整", "正式", "test", "小样本", "试跑")
+MODE_FULL_KEYWORDS = ("full", "完整", "正式")
+MODE_SMOKE_KEYWORDS = ("smoke", "冒烟", "冒烟测试", "快速测试", "test", "小样本", "试跑")
 
 # ---- idle 自动续跑 ----
 # Agent 在 pipeline 中途偶发 end_turn 后，Runner 通过 MA send_message 注入催促
@@ -93,7 +94,7 @@ def normalize_user_text(text: str, mentioned_bot: bool = False) -> str:
 
 
 def parse_trigger(text: str) -> Optional[str]:
-    """返回 mode(demo|full|skip_sampling),不是触发消息返回 None。"""
+    """返回 mode(demo|full|skip_sampling|smoke),不是触发消息返回 None。"""
     if not text:
         return None
     lower = text.strip().lower()
@@ -103,6 +104,8 @@ def parse_trigger(text: str) -> Optional[str]:
         return "skip_sampling"
     if any(kw in lower for kw in MODE_DEMO_KEYWORDS):
         return "demo"
+    if any(kw in lower for kw in MODE_SMOKE_KEYWORDS):
+        return "smoke"
     if any(kw in lower for kw in MODE_FULL_KEYWORDS):
         return "full"
     return "full"
@@ -226,6 +229,9 @@ def build_hc_fallback_payload(
 
     if project_name:
         artifact_mode = job.mode if hc_kind == "HC1" else "skip_sampling"
+        # smoke 在 Agent 内部等价于 full，脚本侧不识别 smoke
+        if artifact_mode == "smoke":
+            artifact_mode = "full"
         payload["wide_table_path"] = (
             f"/mnt/session/outputs/{project_name}/05_合并/"
             f"wide_table_{artifact_mode}_r1.xlsx"
