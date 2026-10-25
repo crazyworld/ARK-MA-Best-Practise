@@ -372,3 +372,5 @@ class TestEnvironmentSetup:
         env = data["config"]["env"]
         assert "LARK_APP_ID" in env
         assert "LARK_APP_SECRET" in env
+        assert "LARKSUITE_CLI_APP_ID" in env
+        assert "LARKSUITE_CLI_APP_SECRET" in env, "缺少 LARKSUITE_CLI_APP_SECRET — lark-cli bot 无法获取 token"

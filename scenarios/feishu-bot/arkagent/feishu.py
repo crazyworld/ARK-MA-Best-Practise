@@ -886,99 +886,83 @@ class FeishuSender:
         file_path: str,
         title: str,
     ) -> str:
-        """将本地 xlsx 文件导入为飞书在线表格，返回 spreadsheet token。
+        """将本地 xlsx 导入为飞书在线表格（可在线编辑），返回 spreadsheet token。
 
-        两步走：
-        1. upload_all 上传原始文件到临时位置
-        2. import_tasks 将文件转换为飞书在线表格（可在线编辑）
+        方案：创建空在线表格 → 读取 xlsx 数据 → 写入表格。
+        不依赖 import_tasks API（需要额外权限），只用 sheets/v3 + sheets/v2。
         """
-        import os as _os
-        import time as _time
+        import openpyxl
         import requests as _requests
 
-        file_size = _os.path.getsize(file_path)
-        file_name = _os.path.basename(file_path)
-        if title and not file_name.startswith(title):
-            file_name = f"{title}.xlsx" if file_name.endswith(".xlsx") else file_name
-
         token = self._get_tenant_access_token()
-        headers = {"Authorization": f"Bearer {token}"}
-
-        # Step 1: upload_all 上传原始文件
-        upload_url = "https://open.feishu.cn/open-apis/drive/v1/files/upload_all"
-        fields = {
-            "file_name": (None, file_name),
-            "parent_type": (None, "explorer"),
-            "parent_node": (None, folder_token),
-            "size": (None, str(file_size)),
-            "file": (file_name, open(file_path, "rb"), "application/octet-stream"),
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json; charset=utf-8",
         }
-        resp = _requests.post(upload_url, headers=headers, files=fields, timeout=120)
-        if resp.status_code != 200:
-            raise RuntimeError(f"飞书上传文件 HTTP {resp.status_code}: {resp.text[:300]}")
-        data = resp.json()
-        if data.get("code") != 0:
-            raise RuntimeError(f"飞书上传文件失败 code={data.get('code')}: {data.get('msg', '')[:200]}")
-        file_token = str((data.get("data") or {}).get("file_token") or "")
-        if not file_token:
-            raise RuntimeError(f"飞书上传成功但未返回 file_token: {data}")
 
-        # Step 2: import_tasks 将文件转为飞书在线表格
-        import_url = "https://open.feishu.cn/open-apis/drive/v1/import_tasks"
-        import_body = {
-            "file_extension": "xlsx",
-            "file_token": file_token,
-            "type": "sheet",
-            "file_name": title or file_name.replace(".xlsx", ""),
-            "point": {
-                "mount_type": 1,
-                "mount_key": folder_token,
-            },
-        }
+        # Step 1: 创建空在线表格
         resp = _requests.post(
-            import_url,
-            headers={**headers, "Content-Type": "application/json; charset=utf-8"},
-            json=import_body,
+            "https://open.feishu.cn/open-apis/sheets/v3/spreadsheets",
+            headers=headers,
+            json={"title": title or "wide_table", "folder_token": folder_token},
             timeout=30,
         )
         if resp.status_code != 200:
-            raise RuntimeError(f"飞书导入任务 HTTP {resp.status_code}: {resp.text[:300]}")
+            raise RuntimeError(f"飞书创建表格 HTTP {resp.status_code}: {resp.text[:300]}")
         data = resp.json()
         if data.get("code") != 0:
-            raise RuntimeError(f"飞书导入任务失败 code={data.get('code')}: {data.get('msg', '')[:200]}")
-        ticket = str((data.get("data") or {}).get("ticket") or "")
-        if not ticket:
-            raise RuntimeError(f"飞书导入任务未返回 ticket: {data}")
+            raise RuntimeError(f"飞书创建表格失败 code={data.get('code')}: {data.get('msg', '')[:200]}")
+        sheet_token = (data.get("data") or {}).get("spreadsheet", {}).get("spreadsheet_token", "")
+        if not sheet_token:
+            raise RuntimeError(f"飞书创建表格未返回 token: {data}")
 
-        # Step 3: 轮询 import_tasks 结果，获取在线表格 token
-        poll_url = f"https://open.feishu.cn/open-apis/drive/v1/import_tasks/{ticket}"
-        for _ in range(30):
-            _time.sleep(1)
-            resp = _requests.get(poll_url, headers=headers, timeout=10)
-            if resp.status_code != 200:
-                continue
-            result = resp.json()
-            job_status = (result.get("data") or {}).get("result", {}).get("job_status", 0)
-            if job_status == 0:  # success
-                sheet_token = (result.get("data") or {}).get("result", {}).get("token", "")
-                if sheet_token:
-                    # 清理临时上传的原始文件（已转换为在线表格，原文件不再需要）
-                    try:
-                        _requests.delete(
-                            f"https://open.feishu.cn/open-apis/drive/v1/files/{file_token}?type=file",
-                            headers=headers,
-                            timeout=10,
-                        )
-                    except Exception:
-                        pass
-                    return sheet_token
-            elif job_status == 1:  # processing
-                continue
-            else:  # failed
-                err_msg = (result.get("data") or {}).get("result", {}).get("job_error_msg", "unknown")
-                raise RuntimeError(f"飞书导入失败 status={job_status}: {err_msg}")
+        # Step 2: 读取 xlsx 数据
+        wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
+        ws = wb.active
+        rows = []
+        for row in ws.iter_rows(values_only=True):
+            rows.append([v if v is not None else "" for v in row])
+        wb.close()
 
-        raise RuntimeError(f"飞书导入超时（30s）ticket={ticket}")
+        if not rows:
+            return sheet_token  # 空表也返回 token
+
+        # Step 3: 获取 sheet_id
+        resp = _requests.get(
+            f"https://open.feishu.cn/open-apis/sheets/v3/spreadsheets/{sheet_token}/sheets/query",
+            headers=headers,
+            timeout=10,
+        )
+        sheets = (resp.json().get("data") or {}).get("sheets", [])
+        sheet_id = sheets[0]["sheet_id"] if sheets else "Sheet1"
+
+        # Step 4: 分批写入（飞书单次写入上限 5000 行）
+        batch_size = 5000
+        for start in range(0, len(rows), batch_size):
+            batch = rows[start:start + batch_size]
+            num_cols = max(len(r) for r in batch)
+            # 列号转字母：A, B, ..., Z, AA, AB, ...
+            end_col = ""
+            n = num_cols
+            while n > 0:
+                n -= 1
+                end_col = chr(65 + n % 26) + end_col
+                n //= 26
+            range_str = f"{sheet_id}!A{start + 1}:{end_col}{start + len(batch)}"
+            body = {"valueRange": {"range": range_str, "values": batch}}
+            resp = _requests.put(
+                f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{sheet_token}/values",
+                headers=headers,
+                json=body,
+                timeout=120,
+            )
+            if resp.status_code != 200 or resp.json().get("code") != 0:
+                log.warning(
+                    "topic6 sheets write failed range=%s code=%s: %s",
+                    range_str, resp.json().get("code"), resp.text[:200],
+                )
+
+        return sheet_token
 
     def _get_tenant_access_token(self) -> str:
         """获取当前应用的 tenant_access_token。
