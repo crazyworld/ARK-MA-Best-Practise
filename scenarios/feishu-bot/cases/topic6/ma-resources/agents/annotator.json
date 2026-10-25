@@ -2,7 +2,7 @@
   "name": "topic6-annotator",
   "description": "topic6 单路 DataHub 标注子 Agent。协调器在 Phase C 第二批(R1~R5)与 Phase C 第一批(C0/C3)时并发调用。",
   "model": {
-    "id": "claude-sonnet-5-5",
+    "id": "DeepSeek-V4-Pro-0813",
     "provider": "bmc-llm-relay",
     "base_url": "https://bmc-llm-relay.bluemediagroup.cn/v1/chat/completions",
     "protocol": "openai_chat_completions",

@@ -2,7 +2,7 @@
   "name": "topic6-coordinator",
   "description": "topic6 社媒热点周刊主协调器。承载 Producer 主线 14 步时序 + 子 Agent 委派。",
   "model": {
-    "id": "claude-sonnet-5-5",
+    "id": "DeepSeek-V4-Pro-0813",
     "provider": "bmc-llm-relay",
     "base_url": "https://bmc-llm-relay.bluemediagroup.cn/v1/chat/completions",
     "protocol": "openai_chat_completions",

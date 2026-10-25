@@ -45,6 +45,8 @@ PRICING = {
     "doubao-seed-evolving": (0.857, 4.286),
     # doubao-embedding-vision 文本输入 ¥0.7 / M token，按 7 汇率折算。
     "doubao-embedding-vision": (0.1, 0.0),
+    "DeepSeek-V4-Pro": (2.0, 8.0),
+    "DeepSeek-V4-Flash": (0.5, 2.0),
     "claude-opus-4-7": (15.0, 75.0),
     "claude-sonnet-4-6": (3.0, 15.0),
     "claude-haiku-4-5-20251001": (1.0, 5.0),
