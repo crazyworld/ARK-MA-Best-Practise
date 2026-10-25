@@ -828,6 +828,7 @@ PRICING: dict[str, tuple[float, float]] = {
     "doubao-seed-evolving":         (0.857, 4.286),
     "DeepSeek-V4-Pro":              (2.0, 8.0),
     "DeepSeek-V4-Flash":            (0.5, 2.0),
+    "DeepSeek-V4.1-Flash":          (0.5, 2.0),
     "claude-opus-4-5":              (5.0, 25.0),
     "claude-opus-4-7":              (5.0, 25.0),
     "claude-opus-4-8":              (5.0, 25.0),

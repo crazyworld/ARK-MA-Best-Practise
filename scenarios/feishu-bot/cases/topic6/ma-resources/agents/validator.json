@@ -2,7 +2,7 @@
   "name": "topic6-validator",
   "description": "通用质量验证子 Agent。由 Coordinator 在 HC 卡点前委派，按检查清单审计数据/报告质量，返回结构化 verdict。",
   "model": {
-    "id": "DeepSeek-V4-Pro-0813",
+    "id": "DeepSeek-V4.1-Flash",
     "provider": "bmc-llm-relay",
     "base_url": "https://bmc-llm-relay.bluemediagroup.cn/v1/chat/completions",
     "protocol": "openai_chat_completions",

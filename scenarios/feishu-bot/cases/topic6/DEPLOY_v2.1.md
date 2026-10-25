@@ -91,10 +91,10 @@ TOPIC6_DOCS_FOLDER_TOKEN=fldcnXXXXXXXXX
 
 | Agent | 模型 | provider | 本次改动 |
 |-------|------|----------|----------|
-| coordinator | DeepSeek-V4-Pro-0813 | bmc-llm-relay | 从 claude-sonnet-5-5 切换 |
-| annotator | DeepSeek-V4-Pro-0813 | bmc-llm-relay | 从 claude-sonnet-5-5 切换 |
-| insighter | DeepSeek-V4-Pro-0813 | bmc-llm-relay | 从 claude-sonnet-5-5 切换 |
-| validator | DeepSeek-V4-Pro-0813 | bmc-llm-relay | 从 claude-sonnet-5-5 切换 |
+| coordinator | DeepSeek-V4.1-Flash | bmc-llm-relay | 从 claude-sonnet-5-5 切换 |
+| annotator | DeepSeek-V4.1-Flash | bmc-llm-relay | 从 claude-sonnet-5-5 切换 |
+| insighter | DeepSeek-V4.1-Flash | bmc-llm-relay | 从 claude-sonnet-5-5 切换 |
+| validator | DeepSeek-V4.1-Flash | bmc-llm-relay | 从 claude-sonnet-5-5 切换 |
 
 > Agent JSON 中的 `base_url` 和 `provider` 是方舟 MA 侧的配置，在 `create_all.sh` 时写入。
 > Gateway 本地不需要配这些——但 Gateway 需要 `BYOK_MODEL_AUTH_HEADER_*` 来在每次
@@ -171,7 +171,7 @@ curl -sS "$ARK_BASE_URL/environments/$TOPIC6_ENVIRONMENT_ID" \
 curl -sS "$ARK_BASE_URL/agents/$TOPIC6_COORDINATOR_AGENT_ID" \
   -H "Authorization: Bearer $ARK_API_KEY" \
   -H "X-Ark-Beta: agentic-2026-06-01" | jq '.data.model'
-# 期望输出: {"id": "DeepSeek-V4-Pro-0813", "provider": "bmc-llm-relay", ...}
+# 期望输出: {"id": "DeepSeek-V4.1-Flash", "provider": "bmc-llm-relay", ...}
 ```
 
 ---

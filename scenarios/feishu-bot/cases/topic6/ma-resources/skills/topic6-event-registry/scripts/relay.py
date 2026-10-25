@@ -47,6 +47,7 @@ PRICING = {
     "doubao-embedding-vision": (0.1, 0.0),
     "DeepSeek-V4-Pro": (2.0, 8.0),
     "DeepSeek-V4-Flash": (0.5, 2.0),
+    "DeepSeek-V4.1-Flash": (0.5, 2.0),
     "claude-opus-4-7": (15.0, 75.0),
     "claude-sonnet-4-6": (3.0, 15.0),
     "claude-haiku-4-5-20251001": (1.0, 5.0),
