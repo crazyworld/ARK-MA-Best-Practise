@@ -487,26 +487,41 @@ class Topic6Hitl(Topic6CardSenderProtocol):
 
             if _job.docs_folder_token:
                 # 强制同步产物到本地（默认 60 秒轮询可能还没跑到）
-                if self._artifact_sync is not None:
+                # Agent 可能刚 publish wide_table，Files API 有传播延迟，最多重试 2 次（间隔 5 秒）
+                _max_sync_attempts = 3
+                for _attempt in range(1, _max_sync_attempts + 1):
+                    if self._artifact_sync is not None:
+                        try:
+                            await self._artifact_sync.sync_once(_job.job_id, _job.ma_session_id)
+                        except Exception as err:  # noqa: BLE001
+                            log.warning("topic6 pre-hc artifact sync failed (attempt %d): %s", _attempt, err)
+                    # 尝试发布
                     try:
-                        synced = await self._artifact_sync.sync_once(_job.job_id, _job.ma_session_id)
-                        log.info("topic6 pre-hc artifact sync done job=%s synced=%d", _job.job_id, synced)
+                        published_urls = await self._publisher.publish_hc_artifacts(
+                            _job, _hc_kind, _payload,
+                            sync_root=self._sync_root,
+                            job_folder_token=_job.docs_folder_token,
+                        )
                     except Exception as err:  # noqa: BLE001
-                        log.warning("topic6 pre-hc artifact sync failed: %s", err)
-                # 发布产物到飞书
-                try:
-                    published_urls = await self._publisher.publish_hc_artifacts(
-                        _job, _hc_kind, _payload,
-                        sync_root=self._sync_root,
-                        job_folder_token=_job.docs_folder_token,
+                        log.warning("topic6 publish_hc_artifacts failed: %s", err)
+                        published_urls = None
+                    if published_urls:
+                        log.info(
+                            "topic6 publish_hc_artifacts result job=%s hc=%s urls=%s (attempt %d)",
+                            _job.job_id, _hc_kind, published_urls, _attempt,
+                        )
+                        break
+                    if _attempt < _max_sync_attempts:
+                        log.info(
+                            "topic6 artifact not found yet, retrying in 5s (attempt %d/%d) job=%s",
+                            _attempt, _max_sync_attempts, _job.job_id,
+                        )
+                        await asyncio.sleep(5)
+                if not published_urls:
+                    log.warning(
+                        "topic6 publish_hc_artifacts empty after %d attempts job=%s hc=%s",
+                        _max_sync_attempts, _job.job_id, _hc_kind,
                     )
-                    log.info(
-                        "topic6 publish_hc_artifacts result job=%s hc=%s urls=%s",
-                        _job.job_id, _hc_kind, published_urls,
-                    )
-                except Exception as err:  # noqa: BLE001
-                    log.warning("topic6 publish_hc_artifacts failed: %s", err)
-                    published_urls = None
 
         card = build_hc_card(_job, _hc_kind, _event_id, _payload, published_urls)
 

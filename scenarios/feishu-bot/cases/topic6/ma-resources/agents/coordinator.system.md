@@ -194,7 +194,9 @@ Coordinator 后台执行完整 C2。必须先发出 5 个委派，再立刻启�
 
 - 执行 `python /mnt/skills/topic6-annotation/scripts/merge_annotations.py` → `05_合并/wide_table_{mode}_r{N}.xlsx`(28 列宽表)
 - 关卡:输出行数 = 输入行数,row_id 唯一
-- 关卡通过后发布 `node=merge`,`--include "05_合并/wide_table_{mode}_r{N}.xlsx"`;
+- 关卡通过后**必须先发布** `node=merge`,`--include "05_合并/wide_table_{mode}_r{N}.xlsx"`;
+  **禁止在 publish 之前输出 HC1/HC2 payload**——Gateway 需要从 Files API 下载宽表上传到飞书，
+  未 publish 的文件在 Files API 中不存在，审核人将无法查看数据。
   HC1/HC2 的 `wide_table_path` 必须指向这个已发布文件
 
 ### HC1 · 小样本验收(full / demo) · 结构化输出后 end_turn

@@ -232,6 +232,11 @@ def main() -> int:
     events, frames = load(rd)
     sc = scores(events)
     if not sc:
+        # 没有多成员事件（全部是 singletons）→ 无需置信度过滤，安全退出
+        multi = [e for e in events if not e.get("singleton")]
+        if not multi:
+            print("全部为独立话题（singletons），无跨平台事件需要置信度过滤，跳过 x2。")
+            raise SystemExit(0)
         raise SystemExit(
             "事件里没有 member_confidence。这个字段由 07 产出，"
             "说明 07 用的是旧提示词——请确认 07 的 SCHEMA 已含置信度刻度后重跑 07。")

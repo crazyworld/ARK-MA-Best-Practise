@@ -23,10 +23,18 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import tempfile
 from pathlib import Path
 
 import pytest
+
+# ---- 路径设置（与其他 test_topic6_*.py 一致）----
+_FEISHU_BOT_DIR = Path(__file__).resolve().parents[1]
+_CASE_DIR = _FEISHU_BOT_DIR / "cases" / "topic6"
+for _p in (str(_FEISHU_BOT_DIR), str(_CASE_DIR)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 # ---- 环境检测 ----
 
