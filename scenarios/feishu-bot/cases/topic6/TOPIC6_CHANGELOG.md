@@ -30,6 +30,11 @@
 - **影响文件**：`topic6_runner.py`、`ma-resources/agents/coordinator.system.md`、
   `ma-resources/skills/topic6-annotation/prompts/09_阶段_H妙搭发布.md`、
   `tests/test_topic6_new_command.py`、`tests/test_topic6_fix_regression.py`
+- **补充（同日，/continue 仍失败）**：白名单放开上线后对同一 Session 执行 `/continue`，Gateway
+  注入「继续」，Agent 回复 `[need_decision]` 收尾文本（不再重复发布 JSON），`_handle_idle`
+  只看最后一条消息 → 再次进 P0-4 判"未输出有效 online_url"。修复：`continue_job` 先倒序扫描
+  Session 历史，已交付过有效 `online_url` 则直接 `mark_done` 并回复链接，不再注入消息；
+  Phase H idle 时最后一条无链接也回查历史。影响 `topic6_runner.py`、`gateway.py`。
 
 ---
 

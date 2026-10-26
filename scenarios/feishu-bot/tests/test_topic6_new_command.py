@@ -823,3 +823,85 @@ def test_startup_recovery_marks_ma_failed_session_failed(loop, tmp_path):
     assert recovered.status == STATUS_FAILED
     assert "model_rate_limited_error" in recovered.last_error
     store.close()
+
+
+_PUBLISHED_URL = "https://bluefocus.feishu.cn/page/AsbomkwecdDshSaehW5cNisVn7c"
+
+
+def _replay_ark(published: bool):
+    """回放 sesn-20261026175807-2r20q 尾部：先交付发布 JSON，/continue 后 Agent 回复裁决文本。"""
+    events = [{"type": "agent.message", "content": [{"type": "text", "text": "[phase] H"}]}]
+    if published:
+        events.append({"type": "agent.message", "content": [{"type": "text", "text": (
+            "[phase] H done\n\n全流程已跑完。\n\n"
+            '{"phase":"H","release_status":"finished","online_url":"' + _PUBLISHED_URL + '"}'
+        )}]})
+    events.append({"type": "agent.message", "content": [{"type": "text", "text": (
+        "[need_decision]\n\n本轮 smoke 全链路已在 current_phase=done 收口……请选择下一步(A/B/C)"
+    )}]})
+
+    class _Ark:
+        async def list_session_events(self, _session_id):
+            return events
+
+    return _Ark()
+
+
+def _phase_h_failed_job(store):
+    job = store.create_job(
+        chat_id="c1", thread_id="", user_open_id="u1",
+        ma_session_id="session-1", mode="smoke", project_dir="/workspace/x",
+    )
+    store.update_phase(job.job_id, "H")
+    store.mark_failed(job.job_id, "Phase H 妙搭发布失败：Agent idle 但未输出有效 online_url。")
+    return job
+
+
+def test_continue_marks_done_from_published_history_without_injecting(loop, tmp_path):
+    runner, store = _make_runner(tmp_path, loop)
+    runner._ark = _replay_ark(published=True)
+    job = _phase_h_failed_job(store)
+
+    def _no_spawn(*_a, **_k):
+        raise AssertionError("已发布时不应再注入「继续」")
+
+    runner._spawn_stream = _no_spawn  # type: ignore[method-assign]
+    resumed = loop.run_until_complete(
+        runner.continue_job(chat_id="c1", thread_id="", user_open_id="u1")
+    )
+    assert resumed is not None and resumed.status == pipeline_store.STATUS_DONE
+    reloaded = store.get_job(job.job_id)
+    assert reloaded.status == pipeline_store.STATUS_DONE
+    assert reloaded.online_url == _PUBLISHED_URL
+    assert reloaded.last_error == ""
+
+
+def test_continue_without_published_history_still_resumes(loop, tmp_path):
+    runner, store = _make_runner(tmp_path, loop)
+    runner._ark = _replay_ark(published=False)
+    job = _phase_h_failed_job(store)
+    injected = {}
+
+    def _fake_spawn(job_arg, first_user_message):
+        injected["message"] = first_user_message
+        return object()
+
+    runner._spawn_stream = _fake_spawn  # type: ignore[method-assign]
+    loop.run_until_complete(runner.continue_job(chat_id="c1", thread_id="", user_open_id="u1"))
+    assert injected == {"message": "继续"}
+    assert store.get_job(job.job_id).status == pipeline_store.STATUS_RUNNING
+
+
+def test_phase_h_idle_uses_earlier_published_url(loop, tmp_path):
+    """最后一条是裁决/收尾文本，但 Session 早先已交付发布 JSON → 判 done，不判失败。"""
+    runner, store = _make_runner(tmp_path, loop)
+    runner._ark = _replay_ark(published=True)
+    job = store.create_job(
+        chat_id="c1", thread_id="", user_open_id="u1",
+        ma_session_id="session-1", mode="smoke", project_dir="/workspace/x",
+    )
+    store.update_phase(job.job_id, "H")
+    loop.run_until_complete(runner._handle_idle(job.job_id, ["[need_decision]\n请选择 A/B/C"]))
+    reloaded = store.get_job(job.job_id)
+    assert reloaded.status == pipeline_store.STATUS_DONE
+    assert reloaded.online_url == _PUBLISHED_URL

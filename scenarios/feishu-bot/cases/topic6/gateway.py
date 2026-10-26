@@ -26,6 +26,7 @@ from artifact_sync import Topic6ArtifactSync
 from feishu_doc_publisher import FeishuDocPublisher
 from job_notifier import JobNotifier
 from pipeline_store import (
+    STATUS_DONE,
     STATUS_RUNNING,
     STATUS_WAIT_HC,
     PipelineJob,
@@ -204,6 +205,14 @@ class Topic6Gateway:
                         "[/continue] 当前会话没有可续跑的任务。若要开新一轮，请发送「热点周报 demo」「热点周报 full」「热点周报 smoke」或「热点周报 skip_sampling」。",
                     )
                 else:
+                    if getattr(resumed, "status", "") == STATUS_DONE:
+                        await self._reply(
+                            message.chat_id,
+                            f"[/continue] 该 Session 已完成妙搭发布，任务已收口为完成 job_id={resumed.job_id}。\n"
+                            f"发布链接：{getattr(resumed, 'online_url', '')}",
+                        )
+                        self._store.complete_event(message.event_id, "completed")
+                        return
                     message_hint = (
                         "补充消息已注入。"
                         if continue_match.group(1) and continue_match.group(1).strip()

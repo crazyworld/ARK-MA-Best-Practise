@@ -559,6 +559,22 @@ class Topic6Runner:
         )
         if job is None:
             return None
+        # Phase H 已在 Session 历史里交付过 online_url（如 Gateway 当时误判失败）：
+        # 直接按历史收口为 done，不再注入「继续」——注入后 Agent 只会回复收尾/裁决
+        # 文本，不会重复输出发布 JSON，反而被 P0-4 再判一次失败。
+        if job.status != STATUS_DONE and job.ma_session_id:
+            published = await self._find_published_online_url(job.ma_session_id)
+            if published:
+                log.info(
+                    "topic6 /continue found published url in history job=%s url=%s",
+                    job.job_id, published,
+                )
+                self._store.mark_done(job.job_id, online_url=published)
+                await self._render_and_patch(
+                    job.job_id, status=STATUS_DONE, online_url=published, force=True
+                )
+                self._progress.pop(job.job_id, None)
+                return self._store.get_job(job.job_id) or job
         log.info(
             "topic6 /continue resume job=%s session=%s prev_status=%s phase=%s",
             job.job_id, job.ma_session_id, job.status, job.current_phase,
@@ -571,6 +587,21 @@ class Topic6Runner:
             state.provider_retry_pending = False
         await self.resume_job(job, message)
         return job
+
+    async def _find_published_online_url(self, session_id: str) -> str:
+        """倒序扫描 Session 全部 agent.message，返回最近一次有效的 Phase H online_url。"""
+        try:
+            events = await self._ark.list_session_events(session_id)
+        except Exception as error:  # noqa: BLE001 - 查不到历史就按原逻辑续跑
+            log.warning("topic6 list_session_events failed session=%s: %s", session_id, error)
+            return ""
+        for event in reversed(events or []):
+            if event.get("type") != "agent.message":
+                continue
+            url = extract_final_online_url(event_text(event))
+            if url:
+                return url
+        return ""
 
     async def cancel_active_job(
         self, chat_id: str, thread_id: str, user_open_id: str
@@ -1090,6 +1121,9 @@ class Topic6Runner:
         # 条件：不是 HC payload、不是 Phase H 最终结果、pipeline 尚未完成。
         # 排除条件：current_phase 是 HC 卡点（HC idle 是等人审，不催）。
         online_url = extract_final_online_url(last)
+        if not online_url and (job.current_phase or "") == "H" and job.ma_session_id:
+            # 最后一条不含发布 JSON（如收尾说明/裁决文本），但本 Session 早先已交付过。
+            online_url = await self._find_published_online_url(job.ma_session_id)
         if online_url:
             # Phase H 正常完成。
             self._store.mark_done(job_id, online_url=online_url)
