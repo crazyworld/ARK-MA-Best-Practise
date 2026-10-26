@@ -1419,12 +1419,32 @@ class Topic6CardSenderProtocol:
         raise NotImplementedError
 
 
+FEISHU_HOST_SUFFIXES = ("feishu.cn", "larkoffice.com", "larksuite.com")
+# 飞书云文档类路径：Phase F 文档链接常被误填为 online_url。妙搭 html 应用的
+# /page/<meta_token> 不在此列，必须放行。
+FEISHU_DOC_PATH_RE = re.compile(
+    r"^/(docx|docs|doc|wiki|sheets|sheet|base|bitable|file|drive|mindnotes|slides)(/|$)"
+)
+
+
+def _is_feishu_doc_url(hostname: str, path: str) -> bool:
+    on_feishu = any(
+        hostname == suffix or hostname.endswith("." + suffix)
+        for suffix in FEISHU_HOST_SUFFIXES
+    )
+    return on_feishu and FEISHU_DOC_PATH_RE.match(path) is not None
+
+
 def extract_final_online_url(text: str) -> str:
     """读取 Phase H 结构化结果中的妙搭线上 URL。
 
     自由文本中的 URL 不可信：报告正文通常先出现飞书 docx 链接，而且 Markdown /
-    JSON 标点会被宽松正则一并吞入。这里只接受显式 ``online_url`` 字段，并校验
-    HTTPS 与妙搭发布域名。
+    JSON 标点会被宽松正则一并吞入。这里只接受显式 ``online_url`` 字段。
+
+    不做域名白名单：妙搭按应用类型/租户返回不同格式（``*.aiforce.cloud``、
+    ``*.feishuapp.cn/app/app_*``、``{租户}.feishu.cn/page/{meta_token}`` 等），
+    以发布 API 返回值为准。只拦截确定无效的值：非 http(s)（本地路径等）、
+    ``release_status`` 显式非 finished、飞书云文档链接。
     """
     if not text:
         return ""
@@ -1439,29 +1459,23 @@ def extract_final_online_url(text: str) -> str:
         candidate = str(value.get("online_url") or "").strip()
         if not candidate:
             continue
+        release_status = str(value.get("release_status") or "").strip().lower()
+        if release_status and release_status != "finished":
+            continue
         # P0-4 URL 清洗：Agent 偶发把 JSON 结尾 "} 误拼进 URL（如 %22%7D）。
         # 先 URL 解码还原，再清洗明确的非 URL 尾部字符。
         decoded = unquote(candidate)
         cleaned = re.sub(r'["\'})\]\s]+$', "", decoded)
         if cleaned != candidate:
             cleaned_parsed = urlsplit(cleaned)
-            if cleaned_parsed.scheme == "https" and cleaned_parsed.netloc:
+            if cleaned_parsed.scheme in ("http", "https") and cleaned_parsed.netloc:
                 candidate = cleaned
         parsed = urlsplit(candidate)
         hostname = (parsed.hostname or "").lower()
-        is_aiforce = hostname == "aiforce.cloud" or hostname.endswith(".aiforce.cloud")
-        is_feishuapp = (
-            (hostname == "feishuapp.cn" or hostname.endswith(".feishuapp.cn"))
-            and re.fullmatch(r"/app/app_[A-Za-z0-9]+/?", parsed.path) is not None
-        )
-        is_blueai_cdn = hostname.endswith(".bluemediacdn.com")
         if (
-            parsed.scheme == "https"
-            and parsed.query == ""
-            and parsed.fragment == ""
-            and parsed.username is None
-            and parsed.password is None
-            and (is_aiforce or is_feishuapp or is_blueai_cdn)
+            parsed.scheme in ("http", "https")
+            and hostname
+            and not _is_feishu_doc_url(hostname, parsed.path)
         ):
             return candidate
     return ""

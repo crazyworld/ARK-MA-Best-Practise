@@ -441,9 +441,11 @@ Phase F 飞书文档发布成功后,在输出 HC3 payload 之前,委派子 Agent
   禁止输出“流程完成”,禁止拿 `feishu_doc_url`、本地路径或 HTML snapshot URL 代替妙搭 `online_url`
 - 成功时最后一条消息必须包含且只包含一个可解析 JSON 对象：
   `{"phase":"H","release_status":"finished","online_url":"<发布 API 返回的 HTTPS 运行时 URL>"}`
-- `online_url` 必须直接取自发布响应,不得手工拼接；当前妙搭可能返回
-  `*.aiforce.cloud`，也可能返回 `*.feishuapp.cn/app/app_*`。必须用 GET 跟随重定向
-  验证最终页面为 HTTP 200 且包含报告正文；`*.larkoffice.com/page/*` 不可作为完成链接。
+- `online_url` 必须直接取自发布响应(`+release-get` / `+get`),不得手工拼接、不得改写。
+  妙搭按应用类型返回不同格式,均为有效发布链接:`*.aiforce.cloud`、`*.feishuapp.cn/app/app_*`、
+  创意模式(html)应用的 `https://{租户域名}/page/{meta_token}`(形似飞书文档但不是)。
+  能匿名访问时用 GET 跟随重定向确认 HTTP 200 且含报告正文;跳转到飞书登录页属正常
+  (租户内可见),以 `release_status=finished` + 链接取自 API 为准,不得因此阻塞或改用其他链接。
   该 JSON 后不再追加其他 URL
 
 ## 五、并发规范(重要)

@@ -11,6 +11,28 @@
 
 ---
 
+## 2026-10-27
+
+### Phase H online_url 取消域名白名单
+
+- **触发现象**：Session `sesn-20261026175807-2r20q` 妙搭发布 `release_status=finished`，
+  API 返回 `https://bluefocus.feishu.cn/page/AsbomkwecdDshSaehW5cNisVn7c`，Gateway 因域名
+  不在 `aiforce.cloud / feishuapp.cn / bluemediacdn.com` 白名单内判定"未输出有效 online_url"，
+  任务失败。
+- **根因**：妙搭创意模式（html）应用的发布链接就是 `https://{租户域名}/page/{meta_token}`
+  （lark-cli `lark-apps` 文档明确说明，开发态与发布态同一链接，形似飞书文档）。域名格式随应用
+  类型/租户变化，2026-09-30 已因新增 `feishuapp.cn` 失败过一次；白名单每次都滞后。
+- **修复**：`extract_final_online_url` 只认 Phase H 结构化 JSON 的 `online_url`，不再校验域名；
+  仅拒绝非 http(s)（本地路径 / file://）、`release_status` 显式非 finished、飞书云文档路径
+  （`/docx/`、`/wiki/`、`/sheets/`、`/file/` 等，防止 Phase F 文档链接冒充）。Coordinator 与
+  Phase H prompt 删除"`*.larkoffice.com/page/*` 不可作为完成链接"，登录可见页面以
+  finished + 链接取自 API 为准。
+- **影响文件**：`topic6_runner.py`、`ma-resources/agents/coordinator.system.md`、
+  `ma-resources/skills/topic6-annotation/prompts/09_阶段_H妙搭发布.md`、
+  `tests/test_topic6_new_command.py`、`tests/test_topic6_fix_regression.py`
+
+---
+
 ## 2026-10-12
 
 ### Environment 更新优先复用已记录 ID

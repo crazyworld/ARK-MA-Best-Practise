@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import importlib.util
 import sys
 from pathlib import Path
@@ -395,16 +396,58 @@ def test_final_online_url_rejects_malformed_doc_url():
     assert extract_final_online_url(text) == ""
 
 
-def test_final_online_url_rejects_non_runtime_feishu_urls():
-    assert extract_final_online_url(
-        '{"online_url":"https://bytedance.larkoffice.com/page/token"}'
-    ) == ""
-    assert extract_final_online_url(
-        '{"online_url":"https://bytedance.feishuapp.cn.evil.example/app/app_123"}'
-    ) == ""
-    assert extract_final_online_url(
-        '{"online_url":"https://bytedance.feishuapp.cn/not-an-app"}'
-    ) == ""
+def test_final_online_url_accepts_any_miaoda_url_format():
+    """不做域名白名单：妙搭各应用类型返回的链接都应放行。"""
+    for url in (
+        "https://bluefocus.feishu.cn/page/AsbomkwecdDshSaehW5cNisVn7c",
+        "https://bytedance.larkoffice.com/page/token",
+        "https://bytedance.feishuapp.cn/app/app_17f4v8qapgx/",
+        "https://topic6-demo.aiforce.cloud/report",
+        "https://new-runtime.example.com/app/x?share=1#top",
+        "http://intranet.example.com/report",
+    ):
+        text = json.dumps({"phase": "H", "release_status": "finished", "online_url": url})
+        assert extract_final_online_url(text) == url, url
+
+
+def test_final_online_url_rejects_feishu_doc_and_invalid_values():
+    for url in (
+        "https://bluefocus.feishu.cn/docx/YNqlduqyJoSfovxEwKccW9PmnCp",
+        "https://bytedance.larkoffice.com/wiki/abc",
+        "https://bluefocus.feishu.cn/sheets/abc",
+        "https://bluefocus.feishu.cn/file/abc",
+        "/workspace/Projects/W43/08_UI发布/index.html",
+        "file:///workspace/index.html",
+        "ftp://example.com/x",
+    ):
+        assert extract_final_online_url(json.dumps({"online_url": url})) == "", url
+
+
+def test_final_online_url_rejects_unfinished_release():
+    url = "https://bluefocus.feishu.cn/page/AsbomkwecdDshSaehW5cNisVn7c"
+    for status in ("publishing", "failed"):
+        text = json.dumps({"release_status": status, "online_url": url})
+        assert extract_final_online_url(text) == "", status
+    # 未带 release_status 时不苛求，按 online_url 放行
+    assert extract_final_online_url(json.dumps({"online_url": url})) == url
+
+
+def test_idle_marks_done_for_miaoda_page_url(loop, tmp_path):
+    """回归 sesn-20261026175807-2r20q：html 应用返回 {租户}.feishu.cn/page/... 应判 done。"""
+    runner, store = _make_runner(tmp_path, loop)
+    job = store.create_job(
+        chat_id="c1", thread_id="", user_open_id="u1",
+        ma_session_id="session-1", mode="smoke", project_dir="/workspace/x",
+    )
+    message = (
+        "[phase] H done\n\n全流程已跑完。\n\n"
+        '{"phase":"H","release_status":"finished",'
+        '"online_url":"https://bluefocus.feishu.cn/page/AsbomkwecdDshSaehW5cNisVn7c"}'
+    )
+    loop.run_until_complete(runner._handle_idle(job.job_id, [message]))
+    reloaded = store.get_job(job.job_id)
+    assert reloaded.status == pipeline_store.STATUS_DONE
+    assert reloaded.online_url == "https://bluefocus.feishu.cn/page/AsbomkwecdDshSaehW5cNisVn7c"
 
 
 def test_get_resumable_job_includes_failed_and_stopped(tmp_path):

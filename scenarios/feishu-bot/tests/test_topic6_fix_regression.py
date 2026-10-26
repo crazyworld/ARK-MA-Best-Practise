@@ -148,17 +148,18 @@ class TestP04UrlCleaning:
             "https://bmc-aigc-hb.bluemediacdn.com/html/2026-10/abcd"
         )
 
-    def test_rejects_non_https(self):
+    def test_rejects_non_http_scheme(self):
         text = json.dumps({
-            "online_url": "http://bmc-aigc-hb.bluemediacdn.com/html/2026-10/abc.html"
+            "online_url": "file:///workspace/Projects/x/index.html"
         })
         assert extract_final_online_url(text) == ""
 
-    def test_rejects_unknown_domain(self):
+    def test_accepts_unknown_domain(self):
+        """不做域名白名单，以发布 API 返回值为准。"""
         text = json.dumps({
-            "online_url": "https://evil.com/html/abc.html"
+            "online_url": "https://new-runtime.example.com/html/abc.html"
         })
-        assert extract_final_online_url(text) == ""
+        assert extract_final_online_url(text) == "https://new-runtime.example.com/html/abc.html"
 
     def test_cleans_double_quote_suffix(self):
         """URL 尾部粘连了引号和花括号（未编码形式）。"""
