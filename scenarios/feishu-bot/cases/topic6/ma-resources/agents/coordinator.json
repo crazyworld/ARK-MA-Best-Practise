@@ -7,9 +7,9 @@
     "base_url": "https://bmc-llm-relay.bluemediagroup.cn/v1/chat/completions",
     "protocol": "openai_chat_completions",
     "token_limits": {
-      "context_window": 1000000,
-      "max_input_token_length": 872000,
-      "max_output_token_length": 128000
+      "context_window": 256000,
+      "max_input_token_length": 200000,
+      "max_output_token_length": 56000
     }
   },
   "system_file": "coordinator.system.md",
