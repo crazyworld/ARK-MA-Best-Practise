@@ -61,6 +61,9 @@ MODE_SMOKE_KEYWORDS = ("smoke", "冒烟", "冒烟测试", "快速测试", "test"
 # Agent 在 pipeline 中途偶发 end_turn 后，Runner 通过 MA send_message 注入催促
 # 消息唤醒 idle session。最多重试 MAX_IDLE_NUDGES 次，超限才判终态。
 MAX_IDLE_NUDGES = 3
+# Agent 需要用户做决定时输出的行首标记（coordinator.system.md R14）；Gateway 不催促。
+NEED_DECISION_MARKER = "[need_decision]"
+NEED_DECISION_REPLY_LIMIT = 3000
 # HC 卡点的 idle 是正常业务行为（等人审），不做自动催促。
 _HC_PHASE_PREFIXES = tuple(HC_KINDS)
 
@@ -205,6 +208,13 @@ def detect_hc_intent(text: str) -> Optional[str]:
     return hc_kind
 
 
+def _idle_stop_reason(event: dict) -> str:
+    reason = event.get("stop_reason")
+    if isinstance(reason, dict):
+        reason = reason.get("type")
+    return str(reason or "")
+
+
 def build_hc_fallback_payload(
     job: PipelineJob, hc_kind: str, collected_messages: list[str]
 ) -> dict:
@@ -332,6 +342,9 @@ class _ProgressState:
     last_signature: str = ""
     idle_nudge_count: int = 0
     provider_retry_count: int = 0
+    # provider 重试已发出唤醒消息、尚未看到其后的 idle：紧随 session.error 的
+    # retries_exhausted idle 属于同一次故障，不能再走 nudge（否则一次故障吃两份额度）。
+    provider_retry_pending: bool = False
 
     def push_tool_line(self, line: str) -> None:
         if len(self.tool_lines) == self.tool_lines.maxlen:
@@ -550,6 +563,12 @@ class Topic6Runner:
             "topic6 /continue resume job=%s session=%s prev_status=%s phase=%s",
             job.job_id, job.ma_session_id, job.status, job.current_phase,
         )
+        # 用户手动续跑 = 人已介入：给后续阶段全新的自动续跑 / provider 重试额度
+        state = self._progress.get(job.job_id)
+        if state is not None:
+            state.idle_nudge_count = 0
+            state.provider_retry_count = 0
+            state.provider_retry_pending = False
         await self.resume_job(job, message)
         return job
 
@@ -807,6 +826,16 @@ class Topic6Runner:
                 # phase 切换是低频关键事件,强制立即刷,避免用户看到过时 phase。
                 await self._render_and_patch(job_id, status=STATUS_RUNNING, force=phase_changed)
 
+            # 模型请求成功一次即说明 provider 已恢复：重置 provider 重试额度。
+            if etype == "span.model_request_end" and not event.get("is_error"):
+                _ok_state = self._progress.get(job_id)
+                if _ok_state is not None and _ok_state.provider_retry_count:
+                    log.info(
+                        "topic6 provider recovered job=%s (retries used %d), reset counter",
+                        job_id, _ok_state.provider_retry_count,
+                    )
+                    _ok_state.provider_retry_count = 0
+
             if etype == "user.interrupt":
                 reason = "用户在方舟后台手动停止了 Session"
                 self._store.mark_stopped(job_id, reason)
@@ -869,6 +898,7 @@ class Topic6Runner:
                                 error=f"自动重试失败：{retry_err!s}"[:400], force=True,
                             )
                             return True
+                        _state.provider_retry_pending = True
                         # 重试成功——不 return，继续 SSE 消费循环
                         continue
 
@@ -885,6 +915,21 @@ class Topic6Runner:
 
             # 空闲终态:HC 或最终完成——也可能是 Agent 偶发提前 idle。
             if etype == "session.status_idle" and not event_requires_action(event):
+                _idle_state = self._progress.get(job_id)
+                if (
+                    _idle_state is not None
+                    and _idle_state.provider_retry_pending
+                    and _idle_stop_reason(event) == "retries_exhausted"
+                ):
+                    # 与刚处理的 session.error 是同一次故障，provider 重试已唤醒 session。
+                    _idle_state.provider_retry_pending = False
+                    log.info(
+                        "topic6 idle(retries_exhausted) absorbed by provider retry job=%s",
+                        job_id,
+                    )
+                    continue
+                if _idle_state is not None:
+                    _idle_state.provider_retry_pending = False
                 nudge_msg = await self._handle_idle(
                     job_id, collected_messages,
                 )
@@ -937,7 +982,12 @@ class Topic6Runner:
                 or phase.startswith(("c", "d", "hc", "post-hc"))
                 or phase in ("a", "b")
             )
-            intent_hc = detect_hc_intent(last) if is_hc_eligible else None
+            # 裁决报告常提到"不产出 HC2"之类字样，不能被意图兜底误判成 HC 卡
+            intent_hc = (
+                detect_hc_intent(last)
+                if is_hc_eligible and NEED_DECISION_MARKER not in last
+                else None
+            )
             if intent_hc is not None:
                 log.warning(
                     "topic6 HC fallback triggered job=%s hc=%s (agent did not emit JSON, using intent detection)",
@@ -1069,6 +1119,25 @@ class Topic6Runner:
                 job_id,
                 f"❌ 妙搭发布失败，Agent 未输出有效的发布链接。\n"
                 f"可发送 /continue 重试，或联系管理员检查 skill 配置。",
+            )
+            return None
+
+        # Agent 主动请求用户裁决（[need_decision]）：不是中断，不催促。
+        # 标记 stopped 并把报告原文发群里，用户用 `/continue <选择>` 续跑。
+        if NEED_DECISION_MARKER in last:
+            reason = f"Phase {phase} 等待用户裁决（Agent 已停下给出选项）"
+            log.warning("topic6 need_decision job=%s phase=%s", job_id, phase)
+            self._store.mark_stopped(job_id, reason)
+            await self._render_and_patch(
+                job_id, status=STATUS_STOPPED, error=reason, force=True
+            )
+            report = last.replace(NEED_DECISION_MARKER, "").strip()
+            if len(report) > NEED_DECISION_REPLY_LIMIT:
+                report = report[:NEED_DECISION_REPLY_LIMIT] + "\n…（已截断，完整内容见 /log）"
+            await self._reply_async_by_job(
+                job_id,
+                f"⏸️ 需要你裁决（job={job_id}）：\n{report}\n\n"
+                f"请回复 `/continue <你的选择>` 继续，例如 `/continue A`。",
             )
             return None
 

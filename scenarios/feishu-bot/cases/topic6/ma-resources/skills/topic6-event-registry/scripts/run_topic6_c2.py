@@ -67,9 +67,21 @@ def build_stage_plan(
     embedding_model: str,
     *,
     x2_verdict: str = "sonnet",
+    platforms: tuple[str, ...] | None = None,
 ) -> list[tuple[str, list[list[str]]]]:
+    """platforms: 本次输入里实际有记录的平台 key（PLATFORMS 的子集，保持原顺序）。
+
+    00_clean_titles.py 遇到无记录的平台会直接 SystemExit；smoke/demo 小样本经筛选后
+    某平台可能为 0 条，因此只为有数据的平台起 00 并合流。None = 四平台全跑。
+    """
     py = sys.executable
     script = lambda name: str(SCRIPT_DIR / name)
+    active = {
+        key: label for key, label in PLATFORMS.items()
+        if platforms is None or key in platforms
+    }
+    if not active:
+        raise ValueError("C2 输入没有任何已知平台的记录")
     platform_00 = [
         [
             py,
@@ -87,7 +99,7 @@ def build_stage_plan(
             "--concurrency",
             "4",
         ]
-        for platform, label in PLATFORMS.items()
+        for platform, label in active.items()
     ]
     merged = run_dir / "merged"
     stages: list[tuple[str, list[list[str]]]] = [
@@ -100,7 +112,7 @@ def build_stage_plan(
                 "--out-dir",
                 str(merged),
                 "--from",
-                *(str(run_dir / platform) for platform in PLATFORMS),
+                *(str(run_dir / platform) for platform in active),
             ]],
         ),
         (
@@ -263,6 +275,28 @@ def _run_command(command: list[str], log_path: Path) -> None:
         subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, check=True)
 
 
+def _command_platform(command: list[str], fallback: str) -> str:
+    """日志名取命令的 --run-dir 末级目录（平台 key）；跳过空平台后不能再按位置对应。"""
+    if "--run-dir" in command:
+        index = command.index("--run-dir") + 1
+        if index < len(command):
+            return Path(command[index]).name
+    return fallback
+
+
+def _input_platforms(input_csv: Path) -> tuple[str, ...]:
+    """input.csv 里实际有记录的平台 key，按 PLATFORMS 顺序。
+
+    _prepare_input 已保证 platform 列存在且取值合法；读不出列时退回四平台全跑（原行为）。
+    """
+    try:
+        frame = pd.read_csv(input_csv, usecols=["platform"])
+    except ValueError:
+        return tuple(PLATFORMS)
+    labels = set(frame["platform"].dropna().astype(str))
+    return tuple(key for key, label in PLATFORMS.items() if label in labels)
+
+
 def _run_stage(stage: str, commands: list[list[str]], log_dir: Path) -> None:
     if len(commands) == 1:
         _run_command(commands[0], log_dir / f"{stage}.log")
@@ -274,7 +308,10 @@ def _run_stage(stage: str, commands: list[list[str]], log_dir: Path) -> None:
                 command,
                 log_dir / f"{stage}_{platform}.log",
             ): platform
-            for command, platform in zip(commands, PLATFORMS)
+            for command, platform in (
+                (command, _command_platform(command, fallback))
+                for command, fallback in zip(commands, PLATFORMS)
+            )
         }
         for future in as_completed(futures):
             future.result()
@@ -502,7 +539,12 @@ def _run_unlocked(args: argparse.Namespace) -> Path:
         _reset_stage_outputs(run_dir, result_path)
         status = {"status": "pending", "completed_stages": []}
     completed = set(status.get("completed_stages") or [])
+    platforms = _input_platforms(input_csv)
+    skipped_platforms = [PLATFORMS[k] for k in PLATFORMS if k not in platforms]
+    if skipped_platforms:
+        print(f"[c2] 输入中无记录的平台跳过 00 阶段: {skipped_platforms}", flush=True)
     status.update({
+        "platforms": list(platforms),
         "status": "running",
         "mode": args.mode,
         "run_id": args.run_id,
@@ -533,6 +575,7 @@ def _run_unlocked(args: argparse.Namespace) -> Path:
             args.chat_model,
             args.embedding_model,
             x2_verdict=args.x2_verdict,
+            platforms=platforms,
         ):
             if stage in completed:
                 print(f"[c2] skip completed stage: {stage}", flush=True)

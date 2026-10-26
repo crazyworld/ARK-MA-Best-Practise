@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -620,8 +621,12 @@ class Topic6Gateway:
         - 超时控制：IN_CHAT_AUTH_TIMEOUT_S 后自动取消，不阻塞 _process
         - 授权完成后直接从 authorize 返回值构建 vault_id，避免冗余远程调用
         """
+        # 每次触发都真实刷新一次（对齐原项目）：refresh_token 失效当场发起扫码，
+        # 不让失效授权拖到 Phase H 才暴露。
         try:
-            return await self._user_authorization.vault_id(user_open_id)
+            return await self._user_authorization.vault_id(
+                user_open_id, force_refresh=True
+            )
         except UserAuthorizationRequired:
             pass
 
@@ -712,8 +717,11 @@ class Topic6Gateway:
             return
         list_users = getattr(self._pipeline_store, "list_user_oauth", None)
         for user in (list_users() if callable(list_users) else []):
+            if not user.get("refresh_token", "x"):
+                # 已标记需重新授权：不再重试，等用户下次触发时聊天内扫码
+                continue
             try:
-                await self._user_authorization.refresh_if_needed(user["open_id"])
+                await self._user_authorization.refresh_in_background(user["open_id"])
             except Exception as error:  # noqa: BLE001 - 单个用户失败不影响其他人
                 log.warning(
                     "topic6 user token refresh failed user=%s: %s", user["open_id"], error
@@ -773,6 +781,28 @@ def _should_handle_message(message: IncomingMessage) -> bool:
     return message.chat_type == "p2p" or message.mentioned_bot
 
 
+_COORDINATOR_AGENT_JSON = Path(__file__).resolve().parent / "ma-resources" / "agents" / "coordinator.json"
+
+
+def _byok_model_headers(config: Topic6Config, agent_json: Path = _COORDINATOR_AGENT_JSON):
+    """BYOK 模型鉴权 Header 只在 coordinator 走 BYOK（model.provider 非空）时附加。
+
+    方舟原生模型收到 X-User-Model-Header-* 会直接 400 InvalidModelHeader，所以切换
+    原生 / BYOK 只改 agents/*.json 即可，config.env 里的 BYOK_* 可以保留不动。
+    """
+    if not (config.model_auth_header_name and config.model_auth_header_value):
+        return None
+    try:
+        model = json.loads(agent_json.read_text(encoding="utf-8")).get("model") or {}
+    except (OSError, ValueError) as error:
+        log.warning("topic6 cannot read %s (%s); keep BYOK header", agent_json, error)
+        model = {"provider": "unknown"}
+    if not model.get("provider"):
+        log.info("topic6 coordinator uses Ark native model %s; BYOK header disabled", model.get("id"))
+        return None
+    return {f"X-User-Model-Header-{config.model_auth_header_name}": config.model_auth_header_value}
+
+
 def build_gateway(config: Topic6Config, ark, sender, loop: asyncio.AbstractEventLoop):
     """Case 入口:装配 PipelineStore + Runner + HITL,返回 Topic6Gateway。"""
     from arkagent.paths import get_case_paths
@@ -802,11 +832,7 @@ def build_gateway(config: Topic6Config, ark, sender, loop: asyncio.AbstractEvent
             ),
         ),
         loop=loop,
-        extra_headers=(
-            {f"X-User-Model-Header-{config.model_auth_header_name}": config.model_auth_header_value}
-            if config.model_auth_header_name and config.model_auth_header_value
-            else None
-        ),
+        extra_headers=_byok_model_headers(config),
         notifier=notifier,
     )
     # [P0-2] 飞书文档发布器

@@ -2,15 +2,7 @@
   "name": "topic6-insighter",
   "description": "topic6 单版块洞察子 Agent。协调器在 Phase E 四路(E1~E4)并发调用。",
   "model": {
-    "id": "DeepSeek-V4.1-Flash",
-    "provider": "bmc-llm-relay",
-    "base_url": "https://bmc-llm-relay.bluemediagroup.cn/v1/chat/completions",
-    "protocol": "openai_chat_completions",
-    "token_limits": {
-      "context_window": 256000,
-      "max_input_token_length": 200000,
-      "max_output_token_length": 56000
-    }
+    "id": "deepseek-v4-1-flash-261017"
   },
   "system_file": "insighter.system.md",
   "skills": [

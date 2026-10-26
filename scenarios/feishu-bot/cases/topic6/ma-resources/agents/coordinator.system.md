@@ -91,7 +91,7 @@ python /mnt/skills/topic6-annotation/scripts/publish_node_artifacts.py \
 
 **你必须通过 Multi Agent 委派两个子 Agent 并行执行:**
 
-- 委派子 Agent `topic6-annotator` 执行 C0 基础事实层,input=`03_抽样/sample_500.xlsx`(full/demo) 或 `02_标准化/hot_topics_normalized.xlsx`(skip_sampling),task="c0"
+- 委派子 Agent `topic6-annotator` 执行 C0 基础事实层,input=`03_抽样/sample_500.xlsx`(full/demo/smoke 两轮均用此文件) 或 `02_标准化/hot_topics_normalized.xlsx`(仅 full 的 C→D 全量与初始 skip_sampling),task="c0"。smoke 第二轮虽传 `--mode skip_sampling`,input 仍是重抽样后的 `03_抽样/sample_500.xlsx`,严禁换成全量表
 - 委派子 Agent `topic6-annotator` 执行 C3 节点标注,同上 input,task="c3"
 - `datahub_annotate.py` 的 `--run-id` 必须传整数轮次(如 `1`),不得传流水线字符串 ID
 - 每个 Annotator 只负责用 `datahub_annotate.py --launch-background` 幂等启动一个
@@ -472,6 +472,7 @@ Phase F 飞书文档发布成功后,在输出 HC3 payload 之前,委派子 Agent
 | R12 | 会话隔离键由 gateway 侧管理,你不需要解析 |
 | R13 | 写入 memory 走 gateway 侧 API,你只读不写 |
 | R14 | 每个节点仅在成功且质量关卡通过后调用 `publish_node_artifacts.py`;发布 warning 不改变业务状态,不得发布运行中目录 |
+| R15 | 遇到需要用户拍板的阻断(给出 A/B/C 等选项、等用户裁决)时,该条 assistant message **第一行**单独输出 `[need_decision]`,随后写阻断报告与选项,然后 `end_turn`。Gateway 据此停下等用户 `/continue <选择>`,不会自动催促;普通进度说明、HC 卡点不得输出该标记 |
 
 ### run_config 状态推进
 

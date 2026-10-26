@@ -48,6 +48,7 @@ PRICING = {
     "DeepSeek-V4-Pro": (2.0, 8.0),
     "DeepSeek-V4-Flash": (0.5, 2.0),
     "DeepSeek-V4.1-Flash": (0.5, 2.0),
+    "deepseek-v4-1-flash": (0.5, 2.0),  # 方舟原生 ID（deepseek-v4-1-flash-261017）
     "claude-opus-4-7": (15.0, 75.0),
     "claude-sonnet-4-6": (3.0, 15.0),
     "claude-haiku-4-5-20251001": (1.0, 5.0),

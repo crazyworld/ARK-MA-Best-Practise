@@ -347,7 +347,7 @@ async def test_refresher_tick_refreshes_bot_and_all_users(monkeypatch):
     added = []
 
     class UserAuth:
-        async def refresh_if_needed(self, open_id):
+        async def refresh_in_background(self, open_id):
             calls.append(open_id)
             if open_id == "ou-bad":
                 raise UserAuthorizationRequired("expired")
@@ -426,7 +426,7 @@ async def test_missing_authorization_triggers_in_chat_flow_and_rejects_on_failur
             return False
 
     class UserAuth:
-        async def vault_id(self, _open_id):
+        async def vault_id(self, _open_id, *, force_refresh=False):
             raise UserAuthorizationRequired("请先扫码授权")
 
         async def authorize(self, *, expected_open_id="", on_device_ready=None):
@@ -468,9 +468,12 @@ async def test_gateway_passes_scanned_users_vault_to_runner():
         async def handle_remark_message(self, **_kwargs):
             return False
 
+    forced = []
+
     class UserAuth:
-        async def vault_id(self, open_id):
+        async def vault_id(self, open_id, *, force_refresh=False):
             assert open_id == "ou-scanned"
+            forced.append(force_refresh)
             return "vlt-user"
 
     async def reply(_chat_id, _text):
@@ -493,6 +496,8 @@ async def test_gateway_passes_scanned_users_vault_to_runner():
     await gateway._process(_message())
     assert calls[0]["user_vault_id"] == "vlt-user"
     assert artifact_calls == [("job-1", None)]
+    # 每次触发都强制真实刷新一次（对齐原项目），失效授权当场暴露
+    assert forced == [True]
 
 
 async def test_gateway_bypasses_user_oauth_when_explicitly_configured():
@@ -514,7 +519,7 @@ async def test_gateway_bypasses_user_oauth_when_explicitly_configured():
             return False
 
     class UserAuth:
-        async def vault_id(self, _open_id):
+        async def vault_id(self, _open_id, *, force_refresh=False):
             raise AssertionError("bypass mode must not request user authorization")
 
     async def reply(_chat_id, _text):

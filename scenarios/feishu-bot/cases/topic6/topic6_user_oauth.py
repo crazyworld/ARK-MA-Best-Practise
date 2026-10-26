@@ -24,6 +24,8 @@ APPS_USER_SCOPES = (
 MAX_VAULT_SECRET_BYTES = 4096
 # Gateway 常驻协程在过期前 15 分钟刷新；Ark 每次使用凭据都重新解析，更新即生效。
 REFRESH_EARLY_MS = 15 * 60_000
+# 任务触发时强制刷新：比任何 access_token 有效期都长的窗口，等价于"总是刷新"。
+FORCE_REFRESH_MARGIN_MS = 365 * 24 * 3600_000
 # refresh_token 剩余不足 2 天时告警，提醒即将需要重新扫码。
 REFRESH_TOKEN_WARN_MS = 2 * 24 * 3600_000
 # 飞书 OAuth token endpoint（v2 接口，返回标准 JSON）。
@@ -33,6 +35,9 @@ FEISHU_TOKEN_ENDPOINT = "https://open.feishu.cn/open-apis/authen/v2/oauth/token"
 PLATFORM_MANAGED_EXPIRES_AT = 0
 # Feishu 已轮换 refresh_token 但写 Ark 失败时的占位：下一轮立即用新 refresh_token 重试。
 EXPIRED_RETRY_AT = 1
+# 常驻刷新对同一用户连续失败达到该次数，视为 refresh_token 已失效：清空本地 refresh_token
+# （保留 Vault/Credential ID 供重新授权复用），常驻协程不再重试，下次触发走聊天内扫码。
+MAX_REFRESH_FAILURES = 3
 
 
 class UserAuthorizationRequired(RuntimeError):
@@ -186,6 +191,7 @@ class Topic6UserAuthorization:
         self._ark = ark
         self._oauth = oauth
         self._refresh_locks: dict[str, asyncio.Lock] = {}
+        self._refresh_failures: dict[str, int] = {}
 
     async def authorize(
         self,
@@ -214,11 +220,46 @@ class Topic6UserAuthorization:
             tokens.expires_at,
             APPS_USER_SCOPES,
         )
+        self._refresh_failures.pop(open_id, None)
         return open_id
 
-    async def vault_id(self, open_id: str) -> str:
-        """返回该用户可用的 Vault；临近过期时先刷新（与常驻协程共用同一把锁）。"""
-        return await self.refresh_if_needed(open_id)
+    async def vault_id(self, open_id: str, *, force_refresh: bool = False) -> str:
+        """返回该用户可用的 Vault；临近过期时先刷新（与常驻协程共用同一把锁）。
+
+        force_refresh=True：任务触发时用，无论本地记录的过期时间都真实刷新一次，
+        确认 refresh_token 仍有效；失败抛 UserAuthorizationRequired，由 Gateway 当场
+        发起聊天内扫码，而不是跑到 Phase H 才暴露授权失效。
+        """
+        margin = FORCE_REFRESH_MARGIN_MS if force_refresh else REFRESH_EARLY_MS
+        return await self.refresh_if_needed(open_id, margin_ms=margin)
+
+    async def refresh_in_background(self, open_id: str) -> None:
+        """常驻协程入口：连续失败 MAX_REFRESH_FAILURES 次后标记为需重新授权、停止重试。"""
+        try:
+            await self.refresh_if_needed(open_id)
+        except UserAuthorizationRequired:
+            failures = self._refresh_failures.get(open_id, 0) + 1
+            self._refresh_failures[open_id] = failures
+            if failures >= MAX_REFRESH_FAILURES:
+                self.mark_reauthorization_required(open_id)
+            raise
+        self._refresh_failures.pop(open_id, None)
+
+    def mark_reauthorization_required(self, open_id: str) -> None:
+        """清空本地 refresh_token；保留 Vault/Credential ID，重新扫码时原样复用。"""
+        current = self._store.get_user_oauth(open_id)
+        self._refresh_failures.pop(open_id, None)
+        if not current or not current.get("refresh_token"):
+            return
+        self._store.save_user_oauth(
+            open_id, current["vault_id"], current["credential_id"], "",
+            current["expires_at"], tuple(current["scopes"]),
+        )
+        log.warning(
+            "topic6 user oauth marked reauthorization_required user=%s "
+            "(refresh failed %d times); 常驻刷新停止，下次触发将发起扫码授权",
+            open_id, MAX_REFRESH_FAILURES,
+        )
 
     async def refresh_if_needed(
         self, open_id: str, *, margin_ms: int = REFRESH_EARLY_MS

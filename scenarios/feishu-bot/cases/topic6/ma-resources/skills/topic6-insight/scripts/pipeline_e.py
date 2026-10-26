@@ -829,6 +829,7 @@ PRICING: dict[str, tuple[float, float]] = {
     "DeepSeek-V4-Pro":              (2.0, 8.0),
     "DeepSeek-V4-Flash":            (0.5, 2.0),
     "DeepSeek-V4.1-Flash":          (0.5, 2.0),
+    "deepseek-v4-1-flash":          (0.5, 2.0),  # 方舟原生 ID（deepseek-v4-1-flash-261017）
     "claude-opus-4-5":              (5.0, 25.0),
     "claude-opus-4-7":              (5.0, 25.0),
     "claude-opus-4-8":              (5.0, 25.0),
