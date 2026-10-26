@@ -603,8 +603,10 @@ class TestCleanness:
         ]
         assert len(reject_forms) == 1
 
-    def test_hc1_pass_decision_message_includes_reread_hint(self, loop, tmp_path):
-        """HC1 通过后 decision_message 应包含飞书表格回读提示。"""
+    def test_hc1_pass_without_artifacts_no_reread_hint(self, loop, tmp_path):
+        """HC1 通过但未发布飞书表格（无 artifacts）时不追加任何回读提示。
+
+        旧版无条件提示 Agent 自己去飞书下载，导致 Agent 盲搜云盘。"""
         runner, store, sender = _make_runner(tmp_path, loop)
         job = store.create_job(
             chat_id="c1", thread_id="", user_open_id="u1",
@@ -635,12 +637,11 @@ class TestCleanness:
 
         assert len(captured_messages) == 1
         msg = captured_messages[0]
-        assert "HC1 pass" in msg
-        assert "飞书在线表格" in msg
-        assert "wide_table" in msg
+        assert msg == "HC1 pass"
+        assert "飞书在线表格" not in msg
 
-    def test_hc2_pass_decision_message_includes_reread_hint(self, loop, tmp_path):
-        """HC2 通过后同样包含回读提示。"""
+    def test_hc2_pass_unchanged_sheet_no_reread_hint(self, loop, tmp_path):
+        """HC2 通过、表格有 artifacts 但用户未修改时不追加提示。"""
         runner, store, sender = _make_runner(tmp_path, loop)
         job = store.create_job(
             chat_id="c1", thread_id="", user_open_id="u1",
@@ -648,9 +649,21 @@ class TestCleanness:
         )
         payload = {"hc": "HC2", "wide_table_path": "/mnt/session/outputs/W42/05_合并/wide_table_skip_sampling_r1.xlsx"}
         event_id = store.append_hc_event(job.job_id, "HC2", payload)
+        store.set_hc_artifacts(event_id, {"wide_table": {"token": "sht1", "type": "sheet", "url": "u"}})
         store.mark_wait_hc(job.job_id, "HC2")
 
-        hitl = hitl_mod.Topic6Hitl(hitl_mod.Topic6HitlDeps(store=store, runner=runner))
+        fetched = []
+
+        class _UnchangedPublisher:
+            enabled = True
+
+            def fetch_user_edited_sheet(self, token, since_ts):
+                fetched.append(token)
+                return None
+
+        hitl = hitl_mod.Topic6Hitl(hitl_mod.Topic6HitlDeps(
+            store=store, runner=runner, publisher=_UnchangedPublisher(),
+        ))
         action = {
             "action": {"value": {"job_id": job.job_id, "hc": "HC2", "event_id": event_id, "decision": "pass"}},
             "open_message_id": "msg-1",
@@ -669,8 +682,8 @@ class TestCleanness:
 
         loop.run_until_complete(hitl.handle_card_action(action))
 
-        assert len(captured_messages) == 1
-        assert "飞书在线表格" in captured_messages[0]
+        assert fetched == ["sht1"]
+        assert captured_messages == ["HC2 pass"]
 
     def test_hc3_pass_decision_message_no_spreadsheet_hint(self, loop, tmp_path):
         """HC3 通过后不应包含宽表回读提示（HC3 是报告文档，不是表格）。"""

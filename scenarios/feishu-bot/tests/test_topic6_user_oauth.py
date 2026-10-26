@@ -181,9 +181,11 @@ async def test_authorize_auto_detects_open_id_and_is_idempotent(tmp_path):
     assert shown == ["https://accounts.example/device"]
     assert saved["refresh_token"] == "refresh-2"
     assert saved["scopes"] == APPS_USER_SCOPES
+    # 存真实过期时间（不再是平台托管的 0）
+    assert saved["expires_at"] > int(time.time() * 1000)
     assert len(ark.created_vaults) == 1
-    # 第一次 authorize 创建 env_oauth；第二次 authorize 删旧 + 重建 env_oauth。
-    assert len(ark.created_credentials) == 2
+    # 两次授权都建 environment_variable 凭据；第二次先删掉同名旧凭据
+    assert [c[3] for c in ark.created_credentials] == ["access-1", "access-2"]
     assert len(ark.deleted_credentials) == 1
     assert ark.updated == []
     store.close()
@@ -202,140 +204,210 @@ async def test_expected_open_id_mismatch_writes_nothing(tmp_path):
     store.close()
 
 
-async def test_expired_token_is_refreshed_in_place(tmp_path):
-    store = PipelineStore(str(tmp_path / "topic6.db"))
+def _seed(store, expires_at):
     store.save_user_oauth(
-        "ou-scanned",
-        "vlt-existing",
-        "cred-existing",
-        "refresh-old",
-        1,
-        APPS_USER_SCOPES,
+        "ou-scanned", "vlt-existing", "cred-existing", "refresh-old",
+        expires_at, APPS_USER_SCOPES,
     )
+
+
+async def test_near_expiry_token_is_refreshed_in_place(tmp_path):
+    store = PipelineStore(str(tmp_path / "topic6.db"))
+    _seed(store, int(time.time() * 1000) + 60_000)  # 1 分钟后过期，进入刷新窗口
     ark = FakeArk()
     oauth = FakeOAuth()
     authorization = Topic6UserAuthorization(store, ark, oauth)
 
     assert await authorization.vault_id("ou-scanned") == "vlt-existing"
     assert oauth.refresh_count == 1
-    assert ark.updated == [
-        ("vlt-existing", "cred-existing", "access-refreshed")
-    ]
-    assert store.get_user_oauth("ou-scanned")["refresh_token"] == "refresh-rotated"
+    assert ark.updated == [("vlt-existing", "cred-existing", "access-refreshed")]
+    saved = store.get_user_oauth("ou-scanned")
+    assert saved["refresh_token"] == "refresh-rotated"
+    assert saved["credential_id"] == "cred-existing"
+    assert saved["expires_at"] > int(time.time() * 1000) + 3_600_000
+    store.close()
+
+
+async def test_fresh_token_is_not_refreshed(tmp_path):
+    store = PipelineStore(str(tmp_path / "topic6.db"))
+    _seed(store, int(time.time() * 1000) + 3_600_000)
+    oauth = FakeOAuth()
+    authorization = Topic6UserAuthorization(store, FakeArk(), oauth)
+
+    assert await authorization.refresh_if_needed("ou-scanned") == "vlt-existing"
+    assert oauth.refresh_count == 0
     store.close()
 
 
 async def test_concurrent_refresh_updates_same_credential_once(tmp_path):
     store = PipelineStore(str(tmp_path / "topic6.db"))
-    store.save_user_oauth(
-        "ou-scanned",
-        "vlt-existing",
-        "cred-existing",
-        "refresh-old",
-        1,
-        APPS_USER_SCOPES,
-    )
+    _seed(store, int(time.time() * 1000) + 60_000)
     ark = FakeArk()
     oauth = FakeOAuth()
     authorization = Topic6UserAuthorization(store, ark, oauth)
 
     vault_ids = await asyncio.gather(
         authorization.vault_id("ou-scanned"),
-        authorization.vault_id("ou-scanned"),
+        authorization.refresh_if_needed("ou-scanned"),
         authorization.vault_id("ou-scanned"),
     )
 
     assert vault_ids == ["vlt-existing"] * 3
     assert oauth.refresh_count == 1
-    assert ark.updated == [
-        ("vlt-existing", "cred-existing", "access-refreshed")
-    ]
+    assert ark.updated == [("vlt-existing", "cred-existing", "access-refreshed")]
     store.close()
 
 
-async def test_gateway_keeps_token_alive_until_job_is_terminal(monkeypatch):
-    auth_calls = []
-    statuses = iter(["running", "wait_hc", "done"])
-    job = SimpleNamespace(
-        job_id="job-1",
-        user_open_id="ou-scanned",
-        ma_session_id="sesn-stable",
-    )
+async def test_legacy_env_oauth_credential_is_migrated(tmp_path):
+    """expires_at==0 的历史 env_oauth 凭据：刷新后删旧建 environment_variable，Vault 不变。"""
+    store = PipelineStore(str(tmp_path / "topic6.db"))
+    _seed(store, oauth_module.PLATFORM_MANAGED_EXPIRES_AT)
+    ark = FakeArk()
+    ark.credentials.append({
+        "id": "cred-existing", "vault_id": "vlt-existing",
+        "display_name": oauth_module.USER_CREDENTIAL_NAME,
+        "secret_name": oauth_module.USER_ACCESS_TOKEN_ENV, "type": "env_oauth",
+    })
+    authorization = Topic6UserAuthorization(store, ark, FakeOAuth())
 
-    class EventStore:
-        pass
+    assert await authorization.refresh_if_needed("ou-scanned") == "vlt-existing"
+    assert ark.deleted_credentials == [("vlt-existing", "cred-existing")]
+    assert ark.created_credentials[-1][3] == "access-refreshed"
+    saved = store.get_user_oauth("ou-scanned")
+    assert saved["vault_id"] == "vlt-existing"
+    assert saved["credential_id"] != "cred-existing"
+    assert saved["refresh_token"] == "refresh-rotated"
+    assert saved["expires_at"] > oauth_module.EXPIRED_RETRY_AT
+    store.close()
 
+
+async def test_legacy_migration_refresh_failure_requires_rescan(tmp_path):
+    store = PipelineStore(str(tmp_path / "topic6.db"))
+    _seed(store, oauth_module.PLATFORM_MANAGED_EXPIRES_AT)
+
+    class DeadOAuth(FakeOAuth):
+        async def refresh(self, _refresh_token):
+            raise RuntimeError("20037 refresh token expired")
+
+    ark = FakeArk()
+    authorization = Topic6UserAuthorization(store, ark, DeadOAuth())
+    with pytest.raises(UserAuthorizationRequired, match="重新扫码"):
+        await authorization.refresh_if_needed("ou-scanned")
+    assert ark.created_credentials == [] and ark.deleted_credentials == []
+    assert store.get_user_oauth("ou-scanned")["refresh_token"] == "refresh-old"
+    store.close()
+
+
+async def test_rotated_refresh_token_saved_before_ark_write(tmp_path):
+    """refresh_token 一次性：写 Ark 失败也必须保住新 refresh_token，下一轮删旧建新重试。"""
+    store = PipelineStore(str(tmp_path / "topic6.db"))
+    _seed(store, int(time.time() * 1000) + 60_000)
+
+    class BrokenArk(FakeArk):
+        async def update_environment_credential(self, *_args):
+            raise RuntimeError("ark 503")
+
+    authorization = Topic6UserAuthorization(store, BrokenArk(), FakeOAuth())
+    with pytest.raises(RuntimeError, match="ark 503"):
+        await authorization.refresh_if_needed("ou-scanned")
+    saved = store.get_user_oauth("ou-scanned")
+    assert saved["refresh_token"] == "refresh-rotated"
+    assert saved["expires_at"] == oauth_module.EXPIRED_RETRY_AT
+
+    # 下一轮：Ark 恢复，按"上次写失败"删旧建新
+    ark = FakeArk()
+    oauth = FakeOAuth()
+    authorization = Topic6UserAuthorization(store, ark, oauth)
+    await authorization.refresh_if_needed("ou-scanned")
+    assert oauth.refresh_count == 1
+    assert ark.created_credentials[-1][3] == "access-refreshed"
+    assert store.get_user_oauth("ou-scanned")["expires_at"] > int(time.time() * 1000)
+    store.close()
+
+
+def _refresher_gateway(user_auth, *, users=(), ark=None, runner=None, tokens=None):
     class PipelineState:
-        def get_job(self, job_id):
-            assert job_id == "job-1"
-            return SimpleNamespace(status=next(statuses))
+        def list_user_oauth(self):
+            return [{"open_id": u} for u in users]
+
+    runner = runner or SimpleNamespace(_ark=ark, add_vault_id=lambda _v: None)
+    gateway = Topic6Gateway(
+        SimpleNamespace(
+            authorized_open_ids=(), feishu_app_id="cli-app", feishu_app_secret="sec",
+            lark_bot_vault_id="",
+        ),
+        SimpleNamespace(), runner, SimpleNamespace(), user_auth, None, None,
+        pipeline_store=PipelineState(),
+    )
+    return gateway
+
+
+async def test_refresher_tick_refreshes_bot_and_all_users(monkeypatch):
+    calls = []
+    added = []
 
     class UserAuth:
-        async def vault_id(self, open_id):
-            auth_calls.append(open_id)
-            return "vlt-user"
+        async def refresh_if_needed(self, open_id):
+            calls.append(open_id)
+            if open_id == "ou-bad":
+                raise UserAuthorizationRequired("expired")
+            return "vlt"
+
+    async def fake_fetch(app_id, app_secret):
+        calls.append(("fetch", app_id))
+        return SimpleNamespace(value="t-1", expires_in=7200)
+
+    async def fake_ensure(_ark, app_id, token, name_hint):
+        calls.append(("ensure", app_id, token, name_hint))
+        return "vlt-bot"
+
+    async def fake_update(_ark, vault_id, token):
+        calls.append(("update", vault_id, token))
+
+    monkeypatch.setattr(gateway_module, "fetch_feishu_tenant_access_token", fake_fetch)
+    monkeypatch.setattr(gateway_module, "ensure_lark_cli_vault", fake_ensure)
+    monkeypatch.setattr(gateway_module, "update_lark_cli_vault_token", fake_update)
+    runner = SimpleNamespace(_ark=object(), add_vault_id=added.append)
+    gateway = _refresher_gateway(UserAuth(), users=("ou-bad", "ou-ok"), runner=runner)
+
+    await gateway.refresh_tokens_once()
+    # 首轮：置备 bot Vault 并挂到 Runner；用户逐个刷新，单个失败不影响其他人
+    assert ("ensure", "cli-app", "t-1", "topic6-bot") in calls
+    assert added == ["vlt-bot"]
+    assert calls[-2:] == ["ou-bad", "ou-ok"]
+
+    # 第二轮：token 还很新，不重复申请
+    calls.clear()
+    await gateway.refresh_tokens_once()
+    assert calls == ["ou-bad", "ou-ok"]
+
+    # 剩余 <30min：原地更新同一个 Vault
+    gateway._bot_token_expires_at = time.time() + 600
+    calls.clear()
+    await gateway.refresh_tokens_once()
+    assert ("update", "vlt-bot", "t-1") in calls
+
+
+async def test_refresher_loop_survives_failures(monkeypatch):
+    ticks = 0
+
+    async def flaky_tick():
+        nonlocal ticks
+        ticks += 1
+        if ticks == 1:
+            raise RuntimeError("boom")
+        if ticks == 3:
+            raise asyncio.CancelledError
 
     async def no_sleep(_delay):
         return None
 
     monkeypatch.setattr(gateway_module.asyncio, "sleep", no_sleep)
-    gateway = Topic6Gateway(
-        SimpleNamespace(authorized_open_ids=()),
-        EventStore(),
-        SimpleNamespace(),
-        SimpleNamespace(),
-        UserAuth(),
-        None,
-        None,
-        pipeline_store=PipelineState(),
-    )
-
-    await gateway._keep_user_token_alive(job, "vlt-user")
-
-    assert auth_calls == ["ou-scanned", "ou-scanned"]
-    assert job.ma_session_id == "sesn-stable"
-
-
-async def test_gateway_token_keepalive_retries_temporary_refresh_failure(monkeypatch):
-    attempts = 0
-    statuses = iter(["running", "running", "done"])
-    job = SimpleNamespace(
-        job_id="job-1",
-        user_open_id="ou-scanned",
-        ma_session_id="sesn-stable",
-    )
-
-    class PipelineState:
-        def get_job(self, _job_id):
-            return SimpleNamespace(status=next(statuses))
-
-    class UserAuth:
-        async def vault_id(self, _open_id):
-            nonlocal attempts
-            attempts += 1
-            if attempts == 1:
-                raise UserAuthorizationRequired("temporary refresh failure")
-            return "vlt-user"
-
-    async def no_sleep(_delay):
-        return None
-
-    monkeypatch.setattr(gateway_module.asyncio, "sleep", no_sleep)
-    gateway = Topic6Gateway(
-        SimpleNamespace(authorized_open_ids=()),
-        SimpleNamespace(),
-        SimpleNamespace(),
-        SimpleNamespace(),
-        UserAuth(),
-        None,
-        None,
-        pipeline_store=PipelineState(),
-    )
-
-    await gateway._keep_user_token_alive(job, "vlt-user")
-
-    assert attempts == 2
-    assert job.ma_session_id == "sesn-stable"
+    gateway = _refresher_gateway(SimpleNamespace())
+    gateway.refresh_tokens_once = flaky_tick
+    with pytest.raises(asyncio.CancelledError):
+        await gateway._token_refresher_loop()
+    assert ticks == 3
 
 
 async def test_missing_authorization_triggers_in_chat_flow_and_rejects_on_failure():
@@ -418,14 +490,8 @@ async def test_gateway_passes_scanned_users_vault_to_runner():
         None,
         artifact_sync=ArtifactSync(),
     )
-    gateway._start_token_keepalive = (
-        lambda started_job, vault_id: keepalive_calls.append(
-            (started_job.job_id, vault_id)
-        )
-    )
     await gateway._process(_message())
     assert calls[0]["user_vault_id"] == "vlt-user"
-    assert keepalive_calls == [("job-1", "vlt-user")]
     assert artifact_calls == [("job-1", None)]
 
 
@@ -463,14 +529,9 @@ async def test_gateway_bypasses_user_oauth_when_explicitly_configured():
         reply,
         None,
     )
-    gateway._start_token_keepalive = (  # type: ignore[method-assign]
-        lambda *_args: keepalive_calls.append(True)
-    )
-
     await gateway._process(_message())
 
     assert calls[0]["user_vault_id"] == ""
-    assert keepalive_calls == []
 
 
 async def test_continue_command_passes_trailing_text_to_runner():

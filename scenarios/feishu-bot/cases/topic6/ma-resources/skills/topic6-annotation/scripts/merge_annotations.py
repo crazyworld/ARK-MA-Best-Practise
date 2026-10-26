@@ -32,7 +32,7 @@ from pathlib import Path
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from run_config_state import update_run_config
+from run_config_state import run_config_mode, update_run_config, uses_sample_base
 
 for _s in (sys.stdout, sys.stderr):
     try:
@@ -122,13 +122,16 @@ def run(project_dir: str, mode: str, run_id: int) -> dict:
     base_rows = len(df_base)
     print(f"[merge] 基础表: {base_rows} 行")
 
-    if mode in {"full", "demo"}:
+    is_smoke = run_config_mode(proj) == "smoke"
+    if uses_sample_base(proj, mode):
         sample_file = proj / "03_抽样" / "sample_500.xlsx"
         if sample_file.exists():
             sample_ids = set(pd.read_excel(sample_file, usecols=["row_id"])["row_id"])
             df_base = df_base[df_base["row_id"].isin(sample_ids)].copy()
             base_rows = len(df_base)
             print(f"[merge] {mode} 模式过滤至 {base_rows} 行")
+        elif is_smoke:
+            raise FileNotFoundError(f"smoke 模式样本表不存在: {sample_file}")
 
     df = df_base.copy()
     missing: dict[str, bool] = {}
@@ -158,16 +161,10 @@ def run(project_dir: str, mode: str, run_id: int) -> dict:
         df_c3["提取节点"] = df_c3.apply(_filter_c3_nodes, axis=1)
         # smoke/demo 样本量小，严格窗口期过滤可能导致「提取节点」整列为空，
         # 此时 fallback 到原始未过滤值以确保后续流程（HC/洞察）有数据可用。
-        # runner 把 smoke 转为 full 传给脚本，所以从 run_config.yaml 读原始 mode。
+        # 脚本侧 --mode 不会是 smoke(第一轮 full/第二轮 skip_sampling)，原始 mode 读 run_config.yaml。
         filtered_hit = (df_c3["提取节点"].fillna("") != "").sum()
         if filtered_hit == 0:
-            _rc_path = proj / "run_config.yaml"
-            _original_mode = mode
-            if _rc_path.exists():
-                import yaml
-                _rc = yaml.safe_load(_rc_path.read_text(encoding="utf-8")) or {}
-                _original_mode = _rc.get("mode", mode)
-            if _original_mode == "smoke":
+            if is_smoke:
                 # 从原始列恢复：重读 C3 postprocess 的原始「提取节点」字段
                 c3_raw = pd.read_excel(c3_file, usecols=lambda c: c in {"row_id", "提取节点"})
                 if "提取节点" in c3_raw.columns:
@@ -260,7 +257,8 @@ def run(project_dir: str, mode: str, run_id: int) -> dict:
 
     lines = [
         f"# HC 健康度摘要 (run_id=r{run_id}, mode={mode})", "",
-        f"宽表规格: {output_rows} 行 × {len(df.columns)} 列, row_match={row_match}", "",
+        f"宽表规格: {output_rows} 行 × {len(df.columns)} 列, row_match={row_match}, "
+        f"序号重复={dup_rows}", "",
         "## 各任务缺失情况",
     ]
     for task in TASK_ORDER + ["c3", "c2"]:
@@ -284,9 +282,12 @@ def run(project_dir: str, mode: str, run_id: int) -> dict:
     print(f"\n[merge] 健康度摘要: {summary_file}")
     print(summary_text)
 
+    # 关卡由脚本判定(宽表里 row_id 已改名为「序号」,Agent 不必再读 xlsx 自校验)
+    gate_ok = bool(row_match and dup_rows == 0)
     result = {
         "base_rows": base_rows, "output_rows": output_rows,
-        "row_match": row_match, "columns": len(df.columns),
+        "row_match": row_match, "dup_rows": dup_rows, "gate_ok": gate_ok,
+        "id_column": "序号", "columns": len(df.columns),
         "missing": missing, "valid_rates": valid_rates,
         "c3_hit_rate": c3_hit_rate, "usable_ratio": usable_ratio,
         "run_id": run_id, "mode": mode,
@@ -302,6 +303,8 @@ def run(project_dir: str, mode: str, run_id: int) -> dict:
             "run_id": run_id,
             "row_count": output_rows,
             "row_match": row_match,
+            "dup_rows": dup_rows,
+            "gate_ok": gate_ok,
             "output_file": str(out_file),
             "health_summary_file": str(summary_file),
         }},

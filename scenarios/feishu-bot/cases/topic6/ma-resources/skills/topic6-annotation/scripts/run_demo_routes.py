@@ -261,7 +261,7 @@ def _atomic_json(value: dict, path: Path) -> None:
 
 def _price_cny(model: str, input_tokens: int, output_tokens: int) -> float:
     prices = next(
-        (price for key, price in MODEL_PRICING_CNY.items() if key in model),
+        (price for key, price in MODEL_PRICING_CNY.items() if key.lower() in model.lower()),
         (0.0, 0.0),
     )
     return (input_tokens * prices[0] + output_tokens * prices[1]) / 1_000_000

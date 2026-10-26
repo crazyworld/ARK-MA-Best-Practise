@@ -357,20 +357,31 @@ class TestEnvironmentSetup:
         script = data["config"]["setup_script"]
         assert "lark-cli" in script
 
-    def test_setup_script_does_bot_config_init(self):
-        """setup_script 在安装后做 bot config init——历史问题：strict mode = user。"""
-        data = json.loads(self.ENV_PATH.read_text(encoding="utf-8"))
-        script = data["config"]["setup_script"]
-        assert "config init" in script, "setup_script 缺少 lark-cli config init"
-        assert "app-secret-stdin" in script, "config init 应该用 --app-secret-stdin"
-        assert "LARK_APP_ID" in script
-        assert "LARK_APP_SECRET" in script
-
     def test_env_has_feishu_credentials(self):
         """environment.json 注入了飞书凭证。"""
         data = json.loads(self.ENV_PATH.read_text(encoding="utf-8"))
         env = data["config"]["env"]
         assert "LARK_APP_ID" in env
         assert "LARK_APP_SECRET" in env
-        assert "LARKSUITE_CLI_APP_ID" in env
-        assert "LARKSUITE_CLI_APP_SECRET" in env, "缺少 LARKSUITE_CLI_APP_SECRET — lark-cli bot 无法获取 token"
+
+    def test_env_lark_cli_contract(self):
+        """lark-cli env 模式契约：token 由 vault 注入，env 只放 APP_ID。
+
+        - APP_ID 必须有：vault 注入 LARKSUITE_CLI_USER_ACCESS_TOKEN 时缺 APP_ID，
+          lark-cli 所有命令报 "USER_ACCESS_TOKEN is set but LARKSUITE_CLI_APP_ID is missing"。
+        - STRICT_MODE 不得设：bot 会拦截 Phase H 的 --as user（妙搭发布）。
+        - APP_SECRET 不需要：env 模式下 bot 只认 LARKSUITE_CLI_TENANT_ACCESS_TOKEN。
+        """
+        data = json.loads(self.ENV_PATH.read_text(encoding="utf-8"))
+        env = data["config"]["env"]
+        assert env.get("LARKSUITE_CLI_APP_ID") == "${LARK_APP_ID}"
+        assert "LARKSUITE_CLI_STRICT_MODE" not in env
+        assert "LARKSUITE_CLI_APP_SECRET" not in env
+
+    def test_setup_script_writes_no_credentials(self):
+        """凭证不得由 setup_script 从 env 落盘（如 blueai-html-upload）。"""
+        data = json.loads(self.ENV_PATH.read_text(encoding="utf-8"))
+        script = data["config"]["setup_script"]
+        assert "credentials.json" not in script
+        assert "BLUEAI_API_KEY" not in script
+        assert "config init" not in script

@@ -76,8 +76,10 @@ def _env_bool(name: str) -> bool | None:
 
 
 def price_of(model: str) -> tuple[float, float]:
+    # 模型 ID 大小写不统一（环境变量 Doubao-Seed-Evolving vs 表内 doubao-seed-evolving），按小写匹配
+    name = model.lower()
     for key, value in PRICING.items():
-        if model.startswith(key) or key in model:
+        if key.lower() in name:
             return value
     return (0.0, 0.0)
 

@@ -1622,16 +1622,14 @@ def test_phase_f_uses_runtime_identity_and_response_url_without_secret_output():
     coordinator = COORDINATOR_PROMPT.read_text(encoding="utf-8")
     prompt = PHASE_F_PROMPT.read_text(encoding="utf-8")
 
-    assert 'OPERATOR_OID="${FEISHU_USER_OPEN_ID:-}"' in prompt
-    assert 'x.get("data", {}).get("folder_token")' in prompt
-    assert 'x.get("url") or x.get("data", {}).get("url")' in prompt
-    assert "docs:document.media:upload" in prompt
-    assert "docs:document:import" in prompt
-    assert "docs:permission.member:create" in prompt
-    assert "docs:permission.member:transfer" in prompt
-    assert "docs:permission.member:retrieve" in prompt
-    assert "--member-type openid --member-id \"$OPERATOR_OID\"" in prompt
-    assert "--perm edit --as bot --yes" in prompt
+    # 单入口脚本负责 lark-cli 主路径 + fallback，prompt 只描述契约，不再内嵌命令
+    assert "publish_report_to_feishu.py" in prompt
+    assert "--dry-run` 恒成功" in prompt
+    assert "不需要也不得执行 `lark-cli config init`" in prompt
+    assert "给发起人授 `edit` 失败" in prompt
+    assert "记入 `warnings`，不阻断" in prompt
+    assert "删除上传的 md 源文件" in prompt
+    assert "OPERATOR_OID" not in prompt
     assert "严禁执行 `lark-cli auth login`" in prompt
     assert "降级为 `--as user`" in prompt
     assert "任一步失败不得输出 HC3" in coordinator or "Phase F 失败，不输出 HC3" in coordinator
@@ -1755,3 +1753,66 @@ def test_web_report_rejects_missing_period_instead_of_using_example_week(tmp_pat
     assert result.returncode != 0
     assert "Missing report period" in result.stderr
     assert not output.exists()
+
+
+@pytest.mark.parametrize("model", ["Doubao-Seed-Evolving", "doubao-seed-evolving", "DOUBAO-SEED-EVOLVING-260628"])
+def test_pricing_lookup_is_case_insensitive(model):
+    """环境变量模型 ID 大小写与定价表不一致时，三处计价都不能落到 0。"""
+    relay = _load_relay_module()
+    pipeline_e = _load_pipeline_e_module()
+    demo = _load_demo_routes_module()
+    assert relay.price_of(model) == relay.PRICING["doubao-seed-evolving"]
+    assert pipeline_e._price_of(model) == pipeline_e.PRICING["doubao-seed-evolving"]
+    assert demo._price_cny(model, 1_000_000, 0) == 6.0
+
+
+def test_pricing_lookup_unknown_model_stays_zero():
+    relay = _load_relay_module()
+    pipeline_e = _load_pipeline_e_module()
+    assert relay.price_of("unknown-model-x") == (0.0, 0.0)
+    assert pipeline_e._price_of("unknown-model-x") == (0.0, 0.0)
+
+
+def test_web_report_builds_text_only_cases_without_images(tmp_path):
+    """Phase G 无图规则：案例改走 heading3+bullet 后构建成功，图片校验报"无 case"属预期。"""
+    blocks = json.loads(WEB_REPORT_EXAMPLE.read_text(encoding="utf-8"))
+    blocks[0]["text"] = (
+        "数据范围:微博、知乎、抖音、B站\n"
+        "数据周期:2026-W39 (2026-09-21 ~ 2026-09-27)"
+    )
+    converted: list[dict] = []
+    for block in blocks:
+        if "docx-grid-block" not in str(block.get("className", "")):
+            converted.append(block)
+            continue
+        title, *details = [ln for ln in block["text"].split("\n") if ln.strip() and ln.strip() != "•"]
+        converted.append({**block, "className": "block docx-heading3-block", "text": title, "images": []})
+        converted.extend(
+            {**block, "className": "block docx-bullet-block", "text": line, "images": []}
+            for line in details
+        )
+    assert len(converted) > len(blocks), "示例里应含 grid-block 案例"
+    source = tmp_path / "source.json"
+    output = tmp_path / "index.html"
+    source.write_text(json.dumps(converted, ensure_ascii=False), encoding="utf-8")
+
+    build = subprocess.run(
+        ["node", str(WEB_REPORT_BUILDER), str(source), str(output)],
+        check=False, capture_output=True, text=True,
+    )
+    assert build.returncode == 0, build.stderr
+    assert 'class="case-card case-card--visual"' not in output.read_text(encoding="utf-8")
+
+    check = subprocess.run(
+        ["node", str(WEB_REPORT_DIR / "scripts" / "validate-case-image-sources.mjs"), str(source)],
+        check=False, capture_output=True, text=True,
+    )
+    assert check.returncode != 0
+    assert "No docx-grid-block marketing-observation cases were found" in check.stderr
+
+
+def test_coordinator_phase_g_documents_no_image_rule():
+    text = COORDINATOR_PROMPT.read_text(encoding="utf-8")
+    phase_g = text[text.index("### Phase G"):text.index("### Phase H")]
+    for needle in ("docx-heading3-block", "status.g.case_images_missing", "不视为失败", "严禁调用生图工具"):
+        assert needle in phase_g

@@ -29,6 +29,7 @@ Env:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import ast
 import json
 import os
@@ -383,6 +384,23 @@ def _poll_until_done(api_key: str, task_id: int) -> dict:
         time.sleep(POLL_INTERVAL)
 
 
+def _input_fingerprint(path: Path) -> str:
+    """输入表内容指纹。xlsx 字节含写入时间戳,同内容重写也会变,故按单元格内容计算。"""
+    frame = pd.read_excel(path) if path.suffix.lower() in {".xlsx", ".xls"} else pd.read_csv(path)
+    return hashlib.sha256(frame.to_csv(index=False).encode("utf-8")).hexdigest()
+
+
+def _input_content_matches(recorded: dict, input_path: Path) -> bool:
+    """同路径不同内容(如 smoke 第二轮重抽样覆盖 sample_500.xlsx)不得复用。
+
+    旧版 meta 未记录指纹时保持按路径匹配,兼容断点恢复。
+    """
+    recorded_fp = recorded.get("source_input_fingerprint")
+    if not recorded_fp:
+        return True
+    return input_path.exists() and _input_fingerprint(input_path) == recorded_fp
+
+
 def _normalized_source_path(recorded: str) -> Path:
     path = Path(recorded)
     match = re.fullmatch(r"\.(.+)_prepared(\.[^.]+)", path.name)
@@ -416,7 +434,12 @@ def _submission_matches_request(
         and Path(str(submission.get("prompt_file") or "")).resolve()
         == Path(prompt_file).resolve()
         and _normalized_source_path(str(recorded_input)) == input_path.resolve()
+        and _input_content_matches(submission, input_path)
     )
+
+
+_FENCE_RE = re.compile(r"```(?:json|JSON)?\s*\n?(.*?)```", re.S)
+_THINK_RE = re.compile(r"<think>.*?</think>", re.S | re.I)
 
 
 def _strip_fence(text: str) -> str:
@@ -428,25 +451,74 @@ def _strip_fence(text: str) -> str:
     return s
 
 
+def _first_json_span(text: str) -> str:
+    """从任意位置截取第一个括号配平的 {...} / [...]（忽略字符串内的括号）。"""
+    starts = [i for i in (text.find("{"), text.find("[")) if i >= 0]
+    if not starts:
+        return ""
+    start = min(starts)
+    opener = text[start]
+    closer = "}" if opener == "{" else "]"
+    depth, in_str, escape = 0, False, False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_str:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == opener:
+            depth += 1
+        elif ch == closer:
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+    return ""
+
+
+def _json_candidates(text: str) -> list[str]:
+    """LLM 返回的候选 JSON 片段：原文 → 去 think → 代码围栏内 → 首个配平括号段。
+
+    兼容模型在 JSON 前后附加说明、```json 围栏不在开头、<think> 段等形态
+    （历史：C3 T1156 因围栏+附加文字解析失败）。
+    """
+    cands = [text, _strip_fence(text)]
+    body = _THINK_RE.sub("", text).strip()
+    cands.append(body)
+    cands.extend(m.group(1).strip() for m in _FENCE_RE.finditer(body))
+    span = _first_json_span(body)
+    if span:
+        cands.append(span)
+    seen: set[str] = set()
+    return [c for c in cands if c and not (c in seen or seen.add(c))]
+
+
+def _load_any(cand: str):
+    try:
+        return json.loads(cand)
+    except Exception:
+        pass
+    try:
+        return ast.literal_eval(cand)
+    except Exception:
+        return None
+
+
 def _parse_dict(val):
     if pd.isna(val):
         return None
     text = str(val).strip()
     if not text:
         return None
-    for cand in (text, _strip_fence(text)):
-        try:
-            obj = json.loads(cand)
-            if isinstance(obj, dict):
-                return obj
-        except Exception:
-            pass
-        try:
-            obj = ast.literal_eval(cand)
-            if isinstance(obj, dict):
-                return obj
-        except Exception:
-            pass
+    for cand in _json_candidates(text):
+        obj = _load_any(cand)
+        if isinstance(obj, dict):
+            return obj
     return None
 
 
@@ -457,27 +529,12 @@ def _parse_c3(val):
     text = str(val).strip()
     if not text:
         return None
-
-    def _extract(obj):
+    for cand in _json_candidates(text):
+        obj = _load_any(cand)
         if isinstance(obj, dict) and isinstance(obj.get("关联节点"), list):
             return obj["关联节点"]
         if isinstance(obj, list):
             return obj
-        return None
-
-    for cand in (text, _strip_fence(text)):
-        try:
-            r = _extract(json.loads(cand))
-            if r is not None:
-                return r
-        except Exception:
-            pass
-        try:
-            r = _extract(ast.literal_eval(cand))
-            if r is not None:
-                return r
-        except Exception:
-            pass
     return None
 
 
@@ -602,6 +659,76 @@ def _postprocess(df: pd.DataFrame, task: str) -> tuple[pd.DataFrame, dict]:
     }
 
 
+def _failed_row_ids(df_post: pd.DataFrame, task: str) -> list:
+    col = f"{task}_parse_error"
+    if col not in df_post.columns or "row_id" not in df_post.columns:
+        return []
+    return df_post.loc[df_post[col] == 1, "row_id"].tolist()
+
+
+def _retry_failed_rows(
+    api_key: str, *, task: str, task_dir: Path, run_id: int, upload_path: Path,
+    prompt_text: str, model_id: str, failed_ids: list, df_raw: pd.DataFrame,
+) -> tuple[pd.DataFrame, dict]:
+    """解析失败/空返回（如 relay_empty_completion）的行原参数重提交一次，按 row_id 回填。
+
+    只重试一轮；失败行原样保留并计入 invalid。重试 task_id 落盘，进程重启可续上。
+    """
+    info = {"retried_rows": len(failed_ids), "retry_task_id": None,
+            "retry_tokens": 0, "retry_consume": 0.0}
+    df_in = pd.read_excel(upload_path)
+    subset = df_in[df_in["row_id"].isin(failed_ids)]
+    if subset.empty:
+        return df_raw, info
+    meta_path = task_dir / f"{task}_retry_meta.json"
+    ids_key = sorted(str(x) for x in failed_ids)
+    meta = {}
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            meta = {}
+    if meta.get("run_id") == run_id and meta.get("row_ids") == ids_key:
+        retry_task_id = int(meta["task_id"])
+        print(f"[annotate] 恢复失败行重试 task_id={retry_task_id}", flush=True)
+    else:
+        retry_input = task_dir / f".{task}_retry_input_r{run_id}.xlsx"
+        subset.to_excel(retry_input, index=False)
+        ds_id = _upload_file(api_key, retry_input)
+        retry_task_id = _create_task(
+            api_key, ds_id, prompt_text, model_id,
+            f"topic6_{task}_retry_r{run_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+        )
+        meta_path.write_text(json.dumps(
+            {"run_id": run_id, "row_ids": ids_key, "task_id": retry_task_id},
+            ensure_ascii=False), encoding="utf-8")
+        print(f"[annotate] 失败行重试 {len(subset)} 行 task_id={retry_task_id}", flush=True)
+    info["retry_task_id"] = retry_task_id
+
+    task_data = _poll_until_done(api_key, retry_task_id)
+    retry_raw = task_dir / f"{task}_result_raw_r{run_id}_retry.xlsx"
+    if task_data.get("result_url"):
+        _download_result(task_data["result_url"], retry_raw)
+    else:
+        _download_inline_results(api_key, retry_task_id, task_data, retry_raw, len(subset))
+    df_retry = pd.read_excel(retry_raw)
+    info["retry_tokens"] = int(task_data.get("total_tokens", 0) or 0)
+    info["retry_consume"] = float(task_data.get("total_consume", 0) or 0.0)
+    if "row_id" not in df_retry.columns or "llm_result" not in df_retry.columns:
+        print("[annotate] ⚠️ 重试结果缺 row_id/llm_result，保留首轮结果", flush=True)
+        return df_raw, info
+
+    # 只用重试结果覆盖首轮失败的行（列以首轮为准，新列忽略）
+    df_retry = df_retry.drop_duplicates("row_id").set_index("row_id")
+    df_out = df_raw.copy()
+    cols = [c for c in df_retry.columns if c in df_out.columns]
+    mask = df_out["row_id"].isin(df_retry.index)
+    for col in cols:
+        df_out[col] = df_out[col].astype(object)
+        df_out.loc[mask, col] = df_out.loc[mask, "row_id"].map(df_retry[col]).values
+    return df_out, info
+
+
 def annotate(
     task: str,
     project_dir: str,
@@ -688,6 +815,7 @@ def annotate(
             "prompt_file": str(prompt_file),
             "input_file": str(upload_path),
             "source_input_file": str(input_path.resolve()),
+            "source_input_fingerprint": _input_fingerprint(input_path),
             "created_at": datetime.now().isoformat(),
         }
         temp_submit_path = submit_path.with_suffix(".json.tmp")
@@ -715,13 +843,28 @@ def annotate(
 
     df = pd.read_excel(raw_out)
     df_post, stats = _postprocess(df, task)
+    retry_info = {"retried_rows": 0}
+    failed_ids = _failed_row_ids(df_post, task)
+    if failed_ids:
+        try:
+            df, retry_info = _retry_failed_rows(
+                api_key, task=task, task_dir=task_dir, run_id=run_id,
+                upload_path=upload_path, prompt_text=prompt_text, model_id=model_id,
+                failed_ids=failed_ids, df_raw=df,
+            )
+            df_post, stats = _postprocess(df, task)
+            retry_info["recovered_rows"] = len(failed_ids) - stats["invalid"]
+            print(f"[annotate] 失败行重试完成: {retry_info}", flush=True)
+        except Exception as error:  # noqa: BLE001 - 重试失败不影响首轮结果落盘
+            retry_info = {"retried_rows": len(failed_ids), "retry_error": str(error)[:300]}
+            print(f"[annotate] ⚠️ 失败行重试异常，保留首轮结果: {error}", flush=True)
     post_out = task_dir / f"{task}_postprocess_r{run_id}.xlsx"
     tmp = post_out.with_suffix(".tmp.xlsx")
     df_post.to_excel(tmp, index=False)
     os.replace(tmp, post_out)
 
-    total_tokens = int(task_data.get("total_tokens", 0) or 0)
-    total_consume = float(task_data.get("total_consume", 0) or 0.0)
+    total_tokens = int(task_data.get("total_tokens", 0) or 0) + int(retry_info.get("retry_tokens", 0))
+    total_consume = float(task_data.get("total_consume", 0) or 0.0) + float(retry_info.get("retry_consume", 0.0))
     input_tokens = int(df.get("llm_input_tokens", pd.Series(dtype=int)).fillna(0).sum())
     output_tokens = int(df.get("llm_output_tokens", pd.Series(dtype=int)).fillna(0).sum())
 
@@ -734,6 +877,7 @@ def annotate(
         "input_tokens": input_tokens, "output_tokens": output_tokens,
         "total_tokens": total_tokens, "total_consume": total_consume,
         "raw_file": str(raw_out), "post_file": str(post_out),
+        "retry": retry_info,
         "completed_at": datetime.now().isoformat(),
     }
     (task_dir / f"{task}_completion_meta.json").write_text(
@@ -773,6 +917,8 @@ def _completion_matches_request(completion: dict, args: argparse.Namespace) -> b
         requested = _resolve_project_dir(args.project_dir) / requested
     requested = requested.resolve()
 
+    if not _input_content_matches(completion, requested):
+        return False
     recorded = completion.get("source_input_file")
     if recorded:
         return Path(str(recorded)).resolve() == requested
@@ -797,6 +943,9 @@ def launch_background(args: argparse.Namespace) -> dict:
                 "run_id": args.run_id,
                 "completion_meta": str(completion_path),
             }
+        if int(completion.get("run_id", -1)) == int(args.run_id):
+            # 同 run_id 但输入不同:旧完成标记会让 wait_datahub_batch 误判 done,先作废。
+            completion_path.unlink(missing_ok=True)
 
     pid_path = task_dir / f"{args.task}_worker_r{args.run_id}.pid"
     if pid_path.exists():

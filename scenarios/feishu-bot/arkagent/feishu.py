@@ -821,13 +821,16 @@ class FeishuSender:
         """给飞书云文档/文件夹添加协作者权限（幂等：already_exist 不报错）。
 
         走 `POST /open-apis/drive/v1/permissions/{token}/members?type={token_type}`。
-        perm: full_access / can_edit / can_view。
+        perm: full_access / edit / view。不发飞书通知（need_notification=false）。
         使用 requests 直接调用。
         """
         import requests as _requests
 
         access_token = self._get_tenant_access_token()
-        url = f"https://open.feishu.cn/open-apis/drive/v1/permissions/{token}/members?type={token_type}"
+        url = (
+            f"https://open.feishu.cn/open-apis/drive/v1/permissions/{token}/members"
+            f"?type={token_type}&need_notification=false"
+        )
         headers = {
             "Authorization": f"Bearer {access_token}",
             "Content-Type": "application/json; charset=utf-8",
@@ -886,10 +889,22 @@ class FeishuSender:
         file_path: str,
         title: str,
     ) -> str:
-        """将本地 xlsx 导入为飞书在线表格（可在线编辑），返回 spreadsheet token。
+        """兼容旧调用：导入 xlsx 为在线表格，只返回 spreadsheet token。"""
+        sheet_token, _url = self.create_spreadsheet_from_xlsx(folder_token, file_path, title)
+        return sheet_token
+
+    def create_spreadsheet_from_xlsx(
+        self,
+        folder_token: str,
+        file_path: str,
+        title: str,
+    ) -> tuple[str, str]:
+        """将本地 xlsx 导入为飞书在线表格（可在线编辑），返回 (spreadsheet_token, url)。
 
         方案：创建空在线表格 → 读取 xlsx 数据 → 写入表格。
         不依赖 import_tasks API（需要额外权限），只用 sheets/v3 + sheets/v2。
+        folder_token 为空时建在应用（机器人）云空间根目录。
+        任一批写入失败直接抛错——半张表交给用户审核比没有表更危险。
         """
         import openpyxl
         import requests as _requests
@@ -912,9 +927,11 @@ class FeishuSender:
         data = resp.json()
         if data.get("code") != 0:
             raise RuntimeError(f"飞书创建表格失败 code={data.get('code')}: {data.get('msg', '')[:200]}")
-        sheet_token = (data.get("data") or {}).get("spreadsheet", {}).get("spreadsheet_token", "")
+        spreadsheet = (data.get("data") or {}).get("spreadsheet") or {}
+        sheet_token = str(spreadsheet.get("spreadsheet_token") or "")
         if not sheet_token:
             raise RuntimeError(f"飞书创建表格未返回 token: {data}")
+        sheet_url = str(spreadsheet.get("url") or "")
 
         # Step 2: 读取 xlsx 数据
         wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
@@ -925,7 +942,7 @@ class FeishuSender:
         wb.close()
 
         if not rows:
-            return sheet_token  # 空表也返回 token
+            return sheet_token, sheet_url  # 空表也返回 token
 
         # Step 3: 获取 sheet_id
         resp = _requests.get(
@@ -956,13 +973,121 @@ class FeishuSender:
                 json=body,
                 timeout=120,
             )
-            if resp.status_code != 200 or resp.json().get("code") != 0:
-                log.warning(
-                    "topic6 sheets write failed range=%s code=%s: %s",
-                    range_str, resp.json().get("code"), resp.text[:200],
+            code = None
+            try:
+                code = resp.json().get("code")
+            except ValueError:
+                pass
+            if resp.status_code != 200 or code != 0:
+                raise RuntimeError(
+                    f"飞书表格写入失败 token={sheet_token} range={range_str} "
+                    f"HTTP {resp.status_code} code={code}: {resp.text[:200]}"
                 )
 
-        return sheet_token
+        return sheet_token, sheet_url
+
+    def list_permission_members(self, token: str, token_type: str) -> list[dict]:
+        """列出云文档协作者（GET /drive/v1/permissions/{token}/members），用于授权后校验。"""
+        import requests as _requests
+
+        access_token = self._get_tenant_access_token()
+        resp = _requests.get(
+            f"https://open.feishu.cn/open-apis/drive/v1/permissions/{token}/members",
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={"type": token_type},
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"飞书 list_permission_members HTTP {resp.status_code}: {resp.text[:300]}")
+        data = resp.json()
+        if data.get("code") != 0:
+            raise RuntimeError(
+                f"飞书 list_permission_members 失败 code={data.get('code')}: {data.get('msg', '')[:200]}"
+            )
+        return list((data.get("data") or {}).get("items") or [])
+
+    def get_doc_meta(self, token: str, doc_type: str) -> dict:
+        """查询云文档元数据（POST /drive/v1/metas/batch_query），返回单条 meta。
+
+        关键字段：owner_id / latest_modify_user（open_id）/ latest_modify_time（秒，字符串）。
+        """
+        import requests as _requests
+
+        access_token = self._get_tenant_access_token()
+        resp = _requests.post(
+            "https://open.feishu.cn/open-apis/drive/v1/metas/batch_query",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json; charset=utf-8",
+            },
+            params={"user_id_type": "open_id"},
+            json={"request_docs": [{"doc_token": token, "doc_type": doc_type}]},
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"飞书 metas/batch_query HTTP {resp.status_code}: {resp.text[:300]}")
+        data = resp.json()
+        if data.get("code") != 0:
+            raise RuntimeError(
+                f"飞书 metas/batch_query 失败 code={data.get('code')}: {data.get('msg', '')[:200]}"
+            )
+        metas = (data.get("data") or {}).get("metas") or []
+        if not metas:
+            raise RuntimeError(f"飞书 metas/batch_query 未返回 meta token={token}: {data}")
+        return dict(metas[0])
+
+    def export_sheet_xlsx(
+        self,
+        token: str,
+        *,
+        poll_interval_s: float = 2.0,
+        max_wait_s: float = 120.0,
+    ) -> bytes:
+        """把在线表格导出为 xlsx 字节：创建导出任务 → 轮询 → 下载。"""
+        import requests as _requests
+
+        access_token = self._get_tenant_access_token()
+        auth = {"Authorization": f"Bearer {access_token}"}
+        base = "https://open.feishu.cn/open-apis/drive/v1/export_tasks"
+
+        resp = _requests.post(
+            base,
+            headers={**auth, "Content-Type": "application/json; charset=utf-8"},
+            json={"file_extension": "xlsx", "token": token, "type": "sheet"},
+            timeout=30,
+        )
+        data = resp.json() if resp.status_code == 200 else {}
+        ticket = str((data.get("data") or {}).get("ticket") or "")
+        if data.get("code") != 0 or not ticket:
+            raise RuntimeError(f"飞书创建导出任务失败 HTTP {resp.status_code}: {resp.text[:300]}")
+
+        # job_status: 0=成功；1/2=处理中；>=3 失败
+        deadline = time.monotonic() + max_wait_s
+        file_token = ""
+        while True:
+            resp = _requests.get(
+                f"{base}/{ticket}", headers=auth, params={"token": token}, timeout=30,
+            )
+            body = resp.json() if resp.status_code == 200 else {}
+            result = (body.get("data") or {}).get("result") or {}
+            status = result.get("job_status")
+            if status == 0:
+                file_token = str(result.get("file_token") or "")
+                break
+            if isinstance(status, int) and status >= 3:
+                raise RuntimeError(
+                    f"飞书导出任务失败 job_status={status}: {result.get('job_error_msg', '')}"
+                )
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"飞书导出任务超时 ticket={ticket} status={status}")
+            time.sleep(poll_interval_s)
+        if not file_token:
+            raise RuntimeError(f"飞书导出任务完成但未返回 file_token ticket={ticket}")
+
+        resp = _requests.get(f"{base}/file/{file_token}/download", headers=auth, timeout=120)
+        if resp.status_code != 200 or not resp.content:
+            raise RuntimeError(f"飞书导出文件下载失败 HTTP {resp.status_code}: {resp.text[:200]}")
+        return resp.content
 
     def _get_tenant_access_token(self) -> str:
         """获取当前应用的 tenant_access_token。

@@ -1,6 +1,6 @@
 {
   "name": "topic6-memory",
-  "description": "topic6 跨会话业务记忆。承载版本状态、错误案例库、必读清单;Agent 只读挂到 /mnt/memory/topic6/。由 gateway 侧 Memory Store API 维护,与 assets_from_customer 完全解耦。",
+  "description": "topic6 跨会话业务记忆。承载版本状态、错误案例库、必读清单;Agent 只读,通过 memory_read 工具按 /{memstore_id}/topic6/... 读取。由 gateway 侧 Memory Store API 维护,与 assets_from_customer 完全解耦。",
   "memories": [
     {
       "path": "/topic6/MEMORY.md",

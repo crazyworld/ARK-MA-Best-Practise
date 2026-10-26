@@ -24,6 +24,24 @@ def resolve_project_dir(project_dir: str | Path) -> Path:
     return path if path.is_absolute() else Path("/workspace") / path
 
 
+def run_config_mode(project_dir: str | Path) -> str:
+    """读取 run_config.yaml 顶层 mode(用户触发的原始模式,可能为 smoke)。"""
+    config_path = resolve_project_dir(project_dir) / "run_config.yaml"
+    if not config_path.exists():
+        return ""
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    return str(config.get("mode") or "")
+
+
+def uses_sample_base(project_dir: str | Path, mode: str) -> bool:
+    """合并脚本是否以 03_抽样/sample_500.xlsx 为基础表。
+
+    full/demo 固定用样本；smoke 第二轮按约定传 --mode skip_sampling，但数据仍是
+    30 条样本，因此以 run_config.yaml 顶层 mode=smoke 为准。
+    """
+    return mode in {"full", "demo"} or run_config_mode(project_dir) == "smoke"
+
+
 def _deep_merge(target: dict[str, Any], patch: dict[str, Any]) -> None:
     for key, value in patch.items():
         if isinstance(value, dict) and isinstance(target.get(key), dict):

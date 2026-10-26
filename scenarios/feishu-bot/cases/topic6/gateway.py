@@ -10,9 +10,15 @@ import logging
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 from arkagent.feishu import IncomingMessage
+from arkagent.lark_vault import (
+    ensure_lark_cli_vault,
+    fetch_feishu_tenant_access_token,
+    update_lark_cli_vault_token,
+)
 from arkagent.store import GatewayStore
 
 from artifact_sync import Topic6ArtifactSync
@@ -41,7 +47,12 @@ from topic6_user_oauth import (
 from config import Topic6Config
 
 log = logging.getLogger("arkagent.case.topic6")
-TOKEN_KEEPALIVE_INTERVAL_S = 60.0
+TOKEN_REFRESH_INTERVAL_S = 60.0
+# 飞书 tenant token 剩余 >30min 时重复申请返回同一个；进入最后 30min 才签发新 token 且旧的
+# 仍有效到期，因此在剩余 <30min 时换新，Vault 下一次解析即生效、无空窗。
+BOT_TOKEN_REFRESH_MARGIN_S = 1800.0
+BOT_VAULT_NAME_HINT = "topic6-bot"
+BOT_VAULT_READY_TIMEOUT_S = 30.0
 # in-chat 授权等待扫码的最大秒数；超过后取消 poll，用户需重新发送触发词。
 IN_CHAT_AUTH_TIMEOUT_S = 300.0
 CONTINUE_COMMAND_RE = re.compile(r"^/(?:continue|resume)(?:\s+(.*))?$", re.IGNORECASE)
@@ -77,7 +88,11 @@ class Topic6Gateway:
         self._artifact_sync = artifact_sync
         self._publisher = publisher
         self._authorized = set(config.authorized_open_ids)
-        self._token_keepalive_tasks: dict[str, asyncio.Task] = {}
+        self._ark = getattr(runner, "_ark", None)
+        self._token_refresher: asyncio.Task | None = None
+        self._bot_vault_id = getattr(config, "lark_bot_vault_id", "") or ""
+        self._bot_token_expires_at = 0.0
+        self._bot_vault_ready = asyncio.Event()
         # 每个 open_id 同时只允许一个 in-chat 授权流程
         self._pending_authorizations: dict[str, asyncio.Task] = {}
 
@@ -114,6 +129,9 @@ class Topic6Gateway:
             except Exception as err:  # noqa: BLE001
                 log.warning("topic6 init docs folder permissions failed: %s", err)
 
+        # 常驻 token 刷新协程：bot tenant token + 全部已授权用户，独立于任务生命周期。
+        self.start_token_refresher()
+
         if self._pipeline_store is None:
             return
         active_jobs = self._pipeline_store.list_active_jobs()
@@ -128,17 +146,6 @@ class Topic6Gateway:
                 continue
             if self._artifact_sync is not None:
                 self._artifact_sync.start(current, self._loop)
-            if getattr(self._config, "skip_miaoda_oauth", False):
-                continue
-            try:
-                vault_id = await self._user_authorization.vault_id(current.user_open_id)
-                self._start_token_keepalive(current, vault_id)
-            except Exception as error:  # noqa: BLE001 - 过期授权不应阻断 MA 状态恢复
-                log.warning(
-                    "topic6 recovery token keepalive unavailable job=%s: %s",
-                    current.job_id,
-                    error,
-                )
         log.info("topic6 startup recovery completed results=%s", results)
 
     async def _process(self, message: IncomingMessage) -> None:
@@ -162,7 +169,6 @@ class Topic6Gateway:
                         "[/new] 收到。当前会话没有活跃任务,可发送「热点周报 demo」「热点周报 full」「热点周报 smoke」或「热点周报 skip_sampling」开新一轮。",
                     )
                 else:
-                    self._stop_token_keepalive(cancelled.job_id)
                     if self._artifact_sync is not None:
                         self._artifact_sync.stop(cancelled.job_id)
                         try:
@@ -257,6 +263,7 @@ class Topic6Gateway:
                     user_vault_id = await self._ensure_user_authorized(
                         message.chat_id, message.user_open_id
                     )
+                await self._wait_bot_vault_ready()
                 job = await self._runner.start_job(
                     chat_id=message.chat_id,
                     thread_id=message.thread_id,
@@ -265,19 +272,8 @@ class Topic6Gateway:
                     user_message=text,
                     user_vault_id=user_vault_id,
                 )
-                # [P0-2] 创建 job 飞书子文件夹（继承根文件夹权限）
-                if self._publisher is not None and self._publisher.enabled:
-                    try:
-                        folder_token = await self._loop.run_in_executor(
-                            None, self._publisher.create_job_folder, job,
-                        )
-                        if folder_token and self._pipeline_store:
-                            self._pipeline_store.update_docs_folder_token(job.job_id, folder_token)
-                            job.docs_folder_token = folder_token
-                    except Exception as err:  # noqa: BLE001
-                        log.warning("topic6 create job docs folder failed: %s", err)
-                if user_vault_id:
-                    self._start_token_keepalive(job, user_vault_id)
+                # job 飞书子文件夹在首个 HC 发卡前创建（Topic6Hitl.send_hc_card），
+                # 此时 project_dir 已解析，文件夹名才不会是 unknown_job_xxx。
                 if self._artifact_sync is not None:
                     self._artifact_sync.start(job, self._loop)
             except (Topic6RunnerError, UserAuthorizationRequired) as error:
@@ -326,14 +322,19 @@ class Topic6Gateway:
                         "- 报告上传\n"
                         "- 权限设置\n")
 
-            # 模拟沙箱环境变量
+            # 模拟沙箱环境变量：与 environment.json + bot Vault 注入保持一致
             env = os.environ.copy()
+            for key in [k for k in env if k.startswith("LARKSUITE_CLI_")]:
+                env.pop(key)
             env["LARK_APP_ID"] = self._runner._feishu._app_id  # noqa: SLF001
             env["LARK_APP_SECRET"] = self._runner._feishu._app_secret  # noqa: SLF001
             env["FEISHU_USER_OPEN_ID"] = user_open_id
-            env["LARKSUITE_CLI_STRICT_MODE"] = "bot"
             env["LARKSUITE_CLI_APP_ID"] = env["LARK_APP_ID"]
-            env["LARKSUITE_CLI_APP_SECRET"] = env["LARK_APP_SECRET"]
+            env["LARKSUITE_CLI_NO_UPDATE_NOTIFIER"] = "1"
+            token = await fetch_feishu_tenant_access_token(
+                env["LARK_APP_ID"], env["LARK_APP_SECRET"]
+            )
+            env["LARKSUITE_CLI_TENANT_ACCESS_TOKEN"] = token.value
 
             # 脚本路径
             script_dir = os.path.join(
@@ -678,78 +679,92 @@ class Topic6Gateway:
         # authorize 成功后 store 已写入，直接取 vault_id
         return await self._user_authorization.vault_id(open_id)
 
-    def _start_token_keepalive(
-        self, job: PipelineJob, expected_vault_id: str
-    ) -> None:
-        if self._pipeline_store is None or not expected_vault_id:
+    # ---- 常驻 token 刷新 ----------------------------------------------------
+
+    def start_token_refresher(self) -> None:
+        """启动唯一的常驻刷新协程（幂等）。"""
+        if self._token_refresher is not None and not self._token_refresher.done():
             return
-        self._stop_token_keepalive(job.job_id)
         loop = self._loop or asyncio.get_running_loop()
-        task = loop.create_task(
-            self._keep_user_token_alive(job, expected_vault_id)
-        )
-        self._token_keepalive_tasks[job.job_id] = task
-        task.add_done_callback(
-            lambda completed, job_id=job.job_id: self._token_keepalive_done(
-                job_id, completed
-            )
-        )
+        self._token_refresher = loop.create_task(self._token_refresher_loop())
 
-    def _stop_token_keepalive(self, job_id: str) -> None:
-        task = self._token_keepalive_tasks.pop(job_id, None)
-        if task is not None and not task.done():
-            task.cancel()
+    async def _token_refresher_loop(self) -> None:
+        """每分钟检查一次：bot tenant token + 全部已授权用户 token。
 
-    def _token_keepalive_done(
-        self, job_id: str, task: asyncio.Task
-    ) -> None:
-        if self._token_keepalive_tasks.get(job_id) is task:
-            self._token_keepalive_tasks.pop(job_id, None)
-        if task.cancelled():
-            return
-        error = task.exception()
-        if error is not None:
-            log.error(
-                "topic6 token keepalive stopped unexpectedly job=%s: %s",
-                job_id,
-                error,
-            )
-
-    async def _keep_user_token_alive(
-        self, job: PipelineJob, expected_vault_id: str
-    ) -> None:
-        """活跃任务期间原地轮换用户 Credential，不改变 Session 或 Vault。"""
-        assert self._pipeline_store is not None
+        用户 refresh_token 一次性且约 7 天有效，周报每周才跑一次，必须常驻刷新才能续链；
+        单项失败只记日志，协程本身不退出。
+        """
         while True:
-            current = self._pipeline_store.get_job(job.job_id)
-            if current is None or current.status not in (
-                STATUS_RUNNING,
-                STATUS_WAIT_HC,
-            ):
-                return
             try:
-                vault_id = await self._user_authorization.vault_id(
-                    job.user_open_id
-                )
-                if vault_id != expected_vault_id:
-                    log.error(
-                        "topic6 token keepalive vault changed job=%s "
-                        "session=%s expected=%s actual=%s",
-                        job.job_id,
-                        job.ma_session_id,
-                        expected_vault_id,
-                        vault_id,
-                    )
-                    return
-            except Exception as error:  # noqa: BLE001 - 临时刷新失败下轮继续
+                await self.refresh_tokens_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:  # noqa: BLE001 - 兜底，协程不能死
+                log.exception("topic6 token refresher tick failed: %s", error)
+            await asyncio.sleep(TOKEN_REFRESH_INTERVAL_S)
+
+    async def refresh_tokens_once(self) -> None:
+        try:
+            await self.ensure_bot_token_fresh()
+        except Exception as error:  # noqa: BLE001
+            log.error("topic6 bot tenant token refresh failed: %s", error)
+        if self._pipeline_store is None or getattr(self._config, "skip_miaoda_oauth", False):
+            return
+        list_users = getattr(self._pipeline_store, "list_user_oauth", None)
+        for user in (list_users() if callable(list_users) else []):
+            try:
+                await self._user_authorization.refresh_if_needed(user["open_id"])
+            except Exception as error:  # noqa: BLE001 - 单个用户失败不影响其他人
                 log.warning(
-                    "topic6 token keepalive refresh failed job=%s "
-                    "session=%s: %s",
-                    job.job_id,
-                    job.ma_session_id,
-                    error,
+                    "topic6 user token refresh failed user=%s: %s", user["open_id"], error
                 )
-            await asyncio.sleep(TOKEN_KEEPALIVE_INTERVAL_S)
+
+    async def ensure_bot_token_fresh(self, force: bool = False) -> None:
+        """Bot tenant token 写入专用 Vault；首次调用按名字幂等置备并挂到 Runner。"""
+        if self._ark is None:
+            return
+        now = time.time()
+        if (
+            not force
+            and self._bot_vault_ready.is_set()
+            and self._bot_token_expires_at - now > BOT_TOKEN_REFRESH_MARGIN_S
+        ):
+            return
+        token = await fetch_feishu_tenant_access_token(
+            self._config.feishu_app_id, self._config.feishu_app_secret
+        )
+        if self._bot_vault_ready.is_set():
+            await update_lark_cli_vault_token(self._ark, self._bot_vault_id, token.value)
+        else:
+            if self._bot_vault_id:
+                # 显式配置了 TOPIC6_LARK_BOT_VAULT_ID：原地更新（ID 已在 build_gateway 挂到 Runner）
+                await update_lark_cli_vault_token(self._ark, self._bot_vault_id, token.value)
+            else:
+                self._bot_vault_id = await ensure_lark_cli_vault(
+                    self._ark, self._config.feishu_app_id, token.value,
+                    name_hint=BOT_VAULT_NAME_HINT,
+                )
+            self._runner.add_vault_id(self._bot_vault_id)
+            self._bot_vault_ready.set()
+            log.info("topic6 bot lark-cli vault ready vault=%s", self._bot_vault_id)
+        self._bot_token_expires_at = now + token.expires_in
+        log.info("topic6 bot tenant token refreshed expires_in=%ss", token.expires_in)
+
+    async def _wait_bot_vault_ready(self) -> None:
+        """新 Session 必须挂上 bot Vault（Session 创建后不能追加 Vault）。"""
+        if self._ark is None or self._bot_vault_ready.is_set():
+            return
+        self.start_token_refresher()
+        try:
+            await asyncio.wait_for(
+                self._bot_vault_ready.wait(), timeout=BOT_VAULT_READY_TIMEOUT_S
+            )
+        except asyncio.TimeoutError:
+            log.warning(
+                "topic6 bot vault not ready after %ss; Session 将不含 bot token，"
+                "Phase F 会走 feishu_api_fallback",
+                BOT_VAULT_READY_TIMEOUT_S,
+            )
 
 
 def _should_handle_message(message: IncomingMessage) -> bool:
@@ -782,7 +797,9 @@ def build_gateway(config: Topic6Config, ark, sender, loop: asyncio.AbstractEvent
             coordinator_agent_id=config.coordinator_agent_id,
             environment_id=config.environment_id,
             memory_store_id=config.memory_store_id,
-            vault_ids=(config.vault_id,) if config.vault_id else (),
+            vault_ids=tuple(
+                v for v in (config.lark_bot_vault_id, config.vault_id) if v
+            ),
         ),
         loop=loop,
         extra_headers=(

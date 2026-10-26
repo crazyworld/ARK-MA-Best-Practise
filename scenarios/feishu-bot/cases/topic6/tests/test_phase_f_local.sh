@@ -144,8 +144,9 @@ import json
 env_file = '$TOPIC6_DIR/ma-resources/environment.json'
 data = json.load(open(env_file))
 env = data['config']['env']
-required = ['LARK_APP_ID', 'LARK_APP_SECRET', 'LARKSUITE_CLI_APP_ID', 'LARKSUITE_CLI_APP_SECRET', 'LARKSUITE_CLI_STRICT_MODE']
-missing = [k for k in required if k not in env]
+required = ['LARK_APP_ID', 'LARK_APP_SECRET', 'LARKSUITE_CLI_APP_ID']
+forbidden = ['LARKSUITE_CLI_APP_SECRET', 'LARKSUITE_CLI_STRICT_MODE']  # STRICT_MODE=bot 会拦 Phase H --as user
+missing = [k for k in required if k not in env] + [f'禁止:{k}' for k in forbidden if k in env]
 if missing:
     raise SystemExit(f'environment.json 缺少: {missing}')
 print('all required env vars present')

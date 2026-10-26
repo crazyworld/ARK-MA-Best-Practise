@@ -1,46 +1,73 @@
 #!/usr/bin/env python3
-"""Phase F: Publish merged report to Feishu as an online document.
+"""Phase F: 把合并报告发布为飞书云文档（docx）。
 
-Replaces the 60-line lark-cli shell sequence that Agents had to compose manually.
-Encapsulates the full flow: create folder → import doc → grant operator edit →
-transfer owner → grant admins full_access → validate every JSON response.
+单一入口，Agent 不需要自行拼 lark-cli 命令。流程：
+  创建文件夹 → 导入 docx → 给发起人授 edit → 转移 owner → 给 admin 授 full_access
 
-Requires lark-cli configured with bot identity (--as bot).
+身份与后端：
+  - 主路径：lark-cli ``--as bot``。身份来自 Gateway 通过 Ark Vault 注入的
+    ``LARKSUITE_CLI_APP_ID`` + ``LARKSUITE_CLI_TENANT_ACCESS_TOKEN``（env-provider 模式），
+    不执行 ``config init``，不打印任何 token。
+  - 先用只读接口 ``GET /open-apis/drive/explorer/v2/root_folder/meta`` 做健康探测
+    （``--dry-run`` 无论 token 是否有效都返回 ok，不能作为探测）。
+  - lark-cli 不可用 / 探测失败 / 在文档创建前的步骤失败 → 自动切换到
+    ``feishu_api_fallback``（飞书 Open API 直连，需要 LARK_APP_ID / LARK_APP_SECRET）。
+  - 文档已创建后的失败不再切 fallback（避免产生第二份文档），直接返回真实错误。
+
+权限失败策略：
+  - 给发起人授 edit 失败 → 阻断（exit 1，status=failed）
+  - 转移 owner / 给 admin 授权失败 → 仅告警（写入 warnings），仍视为成功
 
 Exit codes:
-  0 = published successfully
-  1 = failed (details in stderr + JSON output)
+  0 = 发布成功
+  1 = 失败（详情见 stdout JSON 的 error）
 
 Usage:
-  python publish_report_to_feishu.py \
-    --project-dir "{project_dir}" \
-    --report-file "07_报告/热点报告_2026-W42_v1.md" \
-    --folder-name "热点周报_2026-W42_full" \
+  python publish_report_to_feishu.py \\
+    --project-dir "{project_dir}" \\
+    --report-file "07_报告/热点报告_2026-W42_v1.md" \\
+    --folder-name "热点周报_2026-W42_full" \\
     --doc-name "热点报告_2026-W42"
 
 Output (JSON to stdout):
-  {
-    "status": "success",
-    "doc_token": "...",
-    "doc_url": "https://...",
-    "folder_token": "..."
-  }
+  {"status": "success", "backend": "lark-cli" | "feishu_api_fallback",
+   "doc_token": "...", "doc_url": "https://.../docx/...", "folder_token": "...",
+   "operator": "ou_...", "admins": [...], "warnings": [...]}
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
-
-# Default admin emails for full_access
+# 默认授 full_access 的 admin 邮箱
 DEFAULT_ADMIN_EMAILS = (
     "xiuyuan.zhao@bluefocus.com",
     "jiesong.yuan@bluefocus.com",
 )
+
+BACKEND_CLI = "lark-cli"
+BACKEND_FALLBACK = "feishu_api_fallback"
+PROBE_PATH = "/open-apis/drive/explorer/v2/root_folder/meta"
+
+
+class PublishError(RuntimeError):
+    """发布失败。doc_created=True 表示飞书侧已经生成了文档，不能再走 fallback。"""
+
+    def __init__(self, message: str, *, doc_created: bool = False,
+                 partial: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.doc_created = doc_created
+        self.partial = partial or {}
+
+
+def _log(msg: str) -> None:
+    print(msg, file=sys.stderr)
 
 
 def _resolve_project_dir(value: str) -> Path:
@@ -48,340 +75,285 @@ def _resolve_project_dir(value: str) -> Path:
     return path if path.is_absolute() else Path("/workspace") / path
 
 
-def _run_lark_cli(args: list[str], step_name: str) -> dict:
-    """Run a lark-cli command, parse JSON response, validate ok == true."""
-    cmd = ["lark-cli"] + args
+def _is_docx_url(url: str) -> bool:
+    return "/docx/" in (url or "")
+
+
+# ---------------------------------------------------------------------------
+# lark-cli 主路径
+# ---------------------------------------------------------------------------
+
+def _error_detail(data: dict, raw: str) -> str:
+    err = data.get("error")
+    if isinstance(err, dict):
+        parts = [f"{k}={err[k]}" for k in ("type", "subtype", "code", "message") if err.get(k)]
+        if parts:
+            return ", ".join(parts)
+    if data.get("code") is not None or data.get("msg"):
+        return f"code={data.get('code', '?')}, msg={data.get('msg') or data.get('message') or ''}"
+    return raw[:300]
+
+
+def _run_lark_cli(args: list[str], step_name: str, *, cwd: str | None = None,
+                  timeout: int = 120) -> dict:
+    """执行 lark-cli，解析 stdout JSON，要求 ok == true。
+
+    lark-cli 的业务错误可能以退出码 0 返回，必须看 JSON；stderr 中的
+    auto-grant Warning 属正常噪声，忽略。
+    """
+    cmd = ["lark-cli", *args]
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-    except FileNotFoundError:
-        raise RuntimeError(
-            f"[{step_name}] lark-cli 未安装或不在 PATH 中。"
-            f"请确认 Environment setup_script 已安装 lark-cli。"
-        )
-    except subprocess.TimeoutExpired:
-        raise RuntimeError(f"[{step_name}] lark-cli 超时（60s）")
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd)
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"[{step_name}] lark-cli 未安装或不在 PATH 中") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"[{step_name}] lark-cli 超时（{timeout}s）") from exc
 
-    # lark-cli may return 0 even on business error, must check JSON
-    output = result.stdout.strip()
-    if result.returncode != 0 and not output:
-        raise RuntimeError(
-            f"[{step_name}] lark-cli 退出码 {result.returncode}: {result.stderr.strip()[:300]}"
-        )
-
+    output = (proc.stdout or "").strip()
     try:
-        data = json.loads(output)
-    except (json.JSONDecodeError, TypeError):
+        data = json.loads(output) if output else None
+    except json.JSONDecodeError:
+        data = None
+    if not isinstance(data, dict):
+        stderr = (proc.stderr or "").strip()[-300:]
         raise RuntimeError(
-            f"[{step_name}] lark-cli 输出不是有效 JSON: {output[:300]}"
+            f"[{step_name}] lark-cli 输出不是有效 JSON（exit={proc.returncode}）: "
+            f"{output[:300] or stderr}"
         )
-
     if data.get("ok") is not True:
-        code = data.get("code", "?")
-        msg = data.get("msg", data.get("message", output[:200]))
-        raise RuntimeError(f"[{step_name}] 飞书 API 错误 code={code}: {msg}")
-
+        raise RuntimeError(f"[{step_name}] lark-cli 失败: {_error_detail(data, output)}")
     return data
 
 
-def _ensure_lark_cli_configured() -> None:
-    """Ensure lark-cli is initialized with bot credentials."""
-    app_id = os.environ.get("LARK_APP_ID") or os.environ.get("LARKSUITE_CLI_APP_ID") or ""
-    app_secret = os.environ.get("LARK_APP_SECRET") or ""
+def _payload(data: dict) -> dict:
+    inner = data.get("data")
+    return inner if isinstance(inner, dict) else {}
 
-    if not app_id or not app_secret:
-        raise RuntimeError(
-            "LARK_APP_ID / LARK_APP_SECRET 未注入，无法初始化 lark-cli。"
-        )
 
-    # Check if already configured by running a simple command
+def _check_member_add(data: dict, step_name: str) -> None:
+    inner = _payload(data)
+    succeeded = inner.get("succeeded_count", 1)
+    partial = inner.get("partial", False)
+    if (isinstance(succeeded, int) and succeeded < 1) or partial:
+        raise RuntimeError(f"[{step_name}] 授权不完整: succeeded={succeeded}, partial={partial}")
+
+
+def probe_lark_cli() -> str:
+    """返回空串表示 bot 身份可用，否则返回不可用原因。"""
+    if not shutil.which("lark-cli"):
+        return "lark-cli 未安装或不在 PATH 中"
+    if not os.environ.get("LARKSUITE_CLI_APP_ID"):
+        return "LARKSUITE_CLI_APP_ID 未注入"
     try:
-        result = subprocess.run(
-            ["lark-cli", "config", "show"],
-            capture_output=True, text=True, timeout=10,
-        )
-        if result.returncode == 0 and app_id in result.stdout:
-            return  # Already configured
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
-
-    # Configure: pipe app_secret via stdin to avoid it appearing in args/logs
-    try:
-        proc = subprocess.run(
-            [
-                "lark-cli", "config", "init",
-                "--app-id", app_id,
-                "--app-secret-stdin",
-                "--brand", "feishu",
-            ],
-            input=app_secret,
-            capture_output=True, text=True, timeout=15,
-        )
-        if proc.returncode != 0:
-            # 方舟沙箱中 config init 被拦截（"credentials are provided externally"）。
-            # 即使环境变量齐全，lark-cli 也可能因 vault 未注入 bot token 而 token_missing。
-            # 做一次 dry-run 验证 bot 身份是否真的可用。
-            verify = subprocess.run(
-                ["lark-cli", "drive", "+create-folder", "--name", "__probe__", "--as", "bot", "--dry-run"],
-                capture_output=True, text=True, timeout=10,
-            )
-            probe_ok = False
-            try:
-                probe_data = json.loads(verify.stdout.strip())
-                probe_ok = probe_data.get("ok") is True
-            except Exception:
-                pass
-            if not probe_ok:
-                # bot 身份不可用——强制走 fallback
-                raise RuntimeError(
-                    "lark-cli bot 身份不可用（config init 被拦截 + bot dry-run 失败），"
-                    "需要 fallback 到飞书 Open API 直连"
-                )
-    except FileNotFoundError:
-        raise RuntimeError("lark-cli 未安装")
+        _run_lark_cli(["api", "GET", PROBE_PATH, "--as", "bot"], "身份探测", timeout=30)
+    except RuntimeError as exc:
+        return str(exc)
+    return ""
 
 
-def step_create_folder(folder_name: str) -> str:
-    """Step F-2a: Create a Feishu folder for the report. Returns folder_token."""
-    data = _run_lark_cli(
-        ["drive", "+create-folder", "--name", folder_name, "--as", "bot"],
-        "创建文件夹",
-    )
-    token = (
-        data.get("folder_token")
-        or data.get("data", {}).get("folder_token")
-        or ""
-    )
+def cli_create_folder(folder_name: str) -> str:
+    data = _run_lark_cli(["drive", "+create-folder", "--name", folder_name, "--as", "bot"], "创建文件夹")
+    token = data.get("folder_token") or _payload(data).get("folder_token") or ""
     if not token:
-        raise RuntimeError(f"[创建文件夹] 响应缺少 folder_token: {json.dumps(data)[:200]}")
+        raise RuntimeError(f"[创建文件夹] 响应缺少 folder_token: {json.dumps(data, ensure_ascii=False)[:200]}")
     return token
 
 
-def step_import_document(
-    report_path: str, folder_token: str, doc_name: str,
-) -> tuple[str, str]:
-    """Step F-2b: Import markdown as Feishu docx. Returns (doc_token, doc_url)."""
+def cli_import_document(report_path: str, folder_token: str, doc_name: str) -> tuple[str, str]:
+    path = Path(report_path)
+    # 在报告所在目录执行，--file 只传文件名，规避 lark-cli 对绝对路径/越界路径的限制
     data = _run_lark_cli(
-        [
-            "drive", "+import",
-            "--file", report_path,
-            "--type", "docx",
-            "--folder-token", folder_token,
-            "--name", doc_name,
-            "--as", "bot",
-        ],
-        "导入文档",
+        ["drive", "+import", "--file", path.name, "--type", "docx",
+         "--folder-token", folder_token, "--name", doc_name, "--as", "bot"],
+        "导入文档", cwd=str(path.parent), timeout=300,
     )
-    doc_token = data.get("token") or data.get("data", {}).get("token") or ""
-    doc_url = data.get("url") or data.get("data", {}).get("url") or ""
-    if not doc_token:
-        raise RuntimeError(f"[导入文档] 响应缺少 doc token: {json.dumps(data)[:200]}")
-    if not doc_url:
-        raise RuntimeError(f"[导入文档] 响应缺少文档 URL: {json.dumps(data)[:200]}")
+    inner = _payload(data)
+    doc_token = data.get("token") or inner.get("token") or ""
+    doc_url = data.get("url") or inner.get("url") or ""
+    if not doc_token or not doc_url:
+        raise RuntimeError(f"[导入文档] 响应缺少 token/url: {json.dumps(data, ensure_ascii=False)[:200]}")
     return doc_token, doc_url
 
 
-def step_grant_operator(doc_token: str, operator_open_id: str) -> None:
-    """Step F-3a: Grant task operator edit permission."""
+def cli_grant_operator(doc_token: str, operator_open_id: str) -> None:
     data = _run_lark_cli(
-        [
-            "drive", "+member-add",
-            "--token", doc_token, "--type", "docx",
-            "--member-type", "openid", "--member-id", operator_open_id,
-            "--perm", "edit", "--as", "bot", "--yes",
-        ],
+        ["drive", "+member-add", "--token", doc_token, "--type", "docx",
+         "--member-type", "openid", "--member-id", operator_open_id,
+         "--perm", "edit", "--as", "bot", "--yes"],
         "授权发起人",
     )
-    # Validate succeeded_count
-    inner = data.get("data") or {}
-    succeeded = inner.get("succeeded_count", 1)
-    partial = inner.get("partial", False)
-    if succeeded < 1 or partial:
-        raise RuntimeError(
-            f"[授权发起人] 批量授权不完整: succeeded={succeeded}, partial={partial}"
-        )
+    _check_member_add(data, "授权发起人")
 
 
-def step_transfer_owner(doc_token: str, operator_open_id: str) -> None:
-    """Step F-3b: Transfer document ownership to operator."""
-    transfer_data = json.dumps({
-        "member_type": "openid",
-        "member_id": operator_open_id,
-    })
+def cli_transfer_owner(doc_token: str, operator_open_id: str) -> None:
+    body = json.dumps({"member_type": "openid", "member_id": operator_open_id})
     _run_lark_cli(
-        [
-            "drive", "permission.members", "transfer_owner",
-            "--token", doc_token, "--type", "docx",
-            "--data", transfer_data,
-            "--old-owner-perm", "full_access",
-            "--as", "bot", "--yes",
-        ],
+        ["drive", "permission.members", "transfer_owner", "--token", doc_token,
+         "--type", "docx", "--data", body, "--old-owner-perm", "full_access",
+         "--as", "bot", "--yes"],
         "转移所有权",
     )
 
 
-def step_grant_admins(doc_token: str, admin_emails: tuple[str, ...]) -> None:
-    """Step F-3c: Grant admin emails full_access."""
+def cli_grant_admin(doc_token: str, email: str) -> None:
+    data = _run_lark_cli(
+        ["drive", "+member-add", "--token", doc_token, "--type", "docx",
+         "--member-type", "email", "--member-id", email,
+         "--perm", "full_access", "--as", "bot", "--yes"],
+        f"授权 admin {email}",
+    )
+    _check_member_add(data, f"授权 admin {email}")
+
+
+CLI_BACKEND = {
+    "create_folder": cli_create_folder,
+    "import_document": cli_import_document,
+    "grant_operator": cli_grant_operator,
+    "transfer_owner": cli_transfer_owner,
+    "grant_admin": cli_grant_admin,
+}
+
+
+def _load_fallback_backend() -> dict:
+    """延迟导入 Open API fallback（依赖 httpx）。"""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import feishu_api_fallback as fb  # noqa: PLC0415
+
+    return {
+        "create_folder": fb.step_create_folder,
+        "import_document": fb.step_import_document,
+        "grant_operator": fb.step_grant_operator,
+        "transfer_owner": fb.step_transfer_owner,
+        "grant_admin": fb.step_grant_admin,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 编排
+# ---------------------------------------------------------------------------
+
+def run_publish(backend: dict, *, report_path: str, folder_name: str, doc_name: str,
+                operator_open_id: str, admin_emails: tuple[str, ...],
+                folder_token: str = "") -> dict:
+    """执行一次完整发布。文档创建前失败抛 PublishError(doc_created=False)。"""
+    warnings: list[str] = []
+    partial: dict[str, Any] = {}
+    try:
+        if not folder_token:
+            folder_token = backend["create_folder"](folder_name)
+            _log(f"✅ 文件夹已创建: {folder_token}")
+        partial["folder_token"] = folder_token
+        doc_token, doc_url = backend["import_document"](report_path, folder_token, doc_name)
+    except Exception as exc:  # noqa: BLE001
+        raise PublishError(str(exc), doc_created=False, partial=partial) from exc
+
+    partial.update(doc_token=doc_token, doc_url=doc_url)
+    if not _is_docx_url(doc_url):
+        raise PublishError(f"[导入文档] 返回的 URL 不是 /docx/ 文档: {doc_url}",
+                           doc_created=True, partial=partial)
+    _log(f"✅ 文档已导入: {doc_url}")
+
+    try:
+        backend["grant_operator"](doc_token, operator_open_id)
+    except Exception as exc:  # noqa: BLE001
+        raise PublishError(str(exc), doc_created=True, partial=partial) from exc
+    _log(f"✅ 发起人已授权 edit: {operator_open_id}")
+
+    try:
+        backend["transfer_owner"](doc_token, operator_open_id)
+        _log(f"✅ 所有权已转移: {operator_open_id}")
+    except Exception as exc:  # noqa: BLE001
+        warnings.append(f"转移所有权失败: {exc}")
+        _log(f"⚠️ 转移所有权失败（不阻断）: {exc}")
+
     for email in admin_emails:
-        data = _run_lark_cli(
-            [
-                "drive", "+member-add",
-                "--token", doc_token, "--type", "docx",
-                "--member-type", "email", "--member-id", email,
-                "--perm", "full_access", "--as", "bot", "--yes",
-            ],
-            f"授权 admin {email}",
-        )
-        inner = data.get("data") or {}
-        succeeded = inner.get("succeeded_count", 1)
-        partial = inner.get("partial", False)
-        if succeeded < 1 or partial:
-            raise RuntimeError(
-                f"[授权 admin {email}] 不完整: succeeded={succeeded}, partial={partial}"
-            )
+        try:
+            backend["grant_admin"](doc_token, email)
+            _log(f"✅ admin 已授权 full_access: {email}")
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"授权 admin {email} 失败: {exc}")
+            _log(f"⚠️ 授权 admin {email} 失败（不阻断）: {exc}")
+
+    return {
+        "doc_token": doc_token,
+        "doc_url": doc_url,
+        "folder_token": folder_token,
+        "warnings": warnings,
+    }
 
 
-def main() -> int:
+def publish(*, report_path: str, folder_name: str, doc_name: str,
+            operator_open_id: str, admin_emails: tuple[str, ...]) -> tuple[int, dict]:
+    base = {"operator": operator_open_id, "admins": list(admin_emails)}
+    pre_warnings: list[str] = []
+    reuse_folder = ""
+
+    reason = probe_lark_cli()
+    if not reason:
+        try:
+            out = run_publish(CLI_BACKEND, report_path=report_path, folder_name=folder_name,
+                              doc_name=doc_name, operator_open_id=operator_open_id,
+                              admin_emails=admin_emails)
+            return 0, {"status": "success", "backend": BACKEND_CLI, **out, **base}
+        except PublishError as exc:
+            if exc.doc_created:
+                return 1, {"status": "failed", "backend": BACKEND_CLI, "error": str(exc),
+                           **exc.partial, **base}
+            reason = str(exc)
+            reuse_folder = exc.partial.get("folder_token", "")
+    _log(f"⚠️ lark-cli 主路径不可用，切换 Open API fallback: {reason}")
+    pre_warnings.append(f"lark-cli 主路径不可用，已使用 fallback: {reason}")
+
+    try:
+        backend = _load_fallback_backend()
+    except Exception as exc:  # noqa: BLE001
+        return 1, {"status": "failed", "backend": BACKEND_FALLBACK,
+                   "error": f"lark-cli 不可用（{reason}）；fallback 加载失败: {exc}", **base}
+
+    try:
+        out = run_publish(backend, report_path=report_path, folder_name=folder_name,
+                          doc_name=doc_name, operator_open_id=operator_open_id,
+                          admin_emails=admin_emails, folder_token=reuse_folder)
+    except PublishError as exc:
+        return 1, {"status": "failed", "backend": BACKEND_FALLBACK,
+                   "error": f"lark-cli 不可用（{reason}）；fallback 失败: {exc}",
+                   **exc.partial, **base}
+    out["warnings"] = pre_warnings + out["warnings"]
+    return 0, {"status": "success", "backend": BACKEND_FALLBACK, **out, **base}
+
+
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description=__doc__,
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--project-dir", required=True)
     parser.add_argument("--report-file", required=True,
                         help="项目内相对路径，如 07_报告/热点报告_2026-W42_v1.md")
-    parser.add_argument("--folder-name", required=True,
-                        help="飞书文件夹名，如 热点周报_2026-W42_full")
-    parser.add_argument("--doc-name", required=True,
-                        help="飞书文档标题，如 热点报告_2026-W42")
+    parser.add_argument("--folder-name", required=True, help="飞书文件夹名，如 热点周报_2026-W42_full")
+    parser.add_argument("--doc-name", required=True, help="飞书文档标题，如 热点报告_2026-W42")
     parser.add_argument("--admin-emails", default=",".join(DEFAULT_ADMIN_EMAILS),
-                        help="逗号分隔的 admin 邮箱")
-    args = parser.parse_args()
+                        help="逗号分隔的 admin 邮箱；传空串表示不授权 admin")
+    args = parser.parse_args(argv)
 
-    project = _resolve_project_dir(args.project_dir)
-    report_path = project / args.report_file
-
-    if not report_path.exists():
-        result = {"status": "failed", "error": f"报告文件不存在: {report_path}"}
-        print(json.dumps(result, ensure_ascii=False))
+    report_path = _resolve_project_dir(args.project_dir) / args.report_file
+    if not report_path.is_file():
+        print(json.dumps({"status": "failed", "error": f"报告文件不存在: {report_path}"},
+                         ensure_ascii=False))
         return 1
 
     operator_open_id = os.environ.get("FEISHU_USER_OPEN_ID", "").strip()
     if not operator_open_id:
-        result = {"status": "failed", "error": "FEISHU_USER_OPEN_ID 未注入"}
-        print(json.dumps(result, ensure_ascii=False))
+        print(json.dumps({"status": "failed", "error": "FEISHU_USER_OPEN_ID 未注入"}, ensure_ascii=False))
         return 1
 
-    admin_emails = tuple(
-        e.strip() for e in args.admin_emails.split(",") if e.strip()
-    )
-
-    # 尝试 lark-cli 主路径; 不可用时 fallback 到飞书 Open API 直连
-    use_fallback = False
-    try:
-        _ensure_lark_cli_configured()
-    except RuntimeError as cli_err:
-        print(f"⚠️ lark-cli 不可用({cli_err}), fallback 到飞书 Open API 直连", file=sys.stderr)
-        use_fallback = True
-
-    if use_fallback:
-        try:
-            from feishu_api_fallback import (
-                step_create_folder as fb_create_folder,
-                step_import_document as fb_import_document,
-                step_grant_operator as fb_grant_operator,
-                step_transfer_owner as fb_transfer_owner,
-                step_grant_admins as fb_grant_admins,
-            )
-        except ImportError as imp_err:
-            result = {"status": "failed", "error": f"lark-cli 和 feishu_api_fallback 均不可用: {imp_err}"}
-            print(json.dumps(result, ensure_ascii=False, indent=2))
-            return 1
-
-        try:
-            folder_token = fb_create_folder(args.folder_name)
-            print(f"✅ [fallback] 文件夹已创建: {folder_token}", file=sys.stderr)
-
-            doc_token, doc_url = fb_import_document(
-                str(report_path), folder_token, args.doc_name,
-            )
-            print(f"✅ [fallback] 文档已导入: {doc_url}", file=sys.stderr)
-
-            # 权限设置——失败不阻断（文件夹权限会继承到子文件）
-            for perm_step, perm_fn, perm_args, perm_desc in [
-                ("授权发起人", fb_grant_operator, (doc_token, operator_open_id), operator_open_id),
-                ("转移所有权", fb_transfer_owner, (doc_token, operator_open_id), operator_open_id),
-                ("授权 Admin", fb_grant_admins, (doc_token, admin_emails), ", ".join(admin_emails)),
-            ]:
-                try:
-                    perm_fn(*perm_args)
-                    print(f"✅ [fallback] {perm_step}: {perm_desc}", file=sys.stderr)
-                except Exception as perm_err:
-                    print(f"⚠️ [fallback] {perm_step}跳过（文件夹权限继承）: {perm_err}", file=sys.stderr)
-
-            result = {
-                "status": "success",
-                "backend": "feishu_api_fallback",
-                "doc_token": doc_token,
-                "doc_url": doc_url,
-                "folder_token": folder_token,
-                "operator": operator_open_id,
-                "admins": list(admin_emails),
-            }
-            print(json.dumps(result, ensure_ascii=False, indent=2))
-            return 0
-
-        except Exception as err:
-            result = {"status": "failed", "backend": "feishu_api_fallback", "error": str(err)}
-            print(json.dumps(result, ensure_ascii=False, indent=2))
-            print(f"❌ [fallback] {err}", file=sys.stderr)
-            return 1
-
-    try:
-        # Step 0 already done above (lark-cli configured)
-
-        # Step 1: Create folder
-        folder_token = step_create_folder(args.folder_name)
-        print(f"✅ 文件夹已创建: {folder_token}", file=sys.stderr)
-
-        # Step 2: Import document
-        doc_token, doc_url = step_import_document(
-            str(report_path), folder_token, args.doc_name,
-        )
-        print(f"✅ 文档已导入: {doc_url}", file=sys.stderr)
-
-        # Step 3: Grant operator edit
-        step_grant_operator(doc_token, operator_open_id)
-        print(f"✅ 发起人已授权 edit: {operator_open_id}", file=sys.stderr)
-
-        # Step 4: Transfer ownership
-        step_transfer_owner(doc_token, operator_open_id)
-        print(f"✅ 所有权已转移: {operator_open_id}", file=sys.stderr)
-
-        # Step 5: Grant admins
-        step_grant_admins(doc_token, admin_emails)
-        print(f"✅ Admin 已授权: {', '.join(admin_emails)}", file=sys.stderr)
-
-        # Output result
-        result = {
-            "status": "success",
-            "doc_token": doc_token,
-            "doc_url": doc_url,
-            "folder_token": folder_token,
-            "operator": operator_open_id,
-            "admins": list(admin_emails),
-        }
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-        return 0
-
-    except RuntimeError as err:
-        result = {"status": "failed", "error": str(err)}
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-        print(f"❌ {err}", file=sys.stderr)
-        return 1
+    admin_emails = tuple(e.strip() for e in args.admin_emails.split(",") if e.strip())
+    code, result = publish(report_path=str(report_path), folder_name=args.folder_name,
+                           doc_name=args.doc_name, operator_open_id=operator_open_id,
+                           admin_emails=admin_emails)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    if code != 0:
+        _log(f"❌ {result.get('error')}")
+    return code
 
 
 if __name__ == "__main__":

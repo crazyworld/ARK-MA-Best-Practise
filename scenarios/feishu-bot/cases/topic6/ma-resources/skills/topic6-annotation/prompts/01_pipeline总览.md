@@ -42,7 +42,7 @@
 | **C 第一批** | `prompt/04` → `skill/annotation/SKILL.md` | C0 基础事实层 + C3 节点标注并发 | 两路均完成后触发筛选 |
 | **C 筛选** | 同上 | 合并 C0+C3，按「是否营销可用」筛出子集（纯脚本零成本） | 解析失败/缺失占比 ≤ 5%，否则熔断 |
 | **C 第二批** | 同上 | R1~R5 版块路由层 + C2 事件合并并发，只处理筛选后子集 | 六路均完成后触发 D |
-| **D 合并** | `prompt/05` | row_id LEFT JOIN 七路输出（C0+R1~R5+C2+C3），存 `05_合并/` | 输出行数 = 输入行数，row_id 唯一 |
+| **D 合并** | `prompt/05` | row_id LEFT JOIN 七路输出（C0+R1~R5+C2+C3），存 `05_合并/` | 脚本输出 `gate_ok=true`（行数一致且序号无重复；宽表 row_id 列已改名为「序号」） |
 | **☑ HC1 小样本验收** | `prompt/04` | full/demo 展示七路质量分布，等待用户确认 | full/demo 不可跳过 |
 | **C→D 全量** | 同上 | full 通过 HC1 后，或初始 skip_sampling 模式，执行全量流程；demo 跳过 | 同上 |
 | **☑ HC2 全量验收** | `prompt/05` | full/skip_sampling 展示整体分布/空值率/筛选占比/聚类规模；demo 跳过 | full/skip_sampling 不可跳过 |

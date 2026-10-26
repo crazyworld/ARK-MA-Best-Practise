@@ -25,11 +25,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
+from feishu_doc_publisher import artifact_urls
 from job_notifier import JobNotifier
 from pipeline_store import HcEvent, PipelineJob, PipelineStore
 from topic6_runner import Topic6CardSenderProtocol, Topic6Runner
 
 log = logging.getLogger("arkagent.topic6.hitl")
+
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+# 用户在线修改的宽表回读后挂载到 /mnt/session/uploads/{SHEET_EDIT_MOUNT_DIR}/{hc}/{name}
+SHEET_EDIT_MOUNT_DIR = "hc_edits"
+SHEET_REREAD_FAILED_NOTE = "\n注意：飞书表格回读失败，使用沙箱版本继续。"
 
 # 决策枚举:与卡片按钮 value.decision 完全一致。
 DECISION_PASS = "pass"
@@ -469,9 +475,11 @@ class Topic6Hitl(Topic6CardSenderProtocol):
         _payload: dict,
     ) -> Optional[str]:
         # [P0-2] HC 发卡前：强制触发 artifact_sync + 发布产物到飞书
+        # published_urls: {name: {"url","token","type",...}}；卡片只用 url
         published_urls: dict | None = None
         if self._publisher is not None and self._publisher.enabled:
-            # 补建 docs_folder_token（旧 job 或 start_job 时创建失败的兜底）
+            # 首个 HC 发卡前创建 job 子文件夹（此时 project_dir 已由 payload 回写）；
+            # 后续 HC 复用已落库的 docs_folder_token
             if not _job.docs_folder_token:
                 try:
                     folder_token = await asyncio.get_event_loop().run_in_executor(
@@ -523,7 +531,18 @@ class Topic6Hitl(Topic6CardSenderProtocol):
                         _max_sync_attempts, _job.job_id, _hc_kind,
                     )
 
-        card = build_hc_card(_job, _hc_kind, _event_id, _payload, published_urls)
+        if published_urls:
+            # 落库 token/type/url，审核通过后据此回读用户在线修改
+            try:
+                self._store.set_hc_artifacts(_event_id, {
+                    name: {k: item.get(k, "") for k in ("token", "type", "url")}
+                    for name, item in published_urls.items()
+                    if isinstance(item, dict)
+                })
+            except Exception as err:  # noqa: BLE001 - 不影响发卡
+                log.warning("topic6 set_hc_artifacts failed event=%s: %s", _event_id, err)
+
+        card = build_hc_card(_job, _hc_kind, _event_id, _payload, artifact_urls(published_urls))
 
         # 正常路径复用任务启动时创建的主卡，整个 job 在会话里始终只有一张卡片。
         try:
@@ -675,14 +694,9 @@ class Topic6Hitl(Topic6CardSenderProtocol):
         # pass / reject / remark(兼容历史卡片) 都把决策注入 MA Session 继续跑。
         # reject 由 Coordinator 依据原因选择回退或调整，而不是 Gateway 直接终止任务。
         decision_message = _build_decision_message(hc_kind, decision, note)
-        # HC1/HC2 通过时：提示 Agent 回读飞书表格最新版（用户可能在表格中修改了标注数据）
+        # HC1/HC2 通过时：Gateway 回读飞书在线表格；用户改过才挂载新版本并提示 Agent 覆盖
         if decision == DECISION_PASS and hc_kind in ("HC1", "HC2"):
-            wide_table_path = hc_event.payload.get("wide_table_path") or ""
-            decision_message += (
-                f"\n注意：用户可能在飞书在线表格中修改了宽表数据（修正标注、删除无效行等）。"
-                f"请从飞书在线表格下载最新版本覆盖沙箱内的 {wide_table_path or 'wide_table'} 后再继续后续阶段。"
-                f"如果飞书表格不存在或无法访问，则使用沙箱内已有的版本继续。"
-            )
+            decision_message += await self._reread_edited_sheet(job, hc_event)
         try:
             await self._runner.resume_job(job, decision_message)
             # P1-2: resume 成功后 @ 通知任务发起人（必须在 try 内）
@@ -771,6 +785,48 @@ class Topic6Hitl(Topic6CardSenderProtocol):
         return True
 
     # ---- helper --------------------------------------------------------------
+
+    async def _reread_edited_sheet(self, job: PipelineJob, hc_event: HcEvent) -> str:
+        """回读 HC 宽表在线修改，返回追加到决策消息的提示（未修改返回空串）。
+
+        改过：导出 xlsx → 上传方舟 Files → 挂到 Session uploads，提示 Agent 覆盖沙箱宽表。
+        任何异常只降级为一句"使用沙箱版本继续"，绝不阻塞 resume。
+        """
+        sheet = (hc_event.artifacts or {}).get("wide_table") or {}
+        token = sheet.get("token") if isinstance(sheet, dict) else ""
+        if not token or self._publisher is None:
+            return ""
+        hc_kind = hc_event.hc_kind
+        wide_table_path = str(hc_event.payload.get("wide_table_path") or "")
+        name = Path(wide_table_path).name if wide_table_path else "wide_table.xlsx"
+        try:
+            loop = asyncio.get_event_loop()
+            data = await loop.run_in_executor(
+                None, self._publisher.fetch_user_edited_sheet, token, hc_event.created_at,
+            )
+            if not data:
+                return ""
+            ark = self._runner._ark  # noqa: SLF001 - 网关内包
+            file_id = await ark.upload_file(name, XLSX_MIME, data)
+            mount_path = f"{SHEET_EDIT_MOUNT_DIR}/{hc_kind}/{name}"
+            await ark.add_session_file(job.ma_session_id, file_id, mount_path)
+        except Exception as err:  # noqa: BLE001 - 回读失败不阻塞续跑
+            log.exception(
+                "topic6 reread edited sheet failed job=%s hc=%s token=%s: %s",
+                job.job_id, hc_kind, token, err,
+            )
+            return SHEET_REREAD_FAILED_NOTE
+        log.info(
+            "topic6 edited sheet mounted job=%s hc=%s token=%s mount=%s size=%d",
+            job.job_id, hc_kind, token, mount_path, len(data),
+        )
+        target = wide_table_path or "沙箱内的宽表文件"
+        return (
+            f"\n注意：用户在飞书在线表格中修改了 {hc_kind} 宽表，最新版本已挂载到 "
+            f"/mnt/session/uploads/{mount_path}。继续后续阶段前，请先用它覆盖 {target}"
+            f"（若该路径在 /mnt/session/outputs 下，同时覆盖项目 05_合并/ 下的同名源文件），"
+            f"并核对行数与列名是否与原宽表一致（列不应缺失；行数变化需在后续说明中注明）。"
+        )
 
     async def _patch_resolved_card(
         self,

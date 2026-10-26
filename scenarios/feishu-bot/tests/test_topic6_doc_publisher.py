@@ -92,10 +92,18 @@ class _FakeFeishu:
         self.folders_created.append(record)
         return f"fldcn_sub_{name[:8]}"
 
-    def import_spreadsheet(self, folder_token, file_path, title):
+    def create_spreadsheet_from_xlsx(self, folder_token, file_path, title):
         record = {"folder": folder_token, "path": file_path, "title": title}
         self.files_uploaded.append(record)
-        return f"shtcn_{title[:12]}"
+        token = f"shtcn_{title[:12]}"
+        return token, f"https://tenant.feishu.cn/sheets/{token}"
+
+    def list_permission_members(self, token, token_type):
+        return [
+            {"member_id": p["member"], "perm": p["perm"]}
+            for p in self.permissions_added
+            if p["token"] == token and p["type"] == token_type
+        ]
 
     # 卡片操作 mock
     def send_interactive_card(self, chat_id, card):
@@ -213,10 +221,19 @@ async def test_publish_hc1_uploads_wide_table(tmp_path: Path):
     )
 
     assert "wide_table" in urls
-    assert urls["wide_table"].startswith("https://bluefocus.feishu.cn/sheets/")
+    sheet = urls["wide_table"]
+    # 使用接口返回的 url，不硬编码租户域名
+    assert sheet["url"] == "https://tenant.feishu.cn/sheets/shtcn_W42_热点周报_HC1"
+    assert sheet["token"] == "shtcn_W42_热点周报_HC1"
+    assert sheet["type"] == "sheet"
+    assert sheet["granted"] is True
+    # 宽表单独授权给任务发起人 edit
+    assert feishu.permissions_added == [{
+        "token": "shtcn_W42_热点周报_HC1", "type": "sheet", "member": "ou_user1", "perm": "edit",
+    }]
     assert len(feishu.files_uploaded) == 1
     assert feishu.files_uploaded[0]["folder"] == "fldcn_sub_test"
-    assert feishu.files_uploaded[0]["title"] == "demo_wide_table"
+    assert feishu.files_uploaded[0]["title"] == "W42_热点周报_HC1_wide_table"
     # 确认上传的文件路径指向实际存在的文件
     uploaded_path = Path(feishu.files_uploaded[0]["path"])
     assert uploaded_path.exists()
@@ -246,7 +263,19 @@ async def test_publish_hc2_also_uploads_wide_table(tmp_path: Path):
 
     assert "wide_table" in urls
     assert len(feishu.files_uploaded) == 1
-    assert feishu.files_uploaded[0]["title"] == "full_wide_table"
+    assert feishu.files_uploaded[0]["title"] == "W42_热点周报_HC2_wide_table"
+
+
+def test_wide_table_title_falls_back_to_mode_without_project_dir():
+    """project_dir 未解析时退回 mode，仍带 HC 序号区分两轮。"""
+    job = _make_job(project_dir="", mode="smoke")
+    assert FeishuDocPublisher._wide_table_title(job, "HC2") == "smoke_HC2_wide_table"
+
+
+def test_gateway_start_job_does_not_create_docs_folder():
+    """job 子文件夹只在首个 HC 发卡前创建（此时 project_dir 已知），start_job 不再建。"""
+    src = (Path(__file__).resolve().parents[1] / "cases" / "topic6" / "gateway.py").read_text(encoding="utf-8")
+    assert "create_job_folder" not in src
 
 
 async def test_publish_hc3_verifies_doc_url():
@@ -264,7 +293,7 @@ async def test_publish_hc3_verifies_doc_url():
         job, "HC3", payload, sync_root=Path("/tmp"), job_folder_token="fldcn_sub_test",
     )
 
-    assert urls == {"report": "https://bluefocus.feishu.cn/docx/abc123"}
+    assert urls == {"report": {"url": "https://bluefocus.feishu.cn/docx/abc123", "token": "", "type": "docx"}}
     assert len(feishu.files_uploaded) == 0  # HC3 不上传
 
 
@@ -375,14 +404,14 @@ async def test_artifact_sync_then_publish_then_card(tmp_path: Path):
         job, "HC1", payload, sync_root=tmp_path, job_folder_token="fldcn_sub_test",
     )
     assert "wide_table" in urls
-    assert urls["wide_table"].startswith("https://bluefocus.feishu.cn/sheets/")
+    assert urls["wide_table"]["url"].startswith("https://tenant.feishu.cn/sheets/")
 
     # 验证上传的文件是 artifact_sync 同步下来的那个
     uploaded_path = Path(feishu.files_uploaded[0]["path"])
     assert uploaded_path.read_bytes() == xlsx_content
 
     # Step 3: 卡片渲染含"打开编辑"按钮
-    card = build_hc_card(job, "HC1", 1, payload, published_urls=urls)
+    card = build_hc_card(job, "HC1", 1, payload, published_urls=publisher_mod.artifact_urls(urls))
     body_elements = card["body"]["elements"]
     open_buttons = [
         el for el in body_elements
@@ -395,7 +424,7 @@ async def test_artifact_sync_then_publish_then_card(tmp_path: Path):
     assert len(open_buttons) == 1
     btn = open_buttons[0]
     assert "打开编辑" in btn["text"]["content"]
-    assert btn["behaviors"][0]["default_url"] == urls["wide_table"]
+    assert btn["behaviors"][0]["default_url"] == urls["wide_table"]["url"]
 
 
 # ---------------------------------------------------------------------------
@@ -563,20 +592,22 @@ def test_create_job_folder():
 
 
 def test_create_job_folder_no_root_token():
-    """无 root folder token 时返回空字符串。"""
+    """无 root folder token 时建在机器人云空间根目录（parent_token=""）。"""
     feishu = _FakeFeishu()
     publisher = FeishuDocPublisher(feishu, "")
     job = _make_job()
 
     token = publisher.create_job_folder(job)
-    assert token == ""
-    assert len(feishu.folders_created) == 0
+    assert token.startswith("fldcn_sub_")
+    assert len(feishu.folders_created) == 1
+    assert feishu.folders_created[0]["parent"] == ""
 
 
 def test_publisher_enabled_property():
-    """enabled 属性正确反映 docs_folder_token 是否配置。"""
+    """有 feishu sender 即启用，与根文件夹 token 是否配置无关。"""
     assert FeishuDocPublisher(_FakeFeishu(), "fldcn_root").enabled is True
-    assert FeishuDocPublisher(_FakeFeishu(), "").enabled is False
+    assert FeishuDocPublisher(_FakeFeishu(), "").enabled is True
+    assert FeishuDocPublisher(None, "fldcn_root").enabled is False
 
 
 # ---------------------------------------------------------------------------
@@ -671,6 +702,7 @@ async def test_send_hc_card_with_publisher_and_artifact(tmp_path: Path):
     ]
     assert len(open_buttons) == 1
     assert "打开编辑" in open_buttons[0]["text"]["content"]
+    assert open_buttons[0]["behaviors"][0]["default_url"].startswith("https://tenant.feishu.cn/sheets/")
 
     store.close()
 

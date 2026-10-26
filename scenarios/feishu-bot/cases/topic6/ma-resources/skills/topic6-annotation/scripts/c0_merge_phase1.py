@@ -25,7 +25,7 @@ from pathlib import Path
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from run_config_state import update_run_config
+from run_config_state import update_run_config, uses_sample_base
 
 for _s in (sys.stdout, sys.stderr):
     try:
@@ -57,7 +57,7 @@ def run(project_dir: str, mode: str, run_id: int) -> dict:
 
     base_file = (
         proj / "03_抽样" / "sample_500.xlsx"
-        if mode in {"full", "demo"}
+        if uses_sample_base(proj, mode)
         else proj / "02_标准化" / "hot_topics_normalized.xlsx"
     )
     if not base_file.exists():

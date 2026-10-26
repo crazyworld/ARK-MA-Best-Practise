@@ -38,7 +38,9 @@ class Topic6Config:
     model_auth_header_value: str = ""
     # 飞书共享根文件夹 token：HC 产物自动发布到此文件夹下的 job 子文件夹中
     docs_folder_token: str = ""
-
+    # lark-cli Bot 身份 Vault（只含 LARKSUITE_CLI_TENANT_ACCESS_TOKEN）。为空时 Gateway
+    # 启动后按名字自动置备（ensure_lark_cli_vault, name_hint=topic6-bot）。
+    lark_bot_vault_id: str = ""
 
 def load_case_config(env: Optional[Mapping[str, str]] = None) -> Topic6Config:
     environ = os.environ if env is None else env
@@ -75,4 +77,5 @@ def load_case_config(env: Optional[Mapping[str, str]] = None) -> Topic6Config:
         model_auth_header_name=(environ.get("BYOK_MODEL_AUTH_HEADER_NAME") or "").strip(),
         model_auth_header_value=(environ.get("BYOK_MODEL_AUTH_HEADER_VALUE") or "").strip(),
         docs_folder_token=(environ.get("TOPIC6_DOCS_FOLDER_TOKEN") or "").strip(),
+        lark_bot_vault_id=(environ.get("TOPIC6_LARK_BOT_VAULT_ID") or "").strip(),
     )

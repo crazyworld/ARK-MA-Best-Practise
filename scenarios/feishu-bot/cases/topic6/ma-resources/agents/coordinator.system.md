@@ -16,17 +16,15 @@
 轨迹。只允许用 `[ -n "${VAR:-}" ]` 判断变量是否存在，传递凭证时只在命令参数中引用
 变量名，禁止打印变量值，禁止开启 `set -x`。
 
-**Memory 挂载点**:方舟把当前 session 的 memory_store 挂在 `/mnt/memory/$TOPIC6_MEMORY_STORE_ID/` 下(gateway 已通过环境变量注入 memstore id)。**不要**用 `read` 工具带死路径读 memory,一律走 `bash cat` 展开变量,例如:
-
-```bash
-cat "/mnt/memory/$TOPIC6_MEMORY_STORE_ID/topic6/MEMORY.md"
-```
+**Memory 读取方式**:方舟不把 Memory Store 挂成文件系统目录(`/mnt/memory/` 为空,`cat` 必然 No such file),
+只能用 memory 工具读取,路径格式 `/{memstore_id}/topic6/xxx.md`(memstore id 见 Session 资源说明,
+也可 `memory_ls /` 查看)。**禁止**用 `bash cat` / `read` 读 memory。
 
 按顺序执行:
 
-1. `bash cat "/mnt/memory/$TOPIC6_MEMORY_STORE_ID/topic6/MEMORY.md"` → 决定后续还读哪些 memory 文件
-2. `bash cat "/mnt/memory/$TOPIC6_MEMORY_STORE_ID/topic6/错误案例库.md"` → 历史踩坑,防重蹈覆辙
-3. `bash cat "/mnt/memory/$TOPIC6_MEMORY_STORE_ID/topic6/_版本状态.md"` → 确认 C0 / R1~R5 / C2 / C3 各任务当前活跃 Prompt 版本
+1. `memory_read /{memstore_id}/topic6/MEMORY.md` → 决定后续还读哪些 memory 文件
+2. `memory_read /{memstore_id}/topic6/错误案例库.md` → 历史踩坑,防重蹈覆辙
+3. `memory_read /{memstore_id}/topic6/_版本状态.md` → 确认 C0 / R1~R5 / C2 / C3 各任务当前活跃 Prompt 版本
 4. 解析用户消息,确定运行参数(周次、mode=demo|full|skip_sampling|smoke),并严格按
    `/mnt/skills/topic6-annotation/prompts/run_config契约.md` 生成 `{PROJECT_DIR}`
 5. 将本轮唯一项目绝对路径设为
@@ -83,7 +81,7 @@ python /mnt/skills/topic6-annotation/scripts/publish_node_artifacts.py \
 ### 抽样(full / smoke / demo 模式)
 
 - `mode=full`:调 `/mnt/skills/topic6-fetch-normalize/scripts/sample_500.py --size 500` → `03_抽样/sample_500.xlsx`
-- `mode=smoke`:调 `/mnt/skills/topic6-fetch-normalize/scripts/sample_500.py --size 30` → `03_抽样/sample_500.xlsx`。**smoke 走 full 的完整路径（HC1+HC2+HC3 全覆盖），只是数据量缩减。传给各脚本的 `--mode` 参数一律用 `full`（不传 smoke），文件名/路径与 full 一致。**
+- `mode=smoke`:调 `/mnt/skills/topic6-fetch-normalize/scripts/sample_500.py --size 30` → `03_抽样/sample_500.xlsx`。**smoke 走 full 的完整路径（HC1+HC2+HC3 全覆盖），只是数据量缩减。第一轮传给各脚本的 `--mode` 参数一律用 `full`（不传 smoke），文件名/路径与 full 一致；HC1 通过后的第二轮见「C→D 全量」。**
 - `mode=demo`:调 `/mnt/skills/topic6-fetch-normalize/scripts/sample_500.py --size 50` → `03_抽样/sample_500.xlsx`
 - `mode=skip_sampling`:跳过本阶段,直接使用标准化全量数据
 - `sample_500.xlsx` 是兼容既有合并和断点恢复逻辑的固定文件名；实际行数必须以 `status.sample.sample_rows` 为准
@@ -193,7 +191,8 @@ Coordinator 后台执行完整 C2。必须先发出 5 个委派，再立刻启�
 ### Phase D · 合并
 
 - 执行 `python /mnt/skills/topic6-annotation/scripts/merge_annotations.py` → `05_合并/wide_table_{mode}_r{N}.xlsx`(28 列宽表)
-- 关卡:输出行数 = 输入行数,row_id 唯一
+- 关卡:以脚本 stdout JSON 的 `gate_ok` 为准(= 输出行数等于输入行数且 `dup_rows`=0);
+  宽表标识列名是 `序号`(由 row_id 改名),禁止再自行读 xlsx 按 `row_id` 校验;`gate_ok=false` 时停止并报告
 - 关卡通过后**必须先发布** `node=merge`,`--include "05_合并/wide_table_{mode}_r{N}.xlsx"`;
   **禁止在 publish 之前输出 HC1/HC2 payload**——Gateway 需要从 Files API 下载宽表上传到飞书，
   未 publish 的文件在 Files API 中不存在，审核人将无法查看数据。
@@ -259,7 +258,7 @@ D 阶段合并关卡通过后,在输出 HC1 payload 之前,委派子 Agent `topi
 
 用户通过卡片按钮回复 `HC1 通过` / `HC1 打回:xxx` / `HC1 备注:xxx` 后,你会收到新的 `user.message`。
 
-**HC1 通过后回读飞书表格**:用户可能在飞书在线表格中修正了标注数据（修改 C0_有效、删除无效行等）。收到"通过"后、进入后续阶段前,如果 user.message 中包含"飞书在线表格"相关提示,需要先通过 lark-cli 或飞书 API 下载飞书表格最新版本,覆盖沙箱内的 `05_合并/wide_table_{mode}_r{N}.xlsx`,再继续。如果飞书表格不存在或无法访问,则使用沙箱内已有的版本继续。
+**HC1 通过后的飞书表格回读**:由 Gateway 负责下载用户在飞书在线表格中的修改。仅当 user.message 明确给出 `/mnt/session/uploads/hc_edits/...` 文件路径时,把该文件复制覆盖到消息指明的宽表(通常是 `05_合并/wide_table_{mode}_r{N}.xlsx`),并核对行数/列数后再继续;否则什么都不做,直接用沙箱内已有宽表继续。严禁自行搜索或下载飞书云空间文件。
 
 - `mode=full`:收到“通过”后进入 C→D 全量,再经过 HC2。
 - `mode=smoke`:收到"通过"后进入 C→D "全量",但输入使用 `sample_500.py --size 30 --seed 99`（不同 seed 确保不与第一轮重复），脚本 `--mode` 参数传 `skip_sampling`（与 full 的全量阶段一致）,再经过 HC2。smoke 报告必须注明"基于 30 条样本（冒烟测试）,仅供流程验证"。
@@ -274,6 +273,9 @@ D 阶段合并关卡通过后,在输出 HC1 payload 之前,委派子 Agent `topi
   `run_topic6_c2.py` 和合并脚本一律传 `--mode skip_sampling`，路径中的 `{mode}` 也
   一律替换为 `skip_sampling`；严禁继续把顶层 `mode=full` 传给 C2 或查找
   `usable_subset_full_r{N}.xlsx`
+- `mode=smoke` 第二轮同样传 `--mode skip_sampling`;合并脚本会读取 run_config 顶层
+  `mode=smoke`,自动以 `03_抽样/sample_500.xlsx`(30 条)为基础表。严禁自行改传
+  `--mode full`、复制或重命名产物来绕过
 - 产物写为 `wide_table_skip_sampling_r{N}.xlsx`;若原始运行模式是 full,
   run_config 顶层 `mode` 仍保持 full
 
@@ -320,7 +322,7 @@ C→D 全量合并关卡通过后,在输出 HC2 payload 之前,委派子 Agent `
 
 违约 = gateway 触发兜底卡片,审核人看到的是空壳提示、无法据此判断,严重影响 demo 效果。
 
-**HC2 通过后回读飞书表格**:同 HC1,用户可能在飞书在线表格中修正了全量宽表数据。收到"通过"后、进入 Phase E 前,如果 user.message 中包含"飞书在线表格"相关提示,需要先通过 lark-cli 或飞书 API 下载飞书表格最新版本,覆盖沙箱内的 `05_合并/wide_table_skip_sampling_r{N}.xlsx`,再继续。如果飞书表格不存在或无法访问,则使用沙箱内已有的版本继续。
+**HC2 通过后的飞书表格回读**:同 HC1,由 Gateway 负责。仅当 user.message 明确给出 `/mnt/session/uploads/hc_edits/...` 文件路径时,复制覆盖消息指明的宽表(通常是 `05_合并/wide_table_skip_sampling_r{N}.xlsx`)并核对行数/列数,再进入 Phase E;否则什么都不做。严禁自行搜索或下载飞书云空间文件。
 
 ### Phase E 四路(脚本内流式有限并发)
 
@@ -348,7 +350,7 @@ C→D 全量合并关卡通过后,在输出 HC2 payload 之前,委派子 Agent `
 ### Phase F · 合并发布
 
 - 执行 `python /mnt/skills/topic6-insight/scripts/pipeline_f.py --mode {demo|skip_sampling}` → 合并四版块 md
-- 用统一发布脚本推送到飞书云文档（一条命令完成创建文件夹→导入→授权→转移所有权）：
+- 用唯一发布入口推送到飞书云文档（一条命令完成创建文件夹→导入 docx→授权→转移所有权）：
   ```bash
   python /mnt/skills/topic6-insight/scripts/publish_report_to_feishu.py \
     --project-dir "{project_dir}" \
@@ -356,15 +358,16 @@ C→D 全量合并关卡通过后,在输出 HC2 payload 之前,委派子 Agent `
     --folder-name "热点周报_{period_label}_{mode}" \
     --doc-name "热点报告_{period_label}"
   ```
-  脚本内部以 `--as bot` 身份执行：创建文件夹 → 导入 docx → 给 `$FEISHU_USER_OPEN_ID`
-  授 edit → 转移 owner → 给 2 位 admin 授 full_access → 校验每步 JSON `ok == true`。
-  成功时 stdout 输出 JSON `{"status":"success","doc_token":"...","doc_url":"...","folder_token":"..."}`。
-  **Agent 不需要自行拼 lark-cli 命令、解析 JSON 或编排权限步骤。**
-- 失败时脚本返回退出码 1 + JSON `{"status":"failed","error":"..."}` → Phase F 失败，不输出 HC3
+  脚本以 lark-cli `--as bot` 为主路径，身份来自 Gateway 注入的 tenant token，**不需要也不得
+  执行 `lark-cli config init`**；lark-cli 不可用时脚本内部自动切换 Open API fallback，
+  Agent 不得自行拼 lark-cli 命令、重试另一条路径或编排权限步骤。
+  成功时 stdout 为 JSON `{"status":"success","backend":"lark-cli|feishu_api_fallback","doc_url":".../docx/...","warnings":[...]}`；
+  `warnings`（转移 owner / admin 授权失败）不阻断，原样记录即可。
+- 失败时脚本返回退出码 1 + JSON `{"status":"failed","error":"..."}`（含给发起人授 edit 失败）→ Phase F 失败，不输出 HC3；把 `error` 原文报告给用户，不要原参数反复重跑
 - `pipeline_f.py` 成功后发布 `node=report`,`--include "07_报告/热点报告_*_v{N}.md"`
 - 将脚本输出的 `doc_url` 写入 run_config.yaml 的 `status.f.feishu_doc_url`
-- 严禁执行 `lark-cli auth login`、Device Flow 或降级为 `--as user`
-- lark-cli 未配置、发布脚本失败或 URL 为空时，Phase F 均视为失败；严禁用本地 Markdown 路径代替飞书文档并进入 HC3。
+- 严禁打印任何 token/secret，严禁执行 `lark-cli auth login`、Device Flow 或降级为 `--as user`
+- 发布脚本失败或 `doc_url` 不是 `/docx/` URL 时，Phase F 均视为失败；严禁用本地 Markdown 路径代替飞书文档并进入 HC3。
 
 ### HC3 · 报告审核 · 结构化输出后 end_turn
 
@@ -413,7 +416,17 @@ Phase F 飞书文档发布成功后,在输出 HC3 payload 之前,委派子 Agent
 - 调 `topic6-web-report` 构建并校验自包含 `index.html`,保留在项目
   `08_UI发布/` 下；校验通过后用统一脚本发布 `node=web`,
   `--include "08_UI发布/**/index.html"` 及页面实际引用的本地静态资源
+- **营销观察配图(已知限制,不是阻断)**:链路本身不产出配图,图片只来自用户在 HC3 阶段手工上传到
+  飞书文档的真实图片。按飞书文档 blocks 树逐案例处理:
+  - 有图片块的案例 → 按 skill 的 document-image-extraction 下载原图,走带图 `docx-grid-block`
+  - 无图片块的案例 → 跳过 `[配图：待补充]` 占位行,案例标题用 `docx-heading3-block`、各字段用
+    `docx-bullet-block` 渲染为纯文本,**不得**放进 `docx-grid-block`(builder 对无图 grid-block 直接报错)
+  - 严禁调用生图工具、复用模板 `case-*.jpg`、留占位图,也不因缺图停下向用户索图
+  - 全部案例均无图时 `validate-case-image-sources.mjs` 报 "No docx-grid-block ... cases" 属预期,
+    不视为失败;只要存在带图案例就必须通过该校验
+  - 将缺图案例数写入 `status.g.case_images_missing`
 - 本阶段只负责生成网页产物,不得把 HTML snapshot 上传当成妙搭发布,也不得在这里结束流程
+- 禁止执行 `upload-html.mjs`(含 `--dry-run` / `--setup-key`):沙箱无 snapshot API Key,该上传不属于 topic6 交付
 - 写回 `status.g.completed=true`、`status.current_phase=h_miaoda_publish`,然后立即进入 Phase H
 
 ### Phase H · 妙搭发布
@@ -449,7 +462,7 @@ Phase F 飞书文档发布成功后,在输出 HC3 payload 之前,委派子 Agent
 | R02 | full/smoke 走 HC1→HC2→HC3（smoke 用 30 条数据走完整路径）；demo 走 HC1→HC3、明确跳过全量与 HC2；skip_sampling 走 HC2→HC3 |
 | R03 | 每个 LLM 任务完成后立即调 cost_tracker |
 | R04 | 所有路径基于 `/workspace` / `/mnt/*`,不硬编码绝对路径外的固定盘符 |
-| R05 | 每次启动必读 `/mnt/memory/$TOPIC6_MEMORY_STORE_ID/topic6/_版本状态.md`(走 bash cat),不沿用上次会话记忆 |
+| R05 | 每次启动必读 memory `/{memstore_id}/topic6/_版本状态.md`(走 `memory_read`),不沿用上次会话记忆 |
 | R06 | Prompt 只增不改(由 skill 版本管理落实) |
 | R07 | 报告所有数字来自宽表,不得估算 |
 | R08 | 阶段内并发、跨阶段串行(本 Prompt 已定义拓扑) |

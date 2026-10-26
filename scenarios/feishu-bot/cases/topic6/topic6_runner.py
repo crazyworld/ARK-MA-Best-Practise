@@ -308,7 +308,7 @@ class Topic6Config:
 
     coordinator_agent_id: str
     environment_id: str
-    memory_store_id: str = ""  # 会被平台自动挂到沙箱 /mnt/memory/;为空则不挂
+    memory_store_id: str = ""  # 以 memory 工具形式提供给 Agent(非文件系统挂载);为空则不挂
     vault_ids: tuple[str, ...] = ()
     # Session 首次消息发送后,SSE 消费的整体超时(秒)。给足 3.5h 主线 + 富余。
     session_timeout_sec: int = 6 * 3600
@@ -372,6 +372,11 @@ class Topic6Runner:
         # 同一任务的进度事件与 HITL 回调可能并发 patch；按 job 串行，避免旧快照覆盖新状态。
         self._card_locks: dict[str, asyncio.Lock] = {}
 
+    def add_vault_id(self, vault_id: str) -> None:
+        """追加一个每个新 Session 都要挂的 Vault（如 Gateway 异步置备的 bot token Vault）。"""
+        if vault_id and vault_id not in self._config.vault_ids:
+            self._config.vault_ids = (vault_id, *self._config.vault_ids)
+
     def bind_card_sender(self, sender: "Topic6CardSenderProtocol") -> None:
         self._card_sender = sender
 
@@ -411,7 +416,7 @@ class Topic6Runner:
         """创建 MA Session、落库并启动 SSE 消费任务。
 
         - 整个 Gateway 任意 ``running`` / ``wait_hc`` Job 都会阻止新建任务。
-        - Session 挂载 Memory Store(``/mnt/memory``)承载 topic6 的 lm/ 内容。
+        - Session 挂载 Memory Store(Agent 经 memory_read 工具读取)承载 topic6 的 lm/ 内容。
         - 首个 user.message 拼「触发词 + 模式 + 用户原始消息」,由 coordinator 解析并按
           system prompt 的 14 步执行。
         """
@@ -435,8 +440,8 @@ class Topic6Runner:
             )
         env_overrides = {"FEISHU_USER_OPEN_ID": user_open_id}
         if self._config.memory_store_id:
-            # 方舟把每个 memstore 挂在 /mnt/memory/{memstore_id}/ 下(多 store 隔离),
-            # 注入 ID 供 Agent bash 展开路径,例如 cat /mnt/memory/$TOPIC6_MEMORY_STORE_ID/topic6/_版本状态.md
+            # 方舟不把 memstore 挂成目录,Agent 用 memory_read /{memstore_id}/topic6/xxx.md 读取;
+            # 注入 ID 便于 Agent 拼出 memory 路径(非密钥)。
             env_overrides["TOPIC6_MEMORY_STORE_ID"] = self._config.memory_store_id
         vault_ids = list(
             dict.fromkeys(

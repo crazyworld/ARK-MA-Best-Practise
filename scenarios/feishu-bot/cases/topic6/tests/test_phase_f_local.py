@@ -128,8 +128,9 @@ def main() -> int:
     print("--- 4/5 environment.json 完整性 ---")
     env_data = json.loads((_CASE_DIR / "ma-resources" / "environment.json").read_text())
     env = env_data["config"]["env"]
-    required = ["LARK_APP_ID", "LARK_APP_SECRET", "LARKSUITE_CLI_APP_ID", "LARKSUITE_CLI_APP_SECRET", "LARKSUITE_CLI_STRICT_MODE"]
-    missing = [k for k in required if k not in env]
+    required = ["LARK_APP_ID", "LARK_APP_SECRET", "LARKSUITE_CLI_APP_ID"]
+    forbidden = ["LARKSUITE_CLI_APP_SECRET", "LARKSUITE_CLI_STRICT_MODE"]  # STRICT_MODE=bot 会拦 Phase H --as user
+    missing = [k for k in required if k not in env] + [f'禁止:{k}' for k in forbidden if k in env]
     if missing:
         fail(f"缺少: {missing}")
     else:

@@ -100,6 +100,8 @@ class HcEvent:
     operator_label: str = ""
     created_at: int = 0
     resolved_at: Optional[int] = None
+    # Gateway 为本次 HC 发布的飞书产物 {name: {"token","type","url"}}，回读用户修改时使用
+    artifacts: dict = field(default_factory=dict)
 
 
 # ---- DAO -------------------------------------------------------------------
@@ -197,6 +199,10 @@ class PipelineStore:
             self._conn.execute(
                 "ALTER TABLE pipeline_jobs ADD COLUMN docs_folder_token TEXT NOT NULL DEFAULT ''"
             )
+        if "artifacts" not in hc_cols:
+            self._conn.execute(
+                "ALTER TABLE pipeline_hc_events ADD COLUMN artifacts TEXT NOT NULL DEFAULT '{}'"
+            )
 
     def _protect_files(self) -> None:
         for suffix in ("", "-wal", "-shm"):
@@ -229,6 +235,12 @@ class PipelineStore:
             "expires_at": int(row[3]),
             "scopes": tuple(filter(None, str(row[4]).split(" "))),
         }
+
+    def list_user_oauth(self) -> list[dict]:
+        """所有已授权用户（Gateway 常驻刷新协程遍历用）。"""
+        with self._lock:
+            rows = self._conn.execute("SELECT open_id FROM user_oauth").fetchall()
+        return [item for item in (self.get_user_oauth(r[0]) for r in rows) if item]
 
     def save_user_oauth(
         self,
@@ -532,6 +544,14 @@ class PipelineStore:
                 (user_decision, user_note, operator_label, _now(), event_id),
             )
 
+    def set_hc_artifacts(self, event_id: int, artifacts: dict) -> None:
+        """记录 Gateway 为该 HC 发布的飞书产物（token/type/url），供审核通过后回读。"""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE pipeline_hc_events SET artifacts = ? WHERE id = ?",
+                (_dumps(artifacts), event_id),
+            )
+
     def get_hc_event(self, event_id: int) -> Optional[HcEvent]:
         """按主键 id 反查一条 HC 记录。"""
         with self._lock:
@@ -632,4 +652,7 @@ class PipelineStore:
             ),
             created_at=row["created_at"],
             resolved_at=row["resolved_at"],
+            artifacts=(
+                _loads(row["artifacts"], {}) if "artifacts" in row.keys() else {}
+            ),
         )

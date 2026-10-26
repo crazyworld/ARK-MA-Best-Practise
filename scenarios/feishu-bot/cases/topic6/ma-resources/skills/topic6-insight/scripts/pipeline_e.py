@@ -841,8 +841,10 @@ PRICING: dict[str, tuple[float, float]] = {
 
 
 def _price_of(model: str) -> tuple[float, float]:
+    # 模型 ID 大小写不统一（环境变量 Doubao-Seed-Evolving vs 表内 doubao-seed-evolving），按小写匹配
+    name = model.lower()
     for key, value in PRICING.items():
-        if model.startswith(key) or key in model:
+        if key.lower() in name:
             return value
     print(f"[pipeline_e] ⚠️ 未知模型定价：{model},成本记为 0", file=sys.stderr)
     return (0.0, 0.0)
