@@ -207,7 +207,7 @@ function blockSourceLinks(block) {
 function renderSourceLinkedText(value, sourceLinks = exactSourceLinks) {
   const cleaned = cleanText(value);
   const parentheticalMatch = cleaned.match(/^(.*?)(\s*[（(](微博|抖音|B站|知乎|快手|头条|百度)[）)])$/u);
-  const scoredPlatformMatch = cleaned.match(/^(.*?)(\s*·\s*(微博|抖音|B站|知乎|快手|头条|百度)\s*·\s*\d+(?:\.\d+)?)$/u);
+  const scoredPlatformMatch = cleaned.match(/^(.*?)(\s*·\s*(微博|抖音|B站|知乎|快手|头条|百度)\s*·\s*\d+(?:\.\d+)?\s*分?)$/u);
   const match = parentheticalMatch ?? scoredPlatformMatch;
   const topic = normalizeSourceLinkText(match ? match[1] : cleaned);
   const platform = match?.[3];
@@ -249,8 +249,27 @@ function renderNarrativeText(value) {
   return textLines(value).map(renderEmphasizedLine).join("<br>");
 }
 
-function renderListItem(value) {
-  return renderEmphasizedLine(cleanText(value).replace(/^[•·-]\s*/u, ""));
+function renderListItem(value, sourceLinks) {
+  const text = cleanText(value).replace(/^[•·-]\s*/u, "");
+  const targets = [...(sourceLinks ?? new Map()).entries()]
+    .filter(([topic]) => topic && text.includes(topic))
+    .sort((a, b) => b[0].length - a[0].length);
+  if (!targets.length) return renderEmphasizedLine(text);
+  // bullet 内按 block.links 的「文本→href」逐段包链接,其余文本保持原强调渲染
+  let output = "";
+  let cursor = 0;
+  while (cursor < text.length) {
+    let next = null;
+    for (const [topic, href] of targets) {
+      const at = text.indexOf(topic, cursor);
+      if (at >= 0 && (!next || at < next.at)) next = { at, topic, href };
+    }
+    if (!next) break;
+    output += renderEmphasizedLine(text.slice(cursor, next.at));
+    output += `<a class="source-link" href="${escapeHTML(next.href)}" target="_blank" rel="noopener noreferrer">${escapeHTML(next.topic)}</a>`;
+    cursor = next.at + next.topic.length;
+  }
+  return output + renderEmphasizedLine(text.slice(cursor));
 }
 
 function sentimentClass(value) {
@@ -300,6 +319,10 @@ function renderCell(value, header, sourceLinks = exactSourceLinks) {
   }
   if (listItems.length && consumed === lines.length) {
     return `<ul class="cell-list">${listItems.map((line) => `<li>${renderSourceLinkedText(line, sourceLinks)}</li>`).join("")}</ul>`;
+  }
+  // 列表型字段即使上游未加 "- " 前缀(手拼/格式漂移),多行也按列表渲染,避免退化为 <br> 单列(MA-01/02/03)
+  if (!listItems.length && lines.length > 1 && /主要驱动话题|代表热搜|具体热搜/u.test(header)) {
+    return `<ul class="cell-list">${lines.map((line) => `<li>${renderSourceLinkedText(line, sourceLinks)}</li>`).join("")}</ul>`;
   }
   return renderPlainText(cleaned, sourceLinks);
 }
@@ -543,14 +566,12 @@ function renderGridCase(block) {
   const [title = "", ...details] = lines;
   const caseNumber = Number.parseInt(title.match(/^案例\s*(\d+)/u)?.[1] ?? "0", 10);
   const image = resolveCaseImage(block, caseNumber, title);
-  if (!image) {
-    throw new Error(`Missing reusable image for ${title || `case ${caseNumber || "?"}`}. Replace blob/remote images.src with a data URL, file:// URL, absolute path, or a path relative to ${sourcePath}.`);
-  }
+  // 配图靠 HC3 人工上传到飞书文档,非阻断:缺图时保留卡片布局,图片位渲染占位,不报错、不生图
   const media = image
     ? `<figure class="case-visual"><img src="${image.src}" alt="${escapeHTML(image.alt)}" loading="lazy" decoding="async"></figure>`
-    : "";
-  const cardClass = image ? "case-card case-card--visual" : "case-card case-card--text-only";
-  return `<article class="${cardClass}"><div class="case-copy"><h3>${escapeHTML(title)}</h3>${details.map((line) => `<p>${renderEmphasizedLine(line)}</p>`).join("")}</div>${media}</article>`;
+    : `<figure class="case-visual case-visual--placeholder" aria-label="配图待补充"><span class="case-visual-placeholder-icon" aria-hidden="true">🖼️</span><span>配图待补充</span></figure>`;
+  const sourceLinks = blockSourceLinks(block);
+  return `<article class="case-card case-card--visual"><div class="case-copy"><h3>${escapeHTML(title)}</h3>${details.map((line) => `<p>${renderListItem(line, sourceLinks)}</p>`).join("")}</div>${media}</article>`;
 }
 
 function renderFlow(items) {
@@ -560,7 +581,7 @@ function renderFlow(items) {
 
   const flushList = () => {
     if (!listItems.length) return;
-    output += `<ul class="insight-list">${listItems.map((item) => `<li class="${sentimentClass(item).trim()}">${renderListItem(item)}</li>`).join("")}</ul>`;
+    output += `<ul class="insight-list">${listItems.map(({ text, links }) => `<li class="${sentimentClass(text).trim()}">${renderListItem(text, links)}</li>`).join("")}</ul>`;
     listItems = [];
   };
 
@@ -584,7 +605,7 @@ function renderFlow(items) {
 
     if (/docx-bullet-block/u.test(block.className)) {
       flushCases();
-      listItems.push(text);
+      listItems.push({ text, links: blockSourceLinks(block) });
       return;
     }
 
@@ -798,8 +819,10 @@ const declarationItems = declaration
   .filter((line) => line && line !== "📌 数据声明" && line !== "•")
   .filter((line) => !/^数据样本：|^数据周期：/u.test(line))
   .map((line) => line.replace("所有展示热度分", "所有热度分"));
-const specialNoteBody = specialNote.replace(/^⚠️\s*本周特殊说明：?/u, "");
-const footerNoteText = cleanText([...blocks].reverse().find((block) => /quote_container/u.test(block.className))?.text ?? specialNoteBody);
+// 尾注只认「热度值说明」引用块(语义匹配);缺失时用固定口径,绝不回退到页头「数据范围」引用(MA-06)。
+// 文案与 topic6-insight/scripts/pipeline_f.py::HEAT_NOTE 逐字一致,以 pipeline_f 为准,此处仅兜底。
+const HEAT_NOTE_DEFAULT = "热度值说明：报告展示热度值为经过标准化后的热度分值（跨平台、跨期均可比），非平台原始热度值。平台新鲜事中热度值为热点数量及热度值综合评分。";
+const footerNoteText = cleanText([...blocks].reverse().find((block) => /quote_container/u.test(block.className) && /^\s*热度值说明/u.test(cleanText(block.text)))?.text ?? HEAT_NOTE_DEFAULT);
 const footerNoteMatch = footerNoteText.match(/^([^：:]+[：:])\s*([\s\S]*)$/u);
 const footerNoteLabel = footerNoteMatch?.[1] ?? "本周特殊说明：";
 const footerNoteBody = footerNoteMatch?.[2] ?? footerNoteText ?? "";

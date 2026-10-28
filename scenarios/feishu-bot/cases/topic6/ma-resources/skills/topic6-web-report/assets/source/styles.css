@@ -1737,6 +1737,18 @@ tbody tr:hover td { background: #f4f5ff; }
 }
 
 .case-copy { padding: 20px; }
+.case-visual--placeholder {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed rgba(67, 61, 243, 0.22);
+  background: #f3f4fa;
+  color: var(--muted);
+  font-size: 13px;
+}
+.case-visual-placeholder-icon { font-size: 28px; opacity: 0.55; }
 .case-card--text-only .case-copy { padding: 22px; }
 
 .case-card h3 {

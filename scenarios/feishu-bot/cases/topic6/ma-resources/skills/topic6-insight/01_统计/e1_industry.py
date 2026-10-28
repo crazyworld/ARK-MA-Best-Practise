@@ -52,7 +52,7 @@ def build_wow_comparison(proj: Path, current_top10: list[str]) -> str:
         return (
             "**环比数据**：Projects/ 下未找到对应上一自然周日期区间的项目目录，"
             "本期是该系列的首次归档（或上一期尚未跑到 E 阶段）。"
-            "第三句必须如实写「本期为该系列首次归档，暂无上期数据可比」，不允许编造任何变化。"
+            "无可比上期：省略第三句环比，不允许编造任何变化。"
         )
 
     prev_e1_data = find_latest_e1_data(prev_proj)
@@ -60,14 +60,14 @@ def build_wow_comparison(proj: Path, current_top10: list[str]) -> str:
         return (
             f"**环比数据**：找到了上一期项目目录（{prev_proj.name}），"
             "但其 06_洞察/ 下没有可用的 e1_data.md 快照（可能上一期还没跑到 E 阶段）。"
-            "第三句必须如实写「上一期暂无洞察数据可比」，不允许编造任何变化。"
+            "无可比上期：省略第三句环比，不允许编造任何变化。"
         )
 
     prev_top10 = parse_top10_from_e1_data(prev_e1_data.read_text(encoding="utf-8"))
     if not prev_top10:
         return (
             f"**环比数据**：上一期 e1_data.md（{prev_e1_data}）解析不到 TOP10 行业列表。"
-            "第三句必须如实写「上一期数据解析失败，暂无法环比」，不允许编造任何变化。"
+            "无可比上期：省略第三句环比，不允许编造任何变化。"
         )
 
     cur_rank = {ind: i + 1 for i, ind in enumerate(current_top10)}

@@ -45,6 +45,9 @@ W36自定义_20260901-20260914      → ✓ 解析出 ('W36','20260901','2026091
 `pipeline_f.py::resolve_period_info()` 的取值顺序是：
 **① CLI 显式传参 → ② `run_config.yaml` 的 `period` 块 → ③ 目录名解析**，三者都取不到才报错退出。
 
+`period_label` 格式固定为 `YYYY-Www`（ISO 周，取起始日，如 `2026-W43`），不得带日期或说明文字；
+`date_start` / `date_end` 为 `YYYY-MM-DD`。不规范时 `pipeline_f.py` 会按 `date_start` 重新推导报告展示标签。
+
 因此 `period` 块（`period_label` / `date_start` / `date_end`）是 `[MUST_UPDATE]` 必填项 ——
 **填全了就不会走到目录名解析**。目录命名规范主要是给人看的，兜底解析是保险，不是主路径。
 
@@ -108,7 +111,7 @@ R1~R5 与 C2 只处理这个子集（不是全量），C3 不受此筛选影响�
 
 | 子块 | 对应阶段 | 关键字段 |
 |---|---|---|
-| `ab` | prompt/02 | completed / week_num / iso_label / raw_rows / clean_rows |
+| `ab` | prompt/02 | completed(B 成功后)/ week_num / iso_label / raw_rows / clean_rows / low_max_accepted(仅用户放行低分时) |
 | `sample` | prompt/03 | completed / sample_file / sample_rows |
 | `c0_base` `c3_node` | prompt/04 第一批 | status / datahub_task_id / prompt_version / row_count |
 | `c0_merge` `c0_filter` | prompt/04 筛选 | status / run_id / usable_count / parse_error_excluded / missing_excluded |

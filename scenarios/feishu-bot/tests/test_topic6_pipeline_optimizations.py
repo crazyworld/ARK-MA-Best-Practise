@@ -606,6 +606,8 @@ def test_c2_runner_uses_platform_00_then_merged_remaining_stages(tmp_path):
         "x2_confidence",
         "x3_review",
         "x4_detail",
+        "08_rank",
+        "09_registry",
     ]
     assert len(plan[0][1]) == 4
     platform_commands = " ".join(" ".join(command) for command in plan[0][1])
@@ -1560,11 +1562,19 @@ def test_wait_datahub_batch_reports_running_complete_and_failed(tmp_path):
     complete = module.inspect_batch(tmp_path, ["c0", "c3"], 1)
     assert complete["status"] == "complete"
 
+    # 单路非 C0 缺失 → degraded(对齐原版 0~1 失败标记缺失继续)
     (c3_dir / "c3_completion_meta.json").unlink()
     (c3_dir / "c3_worker_r1.pid").write_text("99999999", encoding="utf-8")
+    degraded = module.inspect_batch(tmp_path, ["c0", "c3"], 1)
+    assert degraded["status"] == "degraded"
+    assert degraded["tasks"]["c3"]["status"] == "missing"
+    assert degraded["missing_tasks"] == ["c3"]
+
+    # C0 缺失 → failed(筛选依赖 C0)
+    (c0_dir / "c0_completion_meta.json").unlink()
+    (c0_dir / "c0_worker_r1.pid").write_text("99999999", encoding="utf-8")
     failed = module.inspect_batch(tmp_path, ["c0", "c3"], 1)
     assert failed["status"] == "failed"
-    assert failed["tasks"]["c3"]["status"] == "missing"
 
 
 def test_coordinator_uses_cross_platform_c2_flow_and_merge_contract():
@@ -1773,46 +1783,44 @@ def test_pricing_lookup_unknown_model_stays_zero():
     assert pipeline_e._price_of("unknown-model-x") == (0.0, 0.0)
 
 
-def test_web_report_builds_text_only_cases_without_images(tmp_path):
-    """Phase G 无图规则：案例改走 heading3+bullet 后构建成功，图片校验报"无 case"属预期。"""
+def test_web_report_renders_placeholder_for_cases_without_images(tmp_path):
+    """Phase G 配图非阻断：grid-block 案例缺图时仍渲染左文右图卡片，图片位为「配图待补充」占位。"""
     blocks = json.loads(WEB_REPORT_EXAMPLE.read_text(encoding="utf-8"))
     blocks[0]["text"] = (
         "数据范围:微博、知乎、抖音、B站\n"
         "数据周期:2026-W39 (2026-09-21 ~ 2026-09-27)"
     )
-    converted: list[dict] = []
-    for block in blocks:
-        if "docx-grid-block" not in str(block.get("className", "")):
-            converted.append(block)
-            continue
-        title, *details = [ln for ln in block["text"].split("\n") if ln.strip() and ln.strip() != "•"]
-        converted.append({**block, "className": "block docx-heading3-block", "text": title, "images": []})
-        converted.extend(
-            {**block, "className": "block docx-bullet-block", "text": line, "images": []}
-            for line in details
-        )
-    assert len(converted) > len(blocks), "示例里应含 grid-block 案例"
-    source = tmp_path / "source.json"
+    grid = [b for b in blocks if "docx-grid-block" in str(b.get("className", ""))]
+    assert len(grid) == 4, "示例里应含 4 个 grid-block 案例"
+    grid[1]["images"] = []  # 案例2 缺图,其余保留源文档图
+    source = tmp_path / "source.json"  # 非 example 文件名 → 不允许回落模板图
     output = tmp_path / "index.html"
-    source.write_text(json.dumps(converted, ensure_ascii=False), encoding="utf-8")
+    source.write_text(json.dumps(blocks, ensure_ascii=False), encoding="utf-8")
+    for b in grid:
+        if b["images"]:
+            b["images"][0]["src"] = str(WEB_REPORT_DIR / "assets" / "source" / "assets" / Path(b["images"][0]["src"]).name)
+    source.write_text(json.dumps(blocks, ensure_ascii=False), encoding="utf-8")
+
+    check = subprocess.run(
+        ["node", str(WEB_REPORT_DIR / "scripts" / "validate-case-image-sources.mjs"), str(source)],
+        check=False, capture_output=True, text=True,
+    )
+    assert check.returncode == 0, check.stderr
+    assert "1 case(s) use the image placeholder" in check.stdout
 
     build = subprocess.run(
         ["node", str(WEB_REPORT_BUILDER), str(source), str(output)],
         check=False, capture_output=True, text=True,
     )
     assert build.returncode == 0, build.stderr
-    assert 'class="case-card case-card--visual"' not in output.read_text(encoding="utf-8")
-
-    check = subprocess.run(
-        ["node", str(WEB_REPORT_DIR / "scripts" / "validate-case-image-sources.mjs"), str(source)],
-        check=False, capture_output=True, text=True,
-    )
-    assert check.returncode != 0
-    assert "No docx-grid-block marketing-observation cases were found" in check.stderr
+    html = output.read_text(encoding="utf-8")
+    assert html.count('class="case-card case-card--visual"') == 4
+    assert html.count('class="case-visual case-visual--placeholder"') == 1
+    assert "配图待补充" in html
 
 
 def test_coordinator_phase_g_documents_no_image_rule():
     text = COORDINATOR_PROMPT.read_text(encoding="utf-8")
     phase_g = text[text.index("### Phase G"):text.index("### Phase H")]
-    for needle in ("docx-heading3-block", "status.g.case_images_missing", "不视为失败", "严禁调用生图工具"):
+    for needle in ("fetch_case_images.py", "--case-images", "配图待补充", "status.g.case_images_missing", "严禁调用生图工具"):
         assert needle in phase_g

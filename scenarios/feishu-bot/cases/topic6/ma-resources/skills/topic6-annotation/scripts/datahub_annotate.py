@@ -54,6 +54,12 @@ POLL_TIMEOUT = 24 * 60 * 60
 DOWNLOAD_TIMEOUT = 300
 TASK_QUERY_MAX_ATTEMPTS = 5
 TASK_QUERY_RETRY_BASE_SECONDS = 2
+# 任务级失败原地自愈重提上限(对齐原版 datahub_poll.MAX_TASK_RETRIES);计数落 submit_meta,
+# worker 重启不会无限重提
+MAX_TASK_RESUBMITS = 1
+# 拿不到逐行 in/out token 时按 3:1 拆 total_tokens(对齐原版 datahub_poll 回退估算)
+FALLBACK_INPUT_TOKEN_RATIO = 0.75
+API_KEY_ENVS = ("DATAHUB_API_KEY_OFFICE", "DATAHUB_API_KEY_HOME", "DATAHUB_API_KEY")
 
 TASK_META: dict[str, dict] = {
     "c0": {"label": "基础事实标注", "subdir": "C0_基础事实"},
@@ -110,11 +116,17 @@ for _s in (sys.stdout, sys.stderr):
         pass
 
 
+class DataHubTaskFailed(RuntimeError):
+    """DataHub 任务进入 FAILED/CANCELED 终态(可原地重提),区别于网络/超时异常。"""
+
+
 def _api_key() -> str:
-    key = os.environ.get("DATAHUB_API_KEY", "").strip()
-    if not key:
-        raise RuntimeError("环境变量 DATAHUB_API_KEY 未设置")
-    return key
+    """按 OFFICE → HOME → 默认 三级回落读取 DataHub Key(对齐原版 datahub_submit)。"""
+    for env in API_KEY_ENVS:
+        key = os.environ.get(env, "").strip()
+        if key:
+            return key
+    raise RuntimeError(f"未找到 DataHub API Key,请设置 {' / '.join(API_KEY_ENVS)} 之一")
 
 
 def _headers(api_key: str) -> dict:
@@ -378,7 +390,8 @@ def _poll_until_done(api_key: str, task_id: int) -> dict:
         if status in DONE_STATUSES:
             return data
         if status in FAILED_STATUSES:
-            raise RuntimeError(f"任务 {task_id} 终止于失败态: {status}")
+            detail = data.get("error_message") or status
+            raise DataHubTaskFailed(f"任务 {task_id} 终止于失败态: {status} ({detail})")
         if elapsed > POLL_TIMEOUT:
             raise TimeoutError(f"任务 {task_id} 轮询超时 ({POLL_TIMEOUT}s)")
         time.sleep(POLL_INTERVAL)
@@ -790,23 +803,18 @@ def annotate(
         ):
             submit_meta = candidate
 
-    if submit_meta:
-        task_id = int(submit_meta["task_id"])
-        print(f"[annotate] 恢复已有 task_id={task_id}", flush=True)
-    else:
+    def _submit_new(resubmits: int, failed_ids: list) -> dict:
         print(f"[annotate] 上传: {upload_path}", flush=True)
         ds_id = _upload_file(api_key, upload_path)
         print(f"[annotate] data_source_id={ds_id}", flush=True)
-
         task_name = (
             f"topic6_{task}_{meta['label']}_r{run_id}_"
             f"{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         )
-        task_id = _create_task(api_key, ds_id, prompt_text, model_id, task_name)
-        print(f"[annotate] task_id={task_id}", flush=True)
-
-        submit_meta = {
-            "task": task, "task_id": task_id, "run_id": run_id,
+        new_task_id = _create_task(api_key, ds_id, prompt_text, model_id, task_name)
+        print(f"[annotate] task_id={new_task_id}", flush=True)
+        record = {
+            "task": task, "task_id": new_task_id, "run_id": run_id,
             "model_id": model_id, "platform": model_info["platform"],
             "input_price": model_info["input_price"],
             "output_price": model_info["output_price"],
@@ -816,16 +824,40 @@ def annotate(
             "input_file": str(upload_path),
             "source_input_file": str(input_path.resolve()),
             "source_input_fingerprint": _input_fingerprint(input_path),
+            "resubmits": resubmits,
+            "failed_task_ids": failed_ids,
             "created_at": datetime.now().isoformat(),
         }
         temp_submit_path = submit_path.with_suffix(".json.tmp")
         temp_submit_path.write_text(
-            json.dumps(submit_meta, ensure_ascii=False, indent=2),
+            json.dumps(record, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
         os.replace(temp_submit_path, submit_path)
+        return record
 
-    task_data = _poll_until_done(api_key, task_id)
+    if submit_meta:
+        print(f"[annotate] 恢复已有 task_id={submit_meta['task_id']}", flush=True)
+    else:
+        submit_meta = _submit_new(0, [])
+
+    # 任务级自愈:DataHub 任务进入失败态时原地重提(上限 MAX_TASK_RESUBMITS,计数随
+    # submit_meta 落盘,worker 重启后不会重复重提);网络/超时异常不重提,直接上抛
+    while True:
+        task_id = int(submit_meta["task_id"])
+        try:
+            task_data = _poll_until_done(api_key, task_id)
+            break
+        except DataHubTaskFailed as error:
+            resubmits = int(submit_meta.get("resubmits", 0) or 0)
+            if resubmits >= MAX_TASK_RESUBMITS:
+                raise
+            print(
+                f"[annotate] ⚠️ {error};原地重提第 {resubmits + 1}/{MAX_TASK_RESUBMITS} 次",
+                flush=True,
+            )
+            failed_ids = list(submit_meta.get("failed_task_ids") or []) + [task_id]
+            submit_meta = _submit_new(resubmits + 1, failed_ids)
     result_url = task_data.get("result_url")
     raw_out = task_dir / f"{task}_result_raw_r{run_id}.xlsx"
     if result_url:
@@ -867,6 +899,13 @@ def annotate(
     total_consume = float(task_data.get("total_consume", 0) or 0.0) + float(retry_info.get("retry_consume", 0.0))
     input_tokens = int(df.get("llm_input_tokens", pd.Series(dtype=int)).fillna(0).sum())
     output_tokens = int(df.get("llm_output_tokens", pd.Series(dtype=int)).fillna(0).sum())
+    token_estimated = False
+    if input_tokens == 0 and output_tokens == 0 and total_tokens > 0:
+        # 结果表缺逐行 token 列时按 3:1 拆 API total_tokens,避免成本记账记 0
+        input_tokens = int(total_tokens * FALLBACK_INPUT_TOKEN_RATIO)
+        output_tokens = total_tokens - input_tokens
+        token_estimated = True
+        print(f"[annotate] 逐行 token 缺失,按 3:1 估算 total_tokens={total_tokens:,}", flush=True)
 
     completion_meta = {
         **submit_meta,
@@ -876,6 +915,7 @@ def annotate(
         "valid_rate": stats["valid_rate"],
         "input_tokens": input_tokens, "output_tokens": output_tokens,
         "total_tokens": total_tokens, "total_consume": total_consume,
+        "token_estimated": token_estimated,
         "raw_file": str(raw_out), "post_file": str(post_out),
         "retry": retry_info,
         "completed_at": datetime.now().isoformat(),

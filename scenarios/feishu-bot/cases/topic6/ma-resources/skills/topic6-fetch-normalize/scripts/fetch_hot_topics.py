@@ -53,6 +53,29 @@ OUTPUT_COLS: list = [
 ]
 
 WORKSPACE_ROOT = Path(os.environ.get("MA_WORKSPACE", "/workspace"))
+_ANNOTATION_SCRIPTS = Path(__file__).resolve().parents[2] / "topic6-annotation" / "scripts"
+
+
+def _update_status(proj: Path, patch: dict, phase: str | None = None) -> None:
+    """写回 run_config.status(共享 run_config_state 原子更新;run_config 不存在时静默跳过)。"""
+    sys.path.insert(0, str(_ANNOTATION_SCRIPTS))
+    try:
+        from run_config_state import update_run_config
+    except ImportError as error:  # pragma: no cover - 沙箱内必然存在
+        print(f"[A] WARN 无法写回 run_config: {error}", file=sys.stderr)
+        return
+    update_run_config(proj, patch, current_phase=phase)
+
+
+def fetch_window_from_config(proj: Path) -> tuple[str | None, str | None]:
+    """--start/--end 缺省时取 init_project.py 写入的 run_config.fetch 窗口。"""
+    cfg_path = proj / "run_config.yaml"
+    if not cfg_path.exists():
+        return None, None
+    import yaml
+
+    fetch = (yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}).get("fetch") or {}
+    return fetch.get("fetch_start"), fetch.get("fetch_end")
 
 
 def get_api_key() -> str:
@@ -224,8 +247,10 @@ def _project_path(project_dir: str) -> Path:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Phase A:MCP 取数 + 清洗")
-    parser.add_argument("--start", required=True, help="取数起始日期 YYYY-MM-DD")
-    parser.add_argument("--end", required=True, help="取数截止日期 YYYY-MM-DD")
+    parser.add_argument("--start", default=None,
+                        help="取数起始日期 YYYY-MM-DD;缺省取 run_config.fetch.fetch_start")
+    parser.add_argument("--end", default=None,
+                        help="取数截止日期 YYYY-MM-DD;缺省取 run_config.fetch.fetch_end")
     parser.add_argument("--project-dir", required=True,
                         help="项目目录,绝对路径或相对 /workspace 的路径")
     parser.add_argument("--skip-fetch", action="store_true",
@@ -233,6 +258,13 @@ def main() -> None:
     args = parser.parse_args()
 
     proj = _project_path(args.project_dir)
+    if not args.start or not args.end:
+        cfg_start, cfg_end = fetch_window_from_config(proj)
+        args.start = args.start or cfg_start
+        args.end = args.end or cfg_end
+    if not args.skip_fetch and (not args.start or not args.end):
+        print("[A-1] 缺少取数窗口:请传 --start/--end 或先运行 init_project.py", file=sys.stderr)
+        sys.exit(1)
     raw_json = proj / "01_原始数据" / "hot_topics_skill_raw.json"
     raw_xlsx = proj / "01_原始数据" / "hot_topics_raw.xlsx"
 
@@ -261,6 +293,14 @@ def main() -> None:
     raw_xlsx.parent.mkdir(parents=True, exist_ok=True)
     df[out_cols].to_excel(str(raw_xlsx), index=False)
     print(f"[A-3] 已输出:{raw_xlsx}({len(df)} 行)")
+    # 只写契约字段(run_config契约.md · status.ab);ab.completed 由 B 标准化成功后写入,
+    # A 单独完成不置 completed,避免抽样前置检查在 B 未跑时误放行
+    _update_status(proj, {"ab": {
+        "week_num": week_num,
+        "iso_label": iso_label,
+        "raw_rows": len(records),
+        "clean_rows": len(df),
+    }}, phase="ab")
     print(f"\n完成:{week_num} / {iso_label}")
 
 

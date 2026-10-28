@@ -32,7 +32,7 @@
 | `topic6/skill/annotation/SKILL.md` + 标注阶段契约 | `ma-resources/agents/annotator.system.md` | MA 新增 | 抽出单路 C0/C3/R1-R5 标注子 Agent |
 | `topic6/skill/insight/SKILL.md` + Phase E 契约 | `ma-resources/agents/insighter.system.md` | MA 新增 | 抽出单版块 E1-E4 洞察子 Agent |
 | `topic6/lm/` | `ma-resources/memory/topic6/` | 适配迁入 | 改造成 MA Memory Store 的只读业务记忆 |
-| `Validator/` | 无 | 未迁移 | 当前 MA 流程没有独立 Validator Agent 或 QC Skill |
+| `Validator/`(KS/LM/prompts + Topic6 检查清单) | `ma-resources/agents/validator.system.md` + `ma-resources/skills/validator/` | 适配迁入 | 子 Agent `topic6-validator`(可选，HC1/HC2/HC3 前质检，失败/超时填 SKIP)；新增 `xlsx_checker.py` 确定性检查；Topic1/2/4/5 清单、metaso/tavily 外部搜索、IM 推送未迁移 |
 
 ## 二、`topic6-fetch-normalize` 对应表
 
@@ -193,7 +193,7 @@ Prompt 仅把客户侧 `Agent.Producer/.claude/skills/...` 引用适配为 MA �
 
 | 客户原始文件/目录 | MA 状态 | 原因或替代方式 |
 |---|---|---|
-| `Validator/**` | 未迁移 | 当前没有 Validator Agent/QC Skill；Topic 6 报告检查清单也未接入 |
+| `Validator/` 中与 topic6 无关部分(ada-daily-output-annotate、independent-report-auditor、system-auditor、metaso/tavily-search、Topic1/2/4/5 清单) | 未迁移 | 与 topic6 无关；topic6 检查清单已随 `skills/validator` 迁入 |
 | `topic6/lm/执行日志.md` | 未迁移 | 运行状态改由 `pipeline_store.py` 和项目 `run_config.yaml` 承载 |
 | `topic6/others/_待办登记.md` | 未迁移 | 非运行依赖 |
 | `topic6/Projects/_项目模板/**`、`Projects/W37热点周报_*/**` | 未迁移 | MA 在 `/workspace/Projects/` 动态创建项目和产物 |

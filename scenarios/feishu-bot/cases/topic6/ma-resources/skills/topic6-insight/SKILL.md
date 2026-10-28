@@ -26,9 +26,9 @@ topic6-insight/
 │   └── e4_marketing.py         E4 营销发现(舆情风险/合作动态/营销观察/消费洞察)
 ├── 02_洞察/                    Prompt 目录
 │   ├── _shared/role_style.md   共享角色/风格,拼在每个版块 prompt 前
-│   ├── E1_行业话题/v1.md
+│   ├── E1_行业话题/v2.md
 │   ├── E2_营销节点/v3.md
-│   ├── E3_平台新鲜事/v1.md
+│   ├── E3_平台新鲜事/v2.md
 │   └── E4_营销发现/
 │       ├── v6.md               撰写 prompt
 │       └── _tagging/v1.md      打标 prompt(舆情风险可接性/合作动态参考价值)

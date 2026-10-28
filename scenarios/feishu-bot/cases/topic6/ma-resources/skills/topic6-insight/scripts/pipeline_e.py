@@ -348,6 +348,8 @@ async def build_e2_task(llm_call, sec: dict, insight_dir: Path) -> dict:
             "id": sid, "name": name, "status": "ok", "content": content,
             "input_tokens": 0, "output_tokens": 0, "elapsed_s": 0.0,
             "model": "none(无节点，跳过LLM)", "stop_reason": None,
+            # 确定性固定话术,不受 MIN_SECTION_BYTES 门槛约束(该门槛只防 LLM 空/截断输出)
+            "fixed_text": True,
         }
 
     try:
@@ -634,10 +636,51 @@ def _atomic_json(value: dict, path: Path) -> None:
     )
 
 
+E3_TOP_HEADING_RE = re.compile(
+    r"^(\s*(?:#{1,6}\s*)?\**\s*(?:🔥|✨)?\s*(热门事件|平台热点词)\s*TOP\s*)(\{?N\}?|\d+)(\s*\**\s*)$"
+)
+E3_BOUNDARY_RE = re.compile(r"^\s*(#{1,6}\s|\**\s*(?:🔥|✨)?\s*(?:热门事件|平台热点词)\s*TOP)")
+
+
+def _fix_e3_top_headings(body: str) -> str:
+    """E3「热门事件/平台热点词 TOP N」的 N 以其后表格的实际数据行数为准(脚本确定,不信 LLM)。
+
+    表格为空(e3_platforms.py 判定无≥2条的事件簇 / 热点词候选<2)时删除该标题行,
+    只保留说明句——避免出现 W43 那种 \"TOP 5\" 下面没有任何卡片的情况。"""
+    lines = body.split("\n")
+    out = []
+    for i, line in enumerate(lines):
+        m = E3_TOP_HEADING_RE.match(line)
+        if not m:
+            out.append(line)
+            continue
+        rows = 0
+        seen_sep = False
+        for nxt in lines[i + 1:]:
+            if E3_BOUNDARY_RE.match(nxt):
+                break
+            s = nxt.strip()
+            if not s.startswith("|"):
+                if seen_sep:
+                    break
+                continue
+            if re.match(r"^\|[\s:|-]+\|$", s):
+                seen_sep = True
+            elif seen_sep:
+                rows += 1
+        if rows == 0:
+            continue
+        out.append(f"{m.group(1)}{rows}{m.group(4)}")
+    text = "\n".join(out)
+    return re.sub(r"\n{3,}", "\n\n", text)
+
+
 def _write_section_output(sec: dict, result: dict, output_path: Path) -> None:
     body = _strip_markdown_fence(result["content"])
     if sec["id"] != "e2":
         body = _strip_leading_heading(body, sec["section_title"])
+    if sec["id"] == "e3":
+        body = _fix_e3_top_headings(body)
     _atomic_text(f"{sec['section_title']}\n\n{body}\n", output_path)
 
 
@@ -920,6 +963,50 @@ def _strip_markdown_fence(text: str) -> str:
 # Main
 # ---------------------------------------------------------------------------
 
+MIN_SECTION_BYTES = 100  # 对齐原版 prompt/06 Step 2:四份文件 size > 100 bytes
+_ANNOTATION_SCRIPTS = SKILL_DIR.parent / "topic6-annotation" / "scripts"
+
+
+def _load_run_config(proj: Path) -> dict:
+    path = proj / "run_config.yaml"
+    if not path.exists():
+        return {}
+    import yaml
+
+    return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+
+
+def check_hc2_gate(proj: Path, mode: str) -> str | None:
+    """原版 prompt/06:66 前置条件。demo 设计上跳过 HC2,豁免;无 run_config 时不拦(本地调试)。"""
+    if mode == "demo":
+        return None
+    cfg = _load_run_config(proj)
+    if not cfg:
+        return None
+    if (cfg.get("status") or {}).get("hc2_passed") is not True:
+        return "status.hc2_passed 不为 true:HC2 未通过前禁止进入 Phase E"
+    return None
+
+
+def too_small_sections(round_dir: Path, sections: list) -> list[str]:
+    small = []
+    for sec in sections:
+        path = round_dir / sec["output_file"]
+        if not path.exists() or path.stat().st_size <= MIN_SECTION_BYTES:
+            small.append(sec["id"])
+    return small
+
+
+def _write_e_status(proj: Path, patch: dict, phase: str | None = None) -> None:
+    sys.path.insert(0, str(_ANNOTATION_SCRIPTS))
+    try:
+        from run_config_state import update_run_config
+    except ImportError as error:  # pragma: no cover
+        print(f"[pipeline_e] WARN 无法写回 run_config: {error}", file=sys.stderr)
+        return
+    update_run_config(proj, patch, current_phase=phase)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="E 阶段洞察生成 pipeline(skip_sampling 正式全量 / demo 抽样演示)",
@@ -959,6 +1046,11 @@ def main():
         proj = WORKSPACE_ROOT / proj
     if not proj.exists():
         print(f"[pipeline_e] ❌ 项目目录不存在：{proj}", file=sys.stderr)
+        sys.exit(1)
+
+    gate_error = check_hc2_gate(proj, args.mode)
+    if gate_error:
+        print(f"[pipeline_e] ❌ {gate_error}", file=sys.stderr)
         sys.exit(1)
 
     merge_dir = proj / "05_合并"
@@ -1104,6 +1196,15 @@ def main():
     total_output = sum(r["output_tokens"] for r in results)
 
     print(f"\n[pipeline_e] Step 3：保存洞察文件({version_tag})...")
+    small = set(too_small_sections(round_dir, sections))
+    for sec, result in zip(sections, results):
+        if result["status"] == "ok" and sec["id"] in small and not result.get("fixed_text"):
+            # 输出过短视为失败,并清掉 checkpoint 让原参数重跑时重新生成该版块
+            result["status"] = "error"
+            result["error"] = f"输出文件 <= {MIN_SECTION_BYTES} bytes"
+            checkpoint["sections"].pop(sec["id"], None)
+    if small:
+        _atomic_json(checkpoint, checkpoint_path)
     ok_count = 0
     for sec, result in zip(sections, results):
         if result["status"] == "ok" and result["content"]:
@@ -1147,7 +1248,22 @@ def main():
         print(f"  ⚠️ 疑似被截断(finish_reason=length):{truncated}"
               f"——调大 pipeline_e.py::SECTIONS 里对应版块的 max_tokens 后重跑")
 
-    if ok_count < len(sections):
+    all_ok = ok_count == len(sections)
+    # --sections 只重跑部分版块时，整体状态仍按四个版块文件判断
+    all_sections = [dict(sec, output_file=f"{sec['id']}_{version_tag}.md") for sec in SECTIONS]
+    missing_overall = too_small_sections(round_dir, all_sections)
+    _write_e_status(proj, {"e_insights": {
+        "status": "done" if all_ok and not missing_overall else "failed",
+        "round_version": version,
+        "mode": args.mode,
+        "data_run_id": data_run_id,
+        "failed_sections": sorted(
+            {r["id"] for r in results if r["status"] != "ok"} | set(missing_overall)),
+        **{f"{sec['id']}_file": str(round_dir / sec["output_file"]) for sec in all_sections},
+        "report_file": str(report_path),
+    }}, phase="e")
+
+    if not all_ok:
         sys.exit(1)
 
 

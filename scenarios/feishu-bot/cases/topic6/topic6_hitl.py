@@ -81,6 +81,64 @@ def _fmt_payload_line(label: str, value: Any) -> Optional[dict]:
     return {"tag": "markdown", "content": f"**{label}**:{value}"}
 
 
+_DISTRIBUTION_LABELS = (
+    ("rows", "总行数"),
+    ("c0_valid_rate", "C0 有效率"),
+    ("r1_r5_valid_rates", "R1~R5 有效率"),
+    ("c3_valid_rate", "C3 有效率"),
+    ("c0_null_rate", "C0 空值率"),
+    ("marketing_hit_rate", "C0 营销可用占比"),
+    ("r_subset_rows", "R1~R5 子集行数"),
+    ("c2_coverage", "C2 聚类覆盖率"),
+    ("c3_coverage", "C3 节点覆盖率"),
+    ("max_cluster_rows", "最大单 cluster 规模"),
+)
+_RATE_KEYS = {
+    "c0_valid_rate", "c3_valid_rate", "c0_null_rate", "marketing_hit_rate",
+    "c2_coverage", "c3_coverage",
+}
+
+
+def _fmt_rate(value: Any) -> str:
+    return f"{value:.1%}" if isinstance(value, (int, float)) and not isinstance(value, bool) else "-"
+
+
+def _distribution_element(summary: Any) -> Optional[dict]:
+    """HC1/HC2 质量表:对齐原版 prompt/04、05 的人工展示指标,避免 JSON 被截断。"""
+    if not isinstance(summary, dict) or not summary:
+        return _fmt_payload_line("分布摘要", summary)
+    lines = ["**分布摘要**", "| 指标 | 值 |", "|---|---|"]
+    for key, label in _DISTRIBUTION_LABELS:
+        if key not in summary or summary[key] in (None, ""):
+            continue
+        value = summary[key]
+        if key == "r1_r5_valid_rates" and isinstance(value, list):
+            shown = " / ".join(_fmt_rate(v) for v in value)
+        elif key in _RATE_KEYS:
+            shown = _fmt_rate(value)
+        elif key == "max_cluster_rows" and summary.get("max_cluster_name"):
+            shown = f"{value} 条（{summary['max_cluster_name']}）"
+        else:
+            shown = str(value)
+        lines.append(f"| {label} | {shown} |")
+    platforms = summary.get("platform_distribution")
+    if isinstance(platforms, dict) and platforms:
+        parts = []
+        for name, item in platforms.items():
+            if isinstance(item, dict):
+                parts.append(f"{name} {item.get('rows', '-')}（{_fmt_rate(item.get('share'))}）")
+        if parts:
+            lines.append(f"| 平台分布 | {'；'.join(parts)} |")
+    reasons = summary.get("unusable_reasons")
+    if isinstance(reasons, dict) and reasons:
+        lines.append(
+            "| 不可用原因 TOP | " + "；".join(f"{k} {v}" for k, v in list(reasons.items())[:5]) + " |"
+        )
+    if len(lines) == 3:
+        return _fmt_payload_line("分布摘要", summary)
+    return {"tag": "markdown", "content": "\n".join(lines)}
+
+
 def _payload_summary_elements(payload: dict, published_urls: dict | None = None) -> list[dict]:
     """把 HC payload 的主要字段拍成一段可读摘要。字段挑选与三档 HC 通用。
 
@@ -98,7 +156,10 @@ def _payload_summary_elements(payload: dict, published_urls: dict | None = None)
     ]
     elements: list[dict] = []
     for label, value in fields:
-        node = _fmt_payload_line(label, value)
+        node = (
+            _distribution_element(value) if label == "分布摘要"
+            else _fmt_payload_line(label, value)
+        )
         if node:
             elements.append(node)
     # 已发布产物的编辑链接（仅在有链接时渲染）

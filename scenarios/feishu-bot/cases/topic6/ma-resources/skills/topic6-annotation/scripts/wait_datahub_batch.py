@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
-"""Wait for a DataHub annotation batch without crossing the MA bash limit."""
+"""Wait for a DataHub annotation batch without crossing the MA bash limit.
+
+返回 JSON 的 status(对齐原版 datahub_poll 熔断口径):
+  running       仍有任务在跑,原参数再调
+  complete      全部 done 且有效率均 >= 80%
+  degraded      恰有 1 路非 C0 任务失败/缺失(worker 内已自愈重提过),其余完成;
+                该路按"整批缺失"继续,merge 会在 health_summary 醒目提示
+  quality_fail  无系统性失败,但有任务有效率 < 80%(fail 档);Coordinator 须
+                输出 [need_decision] 让用户选继续/停止
+  failed        C0 失败(筛选依赖 C0)或同批 >= 2 路失败 → 系统性故障,停止
+exit code: failed=1,其余=0
+"""
 
 from __future__ import annotations
 
@@ -21,6 +32,12 @@ TASKS = {
     "r4": ("R4_创意借鉴", "r4_creative"),
     "r5": ("R5_消费者行为", "r5_consumer"),
 }
+# 与 datahub_annotate.VALID_THRESHOLDS 保持一致
+QUALITY_FAIL_THRESHOLD = 0.80
+QUALITY_WARN_THRESHOLD = 0.92
+# 这些任务失败时整批不可降级(下游筛选/合并依赖其结果)
+CRITICAL_TASKS = {"c0"}
+SYSTEMIC_FAILURE_COUNT = 2
 
 
 def _resolve_project_dir(value: str) -> Path:
@@ -78,14 +95,48 @@ def inspect_batch(project: Path, tasks: list[str], run_id: int) -> dict:
             "status": "running" if _pid_is_running(pid_path) else "missing"
         }
 
-    values = {item["status"] for item in states.values()}
-    if "failed" in values or "missing" in values:
+    failed_tasks = sorted(
+        task for task, item in states.items() if item["status"] in {"failed", "missing"}
+    )
+    running = any(item["status"] == "running" for item in states.values())
+    critical_failed = sorted(set(failed_tasks) & CRITICAL_TASKS)
+    low_quality = sorted(
+        task for task, item in states.items()
+        if item["status"] == "done" and item["valid_rate"] < QUALITY_FAIL_THRESHOLD
+    )
+    warn_quality = sorted(
+        task for task, item in states.items()
+        if item["status"] == "done"
+        and QUALITY_FAIL_THRESHOLD <= item["valid_rate"] < QUALITY_WARN_THRESHOLD
+    )
+
+    if critical_failed or len(failed_tasks) >= SYSTEMIC_FAILURE_COUNT:
+        # 已确定系统性失败时不必等其余任务跑完
         overall = "failed"
-    elif values == {"done"}:
-        overall = "complete"
+        reason = (
+            f"关键任务失败: {critical_failed}" if critical_failed
+            else f"同批 {len(failed_tasks)} 路失败(>= {SYSTEMIC_FAILURE_COUNT}),疑似系统性故障"
+        )
+    elif running:
+        overall, reason = "running", ""
+    elif low_quality:
+        overall = "quality_fail"
+        reason = f"有效率低于 {QUALITY_FAIL_THRESHOLD:.0%}: {low_quality}"
+    elif failed_tasks:
+        overall = "degraded"
+        reason = f"单路失败按缺失继续: {failed_tasks}"
     else:
-        overall = "running"
-    return {"status": overall, "run_id": run_id, "tasks": states}
+        overall, reason = "complete", ""
+    result = {"status": overall, "run_id": run_id, "tasks": states}
+    if reason:
+        result["reason"] = reason
+    if failed_tasks:
+        result["missing_tasks"] = failed_tasks
+    if low_quality:
+        result["quality_fail_tasks"] = low_quality
+    if warn_quality:
+        result["quality_warn_tasks"] = warn_quality
+    return result
 
 
 def main() -> int:

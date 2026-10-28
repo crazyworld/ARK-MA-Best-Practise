@@ -25,12 +25,20 @@
 1. `memory_read /{memstore_id}/topic6/MEMORY.md` → 决定后续还读哪些 memory 文件
 2. `memory_read /{memstore_id}/topic6/错误案例库.md` → 历史踩坑,防重蹈覆辙
 3. `memory_read /{memstore_id}/topic6/_版本状态.md` → 确认 C0 / R1~R5 / C2 / C3 各任务当前活跃 Prompt 版本
-4. 解析用户消息,确定运行参数(周次、mode=demo|full|skip_sampling|smoke),并严格按
-   `/mnt/skills/topic6-annotation/prompts/run_config契约.md` 生成 `{PROJECT_DIR}`
-5. 将本轮唯一项目绝对路径设为
-   `project_dir=/workspace/Projects/{PROJECT_DIR}`,检查该目录下是否已有 `run_config.yaml`
-   - 存在:从 `status.current_phase` 断点续跑
-   - 不存在:创建新项目目录(名格式见 `/mnt/skills/topic6-annotation/prompts/run_config契约.md`)并写入初始 run_config.yaml
+4. 从用户消息确定 mode(demo|full|skip_sampling|smoke),然后调用唯一启动脚本，
+   周期解析、目录命名、取数窗口、run_config 初始化全部由脚本完成，**禁止自行推算日期或手写 run_config**:
+   ```bash
+   python /mnt/skills/topic6-annotation/scripts/init_project.py \
+     --text "<用户原始消息原文>" --mode {mode}
+   ```
+   支持:无日期(最近完整周)/ `W35` / `09-01到09-14`(custom)/ 双周 / `继续W36`(断点续跑)
+5. 按脚本 stdout JSON 的 `status` 处理:
+   - `created`:新项目，`project_dir` 取 JSON 中的值，从 Phase A 开始
+   - `resumed`:从 `current_phase` 断点续跑(各状态块为 done 的分支不得重跑)
+   - `ambiguous`:按 R15 输出 `[need_decision]`,原样列出 `reason` 与 `options`(A/B/C),
+     然后 `end_turn`;用户 `/continue <字母>` 后,取 stdout `resolutions[<字母>]`:
+     为参数数组时把它**原样追加**到上一次命令(`--text`/`--mode` 不变)重新调用;
+     为 `null` 时停止或请用户补充信息。禁止把选项文字拼进 `--text`(脚本不解析,会再次 ambiguous)
 6. 创建或确认目录后,立即输出一行
    `[project_dir] /workspace/Projects/{PROJECT_DIR}`。该标记供 Gateway 把真实路径写入
    `pipeline_jobs.project_dir`;必须使用绝对路径,不得输出目录名或其他根目录
@@ -72,9 +80,17 @@ python /mnt/skills/topic6-annotation/scripts/publish_node_artifacts.py \
 
 ### Phase A+B · 取数标准化
 
-- 调 hot-topics MCP 拉四平台上周热搜 → `/workspace/Projects/{PROJECT_DIR}/01_原始数据/`
-- 调 `/mnt/skills/topic6-fetch-normalize/` 脚本做 log1p + P1/P99 归一化 → `02_标准化/hot_topics_normalized.xlsx`
-- 关卡:行数 > 200,四平台均有数据,各平台最高分 > 90,无 NaN
+- 取数:`python /mnt/skills/topic6-fetch-normalize/scripts/fetch_hot_topics.py --project-dir "{project_dir}"`。
+  不传 `--start/--end`,脚本读 `run_config.fetch`(= date_start−7 天 ~ date_end+1 天，
+  保证能识别完整 ISO 周)→ `01_原始数据/`
+- 标准化:`python /mnt/skills/topic6-fetch-normalize/scripts/log1p_p1p99_normalize.py --project-dir "{project_dir}"`
+  → `02_标准化/hot_topics_normalized.xlsx`
+- 关卡:行数 > 200,四平台均有数据，无 NaN(任一不满足 → 退出码 1,停止)
+- 各平台最高分 ≤ 90 时标准化脚本退出码 2 并输出 `low_max_score` JSON:按 R15 输出
+  `[need_decision]`,列出 `platforms` 与 `options`。用户选 A(本周整体降温，接受)后原命令加
+  `--accept-low-max --reason "<用户原话>"` 重跑；选 B/C 停止并等用户说明
+- 两个脚本都会写回 `status.ab`(A:周次/行数;B:`completed`,放行低分时附 `low_max_accepted`);标准化成功时 stdout 末行
+  `{"status":"ok","summary":{...}}` 即 A+B 摘要，可直接转述，不得自行读 xlsx 统计
 - 关卡通过后发布 `node=fetch_normalize`: `01_原始数据/hot_topics_skill_raw.json`、
   `01_原始数据/hot_topics_raw.xlsx`、`02_标准化/hot_topics_normalized.xlsx`
 
@@ -104,7 +120,8 @@ python /mnt/skills/topic6-annotation/scripts/publish_node_artifacts.py \
   ```
   调用 bash 工具时必须显式设置 `timeout=115`；这是工具调用参数，不是 shell 命令参数。
   返回 `running` 时原参数再次调用；禁止另起 `sleep`、`while`、`tail --pid`、`ps`，
-  禁止读取 `.bash_bg`。返回 `failed` 立即停止；返回 `complete` 后再进入筛选
+  禁止读取 `.bash_bg`。其余返回值按「五、并发规范」的批次结果表处理：`complete` /
+  `degraded`(仅 C3 缺失)进入筛选；`quality_fail` 走 R15 决策；`failed` 停止
 - DataHub 模型使用 `$DATAHUB_MODEL_ID`（默认且大小写敏感的准确 ID 为 `DeepSeek-V4-Flash`）；这是 DataHub 的模型名，不得传给方舟 Chat API。以 completion_meta 的实际模型和 `total_consume` 记账,不得套用 MA Agent 模型价格
 - DataHub worker 不自行记账。批次 `complete` 后由 Coordinator 读取每路
   completion_meta 并各调用一次 cost_tracker；必须传
@@ -112,7 +129,7 @@ python /mnt/skills/topic6-annotation/scripts/publish_node_artifacts.py \
 
 两路都完成后 → 触发筛选。
 
-两路均 `complete` 后分别发布 `node=c0` 与 `node=c3`,每个节点只包含
+两路结束后分别发布已完成的 `node=c0` 与 `node=c3`(C3 缺失时跳过 c3),每个节点只包含
 `04_标注/{任务目录}/*_r{N}.xlsx` 和对应 `*_completion_meta.json`。
 
 ### 筛选(纯脚本)
@@ -138,7 +155,9 @@ Coordinator 后台执行完整 C2。必须先发出 5 个委派，再立刻启�
     --project-dir "{project_dir}" --tasks r1,r2,r3,r4,r5 \
     --run-id {N} --wait-seconds 105
   ```
-  调用 bash 工具时同样必须显式设置 `timeout=115`。
+  调用 bash 工具时同样必须显式设置 `timeout=115`。返回值处理同第一批(见「五、并发规范」)；
+  `degraded` 时缺失那一路不发布、不记账，合并脚本按整批缺失处理并在 health_summary 提示，
+  且必须写进 HC 的 `issues_detected`。
   批次完成后按上述 record-id 规则分别记录 R1~R5 成本，不得重复追加。
 - 完整 C2 不再临场拼 shell 或逐阶段调脚本。只启动一次可恢复入口:
   ```bash
@@ -179,11 +198,16 @@ Coordinator 后台执行完整 C2。必须先发出 5 个委派，再立刻启�
   **禁止用 `sleep`、`while` 循环、`tail --pid` 或手动读 `c2_status.json` 替代此脚本。**
   若 Session 恢复，可再次调用 `run_topic6_c2.py` 同一入口，它会按 `completed_stages` 续跑。
 - 入口完成后直接产出 `04_标注/C2_事件归档/c2_event_result_r{N}.xlsx`，供 `merge_annotations.py` 消费。
+- 入口内部已含：00/04/07 失败退避重跑 1 次；x4 之后执行 `08_rank_events` → `09_commit_registry`
+  (`--window` 由脚本从 `run_config.period.period_label` 推导)，写出
+  `c2_run/merged/out/registry_snapshot.jsonl` 供下一窗口增量使用。08/09 失败只记
+  `c2_status.registry.status=failed`，不影响 C2 `done`；Agent 不得为此单独补跑或停流程，
+  只需在 HC 的 `issues_detected` 中注明“Registry 未落库”
 - 禁止把 `00_seed_from_registry.py` 当成 C2 起点；它只用于有上一窗口 Registry 的跨窗口增量场景。禁止四个平台各自跑完 05~08 后再拼接，那会漏掉跨平台事件合并。
 
 六路全部完成后 → 进入 Phase D。
 
-六路均成功后发布 R1~R5 各自的 `*_r{N}.xlsx` 与 `*_completion_meta.json`;
+六路均结束(R1~R5 为 `complete|degraded` 且 C2 `done`)后发布 R1~R5 中已完成各路的 `*_r{N}.xlsx` 与 `*_completion_meta.json`;
 发布 `node=c2`: `04_标注/C2_事件归档/c2_event_result_r{N}.xlsx`、
 `c2_run/c2_status.json`,并以 `--optional-include` 附带
 `c2_run/work/skipped_edges.jsonl`。不得发布整个 `c2_run` 工作目录。
@@ -193,7 +217,19 @@ Coordinator 后台执行完整 C2。必须先发出 5 个委派，再立刻启�
 - 执行 `python /mnt/skills/topic6-annotation/scripts/merge_annotations.py` → `05_合并/wide_table_{mode}_r{N}.xlsx`(28 列宽表)
 - 关卡:以脚本 stdout JSON 的 `gate_ok` 为准(= 输出行数等于输入行数且 `dup_rows`=0);
   宽表标识列名是 `序号`(由 row_id 改名),禁止再自行读 xlsx 按 `row_id` 校验;`gate_ok=false` 时停止并报告
-- 关卡通过后**必须先发布** `node=merge`,`--include "05_合并/wide_table_{mode}_r{N}.xlsx"`;
+- stdout JSON 同时给出 Step 9 综合质量验证:`quality_status`(pass/warn/degraded/fail)、
+  `quality_checks`(各路有效率 ≥92%、C2 事件簇非空率 >50%、C0 营销可用率对照 55%~58% 历史基线、
+  平台行数分布、最大事件簇规模)、`quality_warnings` 和 `hc_metrics`。它不改变 `gate_ok`,处理口径:
+  - `quality_status=fail`(有效率 <80%、C0 缺失或 ≥2 路整批缺失)且上游未经用户裁决 → 按 R15 输出
+    `[need_decision]`:A) 继续送 HC 由审核人判断 B) 停止
+  - `degraded`(恰 1 路整批缺失,与批次 `degraded` 同口径,宽表已补空列、对应版块无候选)
+    → 不停，`quality_warnings` 逐条写入 HC 的 `issues_detected`
+  - `warn`(警告级:有效率 80%~92%、营销可用率偏离基线、某平台占比 <5%、单簇超过营销可用行 10%)
+    → 不停，`quality_warnings` 逐条写入 HC 的 `issues_detected`,由审核人在 HC 卡片上决定
+- 关卡通过后**必须先发布** `node=merge`,`--include "05_合并/wide_table_{mode}_r{N}.xlsx"`
+  `--include "05_合并/health_summary_{mode}_r{N}.md"`;HC1 轮次还要附带抽查文件
+  `--include "04_合并/phase1_merged_{mode}_r{N}.xlsx"` 与
+  `--include "04_标注/_可用子集/usable_subset_{mode}_r{N}.xlsx"`(已在 node=c0_filter 发布的可省略);
   **禁止在 publish 之前输出 HC1/HC2 payload**——Gateway 需要从 Files API 下载宽表上传到飞书，
   未 publish 的文件在 Files API 中不存在，审核人将无法查看数据。
   HC1/HC2 的 `wide_table_path` 必须指向这个已发布文件
@@ -208,8 +244,13 @@ D 阶段合并关卡通过后,在输出 HC1 payload 之前,委派子 Agent `topi
 {
   "task": "hc1",
   "project_dir": "{project_dir}",
-  "audit_files": ["/mnt/session/outputs/{PROJECT_DIR}/05_合并/wide_table_{mode}_r{N}.xlsx"],
-  "context": {"mode": "{mode}", "sample_rows": {N}},
+  "audit_files": [
+    "/mnt/session/outputs/{PROJECT_DIR}/05_合并/wide_table_{mode}_r{N}.xlsx",
+    "/mnt/session/outputs/{PROJECT_DIR}/05_合并/health_summary_{mode}_r{N}.md",
+    "/mnt/session/outputs/{PROJECT_DIR}/04_合并/phase1_merged_{mode}_r{N}.xlsx",
+    "/mnt/session/outputs/{PROJECT_DIR}/04_标注/_可用子集/usable_subset_{mode}_r{N}.xlsx"
+  ],
+  "context": {"mode": "{mode}", "sample_rows": {N}, "quality_checks": [merge stdout 的 quality_checks 原样]},
   "previous_issues": []
 }
 ```
@@ -235,16 +276,15 @@ D 阶段合并关卡通过后,在输出 HC1 payload 之前,委派子 Agent `topi
   "mode": "{full|demo}",
   "project_dir": "/workspace/Projects/{PROJECT_DIR}",
   "wide_table_path": "/mnt/session/outputs/{PROJECT_DIR}/05_合并/wide_table_{mode}_r1.xlsx",
-  "distribution_summary": {
-    "rows": {sample_rows},
-    "cols": 28,
-    "c0_valid_rate": 0.98,
-    "r1_r5_valid_rates": [1.0, 1.0, 1.0, 1.0, 1.0]
-  },
-  "issues_detected": [],
+  "distribution_summary": {merge stdout 的 hc_metrics 对象原样复制，不得增删字段或自行计算},
+  "issues_detected": ["merge stdout 的 quality_warnings 逐条 + 批次 degraded/quality_warn 说明"],
   "validator_verdict": {}
 }
 ```
+
+`hc_metrics` 已包含原版 HC1 质量表全部指标:各路有效率(C0/R1~R5/C3)、C0 营销可用占比
+(`marketing_hit_rate`)、不可用原因分布(`unusable_reasons`)、R1~R5 子集行数、C2 覆盖率、
+C3 覆盖率、最大事件簇、平台分布。
 
 `validator_verdict` 为可选字段：Validator 返回的完整结论 JSON 对象，或 Validator 不可用时的 `{"conclusion":"SKIP",...}` 兜底对象。无 Validator 时该字段可以省略。
 
@@ -256,12 +296,31 @@ D 阶段合并关卡通过后,在输出 HC1 payload 之前,委派子 Agent `topi
 
 上面这段的 3 个违约点:(a) JSON 块前有铺垫文本;(b) JSON 里塞了 schema 外的 `next_step_if_passed` 字段;(c) JSON 语法不闭合(多了一个 `]`)。**任一违约都会导致 gateway 兜底,审核卡片正文出现乱码残片,严重误导审核人**。
 
-用户通过卡片按钮回复 `HC1 通过` / `HC1 打回:xxx` / `HC1 备注:xxx` 后,你会收到新的 `user.message`。
+用户点卡片按钮后，Gateway 注入一条 `user.message`，格式固定为
+`HC1 pass` / `HC1 reject: <原因>` / `HC1 remark: <补充>`(remark = 带备注通过),
+处理规则见下方「HC 决策处理」，HC2/HC3 同理。
+
+**HC 决策处理(HC1/HC2/HC3 通用)**:
+
+- 状态写回统一用 `run_config_state.py --project-dir "{project_dir}" --patch-json '<JSON>'`
+  (JSON 合并进 `status` 块)
+- `pass` / `remark`:写回 `{"hc{K}_passed": true}`(remark 同时写 `"hc{K}_note": "<补充>"`),
+  按下文各模式分支继续
+- `reject`:先写回 `{"hc{K}_passed": false, "hc{K}_reject_reason": "<原因>"}`,
+  然后**不得自行回退或重跑**，按 R15 输出 `[need_decision]` 后 `end_turn`，正文包含:
+  原因原文 → 你判断的受影响任务(C0/C3=第一批，R1~R5/C2=第二批，E1~E4=洞察版块)→ 选项:
+  - HC1/HC2:A) 以 `run_id=N+1` 从 Phase C 第一批完整重跑本轮 C→D(适用于偶发失败、
+    单路缺失、数据异常；所有路由必须同一 run_id，不支持只重跑单路)
+    B) 停止，待 Prompt 升版(skill 更新后新 Session 重跑；本 Session 不得改写 Prompt)
+    C) 在飞书在线表格中直接修正后改点“通过”
+  - HC3:A) 按意见修改报告(见 HC3 节「HC3 打回」) B) 退回 Phase E 原参数重跑后重发
+    C) 停止
+- 用户 `/continue <选择>` 后执行对应分支；选 A 重跑时把 `{N}` 全部替换为新 run_id
 
 **HC1 通过后的飞书表格回读**:由 Gateway 负责下载用户在飞书在线表格中的修改。仅当 user.message 明确给出 `/mnt/session/uploads/hc_edits/...` 文件路径时,把该文件复制覆盖到消息指明的宽表(通常是 `05_合并/wide_table_{mode}_r{N}.xlsx`),并核对行数/列数后再继续;否则什么都不做,直接用沙箱内已有宽表继续。严禁自行搜索或下载飞书云空间文件。
 
 - `mode=full`:收到“通过”后进入 C→D 全量,再经过 HC2。
-- `mode=smoke`:收到"通过"后进入 C→D "全量",但输入使用 `sample_500.py --size 30 --seed 99`（不同 seed 确保不与第一轮重复），脚本 `--mode` 参数传 `skip_sampling`（与 full 的全量阶段一致）,再经过 HC2。smoke 报告必须注明"基于 30 条样本（冒烟测试）,仅供流程验证"。
+- `mode=smoke`:收到"通过"后进入 C→D "全量",但输入使用 `sample_500.py --size 30 --seed 99`（不同 seed 确保不与第一轮重复），脚本 `--mode` 参数传 `skip_sampling`（与 full 的全量阶段一致）,再经过 HC2。smoke 报告的\"基于 30 条样本（冒烟测试）,仅供流程验证\"声明由 `pipeline_f.py` 读 run_config 顶层 `mode=smoke` 自动写入报告开头,Agent 不得自行追加或改写。
 - `mode=demo`:收到“通过”后**直接进入 Phase E**,使用 `wide_table_demo_r{N}.xlsx`;严禁重跑全量 C→D,跳过 HC2。demo 报告必须注明“基于 50 条分层样本,仅供流程演示,不可作为正式全量结论”。
 - `mode=skip_sampling`:初始阶段直接跑全量 C→D,不进入 HC1,完成后进入 HC2。
 
@@ -289,8 +348,11 @@ C→D 全量合并关卡通过后,在输出 HC2 payload 之前,委派子 Agent `
 {
   "task": "hc2",
   "project_dir": "{project_dir}",
-  "audit_files": ["/mnt/session/outputs/{PROJECT_DIR}/05_合并/wide_table_skip_sampling_r{N}.xlsx"],
-  "context": {"mode": "skip_sampling"},
+  "audit_files": [
+    "/mnt/session/outputs/{PROJECT_DIR}/05_合并/wide_table_skip_sampling_r{N}.xlsx",
+    "/mnt/session/outputs/{PROJECT_DIR}/05_合并/health_summary_skip_sampling_r{N}.md"
+  ],
+  "context": {"mode": "skip_sampling", "quality_checks": [merge stdout 的 quality_checks 原样]},
   "previous_issues": [{HC1 verdict 中的 issues 数组,用于回归检查}]
 }
 ```
@@ -308,14 +370,8 @@ C→D 全量合并关卡通过后,在输出 HC2 payload 之前,委派子 Agent `
   "mode": "{full|skip_sampling}",
   "project_dir": "/workspace/Projects/{PROJECT_DIR}",
   "wide_table_path": "/mnt/session/outputs/{PROJECT_DIR}/05_合并/wide_table_skip_sampling_r1.xlsx",
-  "distribution_summary": {
-    "rows": 3950,
-    "cols": 28,
-    "c0_valid_rate": 0.9848,
-    "r1_r5_valid_rates": [1.0, 1.0, 1.0, 1.0, 1.0],
-    "marketing_hit_rate": 0.524
-  },
-  "issues_detected": [],
+  "distribution_summary": {同 HC1:merge stdout 的 hc_metrics 原样},
+  "issues_detected": ["同 HC1:quality_warnings 逐条 + 批次 degraded/quality_warn 说明"],
   "validator_verdict": {}
 }
 ```
@@ -336,9 +392,12 @@ C→D 全量合并关卡通过后,在输出 HC2 payload 之前,委派子 Agent `
     --project-dir "{project_dir}" --mode {demo|skip_sampling} \
     --publish-date "{publish_date}" --version {N}
   ```
+- 脚本自带前置校验：非 demo 模式下 `status.hc2_passed != true` 直接退出 1(先回 HC2,不得绕过);
+  输出文件 ≤ 100 bytes 视为该版块失败；成功/失败都会写回 `status.e_insights`
+  (round_version、e1_file~e4_file、failed_sections)
 - 任一版块失败时，先读取 `06_洞察/v{N}/pipeline_e_report_v{N}.json`，然后最多
   原参数重跑一次上述同一正式入口；脚本会复用已成功版块，只补失败版块。禁止拆成
-  四次 `--sections` 调用，禁止用 inline Python 或临时脚本绕过，禁止改写 Prompt、
+  四次 `--sections` 调用(`--sections` 只用于 Phase F 自校验 fail 后的定点退回)，禁止用 inline Python 或临时脚本绕过，禁止改写 Prompt、
   切换模型、提高并发或删除 checkpoint。第二次仍失败则 Phase E 失败并停止。
 - E2 依赖 C3 标注 + `/mnt/skills/topic6-fetch-normalize/references/marketing_calendar_2026.csv`,
   **不再依赖已删除的 marketing-node-tagging skill**。
@@ -350,6 +409,19 @@ C→D 全量合并关卡通过后,在输出 HC2 payload 之前,委派子 Agent `
 ### Phase F · 合并发布
 
 - 执行 `python /mnt/skills/topic6-insight/scripts/pipeline_f.py --mode {demo|skip_sampling}` → 合并四版块 md
+- **发布前自校验(必做)**:
+  ```bash
+  python /mnt/skills/topic6-insight/scripts/report_self_check.py \
+    --project-dir "{project_dir}" --report-file "07_报告/热点报告_{period_label}_v{N}.md"
+  ```
+  覆盖原版 F Step 1 六项与 HC3 前洞察检查中可脚本化的部分(章节完整、洞察正文、链接格式、
+  LLM 痕迹、版块意图泄露、E4 打标措辞、年度趋势类推断、热度单位、E3 跨平台比较、E4 启示段)
+  - `pass`/`warn`:继续发布,`warn` 的 issues 逐条写入 HC3 `issues_detected`
+  - `fail`:**不在本阶段改写报告文字**,退回 Phase E 只重跑 `failed_sections`(本场景是
+    `--sections` 的唯一合法用途,且仅限一次):
+    `pipeline_e.py --project-dir "{project_dir}" --mode {mode} --version {N} --skip-data-prep --sections {failed_sections 逗号分隔}`,
+    然后重跑 pipeline_f.py 与自校验；第二次仍 `fail` → 按 R15 输出 `[need_decision]`:
+    A) 带问题继续发布，由 HC3 人工修订 B) 停止
 - 用唯一发布入口推送到飞书云文档（一条命令完成创建文件夹→导入 docx→授权→转移所有权）：
   ```bash
   python /mnt/skills/topic6-insight/scripts/publish_report_to_feishu.py \
@@ -402,6 +474,7 @@ Phase F 飞书文档发布成功后,在输出 HC3 payload 之前,委派子 Agent
   "project_dir": "/workspace/Projects/{PROJECT_DIR}",
   "feishu_doc_url": "https://xxx.feishu.cn/docx/xxx",
   "note": "请在飞书文档中审核并按需调整图片,完成后点击卡片按钮",
+  "issues_detected": ["自校验 warn 项逐条，或空数组"],
   "validator_verdict": {}
 }
 ```
@@ -410,21 +483,37 @@ Phase F 飞书文档发布成功后,在输出 HC3 payload 之前,委派子 Agent
 
 用户点"通过"后再进入 Phase G。
 
+**HC3 打回**(用户在「HC 决策处理」中选择后执行):
+- A) 按意见修改报告：只修改 `07_报告/热点报告_{period_label}_v{N}.md` 中与意见对应的文字，
+  数字只能来自宽表(R07);改完重跑 `report_self_check.py` → `publish_report_to_feishu.py`
+  (新文档，更新 `status.f.feishu_doc_url`)→ 重新输出 HC3。用户在飞书文档里直接改过的内容
+  以飞书为准，不得用本地 md 覆盖——此时应提示用户直接在文档中修改后点“通过”
+- B) 退回 Phase E:受影响版块按上面的 `--sections` 命令重跑一次 → pipeline_f → 自校验 → 发布 → HC3
+- C) 停止
+
 ### Phase G · UI 网页发布
 
-- 收到 HC3 通过后,重新读取飞书文档最终版(含用户手工替换的图)
-- 调 `topic6-web-report` 构建并校验自包含 `index.html`,保留在项目
-  `08_UI发布/` 下；校验通过后用统一脚本发布 `node=web`,
+- 收到 HC3 通过后执行(全部为固定脚本,**禁止手工拼 source.json**——手拼曾丢失全部热搜链接与「行业洞察」小标题):
+  ```bash
+  WEB=/mnt/skills/topic6-web-report
+  OUT="$project_dir/08_UI发布/热点报告_{period_label}_web"
+  mkdir -p "$OUT" && cp -R "$WEB/assets/source/." "$OUT/"
+  node "$WEB/scripts/validate-template-assets.mjs"
+  # 1) 下载用户在 HC3 手工上传到飞书文档的案例配图 → case-<N>.<ext>(失败/无图都不阻断)
+  python "$WEB/scripts/fetch_case_images.py" --doc "{status.f.feishu_doc_url}" --out "$OUT/case_images" || true
+  # 2) 报告 md → source.json;营销观察案例统一为左文右图卡片,有图挂图、缺图渲染「配图待补充」占位
+  python "$WEB/scripts/md2source.py" "$project_dir/{status.f.merged_report_file}" "$OUT/source.json" --case-images "$OUT/case_images"
+  node "$WEB/scripts/validate-case-image-sources.mjs" "$OUT/source.json"
+  node "$OUT/build-report.mjs" "$OUT/source.json" "$OUT/index.html"
+  node "$WEB/scripts/validate-rendered-content.mjs" "$OUT/source.json" "$OUT/index.html"
+  ```
+- **营销观察配图(非阻断)**:链路不自动配图,图片只来自用户在 HC3 阶段手工上传到飞书文档、位于
+  「案例 N：」标题之后的图片。缺图案例由模板渲染「配图待补充」占位,流程照常进入 Phase H;
+  严禁调用生图工具、复用模板 `case-*.jpg`、搜图替代,也不因缺图停下向用户索图。
+  `md2source.py` 输出的 `case_images_missing` 写入 `status.g.case_images_missing`
+- 上述校验任一失败即 Phase G 失败,报告原文错误;不得通过改 source.json 文本去迎合校验
+- 产物保留在项目 `08_UI发布/` 下；校验通过后用统一脚本发布 `node=web`,
   `--include "08_UI发布/**/index.html"` 及页面实际引用的本地静态资源
-- **营销观察配图(已知限制,不是阻断)**:链路本身不产出配图,图片只来自用户在 HC3 阶段手工上传到
-  飞书文档的真实图片。按飞书文档 blocks 树逐案例处理:
-  - 有图片块的案例 → 按 skill 的 document-image-extraction 下载原图,走带图 `docx-grid-block`
-  - 无图片块的案例 → 跳过 `[配图：待补充]` 占位行,案例标题用 `docx-heading3-block`、各字段用
-    `docx-bullet-block` 渲染为纯文本,**不得**放进 `docx-grid-block`(builder 对无图 grid-block 直接报错)
-  - 严禁调用生图工具、复用模板 `case-*.jpg`、留占位图,也不因缺图停下向用户索图
-  - 全部案例均无图时 `validate-case-image-sources.mjs` 报 "No docx-grid-block ... cases" 属预期,
-    不视为失败;只要存在带图案例就必须通过该校验
-  - 将缺图案例数写入 `status.g.case_images_missing`
 - 本阶段只负责生成网页产物,不得把 HTML snapshot 上传当成妙搭发布,也不得在这里结束流程
 - 禁止执行 `upload-html.mjs`(含 `--dry-run` / `--setup-key`):沙箱无 snapshot API Key,该上传不属于 topic6 交付
 - 写回 `status.g.completed=true`、`status.current_phase=h_miaoda_publish`,然后立即进入 Phase H
@@ -453,8 +542,16 @@ Phase F 飞书文档发布成功后,在输出 HC3 payload 之前,委派子 Agent
 - Phase C 第一批 2 路必须用 `multiagent` 并发。Phase C 第二批在 full/skip_sampling
   使用 5 个子 Agent + C2 并发，在 demo 使用两个快速脚本并发。Phase E 统一由
   `pipeline_e.py` 内部并发 E1~E4，不得拆成四次脚本调用
-- 同一批内 ≥ 2 个任务失败 → RuntimeError 停止批次
-- 0~1 个失败 → 标记缺失继续
+- DataHub 任务进入失败态时，worker 内部已原地重提 1 次（对 Agent 透明，不得再手工重提）
+- 批次结果以 `wait_datahub_batch.py` 返回的 `status` 为唯一依据：
+
+| status | 含义 | 处理 |
+|---|---|---|
+| `running` | 仍有任务在跑 | 原参数再调 |
+| `complete` | 全部完成且有效率均 ≥ 80% | 继续；`quality_warn_tasks`(80%~92%) 写入 HC 的 `issues_detected` |
+| `degraded` | 恰 1 路非 C0 任务重提后仍失败 | 标记缺失继续，写入 `issues_detected` |
+| `quality_fail` | 有任务有效率 < 80% | 按 R15 输出 `[need_decision]`，列出 `quality_fail_tasks` 与有效率，选项：A) 接受并继续 B) 停止，调整 Prompt 后重跑该批次；等用户裁决 |
+| `failed` | C0 失败，或同批 ≥ 2 路失败（系统性故障） | 立即停止，报告 `reason`，不得进入下游 |
 
 ## 六、行为规则(R01~R14 摘要)
 

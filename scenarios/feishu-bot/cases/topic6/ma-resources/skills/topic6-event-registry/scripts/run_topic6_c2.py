@@ -3,6 +3,10 @@
 
 The cross-platform path is:
   platform 00 in parallel -> x0 -> merged 01..07 -> x2 -> x3 -> x4
+  -> 08 rank -> 09 commit registry (best-effort, 不阻断 C2 结果)
+
+Stage-level retry(对齐原版 c2_run_all_platforms):每个平台的 00 与 04/07 失败后
+退避重跑 1 次;08/09 失败只记 registry_status,不影响 x4 产出的 C2 结果。
 
 Each completed stage is recorded in c2_status.json. Re-running the command
 resumes from the first incomplete stage; the underlying LLM scripts also keep
@@ -16,6 +20,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -43,6 +48,11 @@ PLATFORMS = {
     "zhihu": "知乎",
 }
 RUNNER_SCHEMA_VERSION = 1
+# 阶段内重试次数(不含首次)。04 网络读超时 / 07 偶发空响应截断 / 00 单平台失败
+STAGE_RETRIES = {"00_platforms": 1, "04_embeddings": 1, "07_archive": 1}
+STAGE_RETRY_BACKOFF_SECONDS = 15
+# 失败不阻断 C2 主产物的阶段(Registry 落库是跨窗口增量用的副产物)
+BEST_EFFORT_STAGES = {"08_rank", "09_registry"}
 DEMO_FAST_SYSTEM = """你是社媒热点事件归并器。给定少量热点标题，把描述同一现实事件的记录归入同一事件簇。
 
 规则：
@@ -68,6 +78,7 @@ def build_stage_plan(
     *,
     x2_verdict: str = "sonnet",
     platforms: tuple[str, ...] | None = None,
+    window: str = "",
 ) -> list[tuple[str, list[list[str]]]]:
     """platforms: 本次输入里实际有记录的平台 key（PLATFORMS 的子集，保持原顺序）。
 
@@ -173,8 +184,34 @@ def build_stage_plan(
             [[py, script("x4_detail_table.py"), "--run-dir", str(merged),
               "--source", str(input_csv)]],
         ),
+        ("08_rank", [[py, script("08_rank_events.py"), "--run-dir", str(merged)]]),
+        (
+            "09_registry",
+            [[py, script("09_commit_registry.py"), "--run-dir", str(merged),
+              "--window", window]],
+        ),
     ])
     return stages
+
+
+def resolve_window(project: Path) -> str:
+    """Registry 窗口标识(如 2026W43),取 run_config.period.period_label(YYYY-Www)。
+
+    取不到时返回空串,09 仍可提交,只是快照里 window 为空。
+    """
+    config_path = project / "run_config.yaml"
+    if not config_path.exists():
+        return ""
+    try:
+        import yaml
+
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    except Exception:  # noqa: BLE001 - 窗口标识缺失不应阻断 C2
+        return ""
+    period = config.get("period") or {}
+    label = str(period.get("period_label") or period.get("period_id") or "")
+    match = re.search(r"(\d{4})-?W(\d{1,2})", label)
+    return f"{match.group(1)}W{int(match.group(2)):02d}" if match else ""
 
 
 def _atomic_json(path: Path, payload: dict) -> None:
@@ -297,16 +334,35 @@ def _input_platforms(input_csv: Path) -> tuple[str, ...]:
     return tuple(key for key, label in PLATFORMS.items() if label in labels)
 
 
+def _run_command_with_retry(command: list[str], log_path: Path, retries: int) -> None:
+    for attempt in range(retries + 1):
+        try:
+            _run_command(command, log_path)
+            return
+        except subprocess.CalledProcessError:
+            if attempt >= retries:
+                raise
+            with log_path.open("a", encoding="utf-8") as log:
+                log.write(
+                    f"\n[retry] exit!=0,{STAGE_RETRY_BACKOFF_SECONDS}s 后第 "
+                    f"{attempt + 2}/{retries + 1} 次尝试\n"
+                )
+            print(f"[c2] retry {log_path.stem} attempt {attempt + 2}", flush=True)
+            time.sleep(STAGE_RETRY_BACKOFF_SECONDS)
+
+
 def _run_stage(stage: str, commands: list[list[str]], log_dir: Path) -> None:
+    retries = STAGE_RETRIES.get(stage, 0)
     if len(commands) == 1:
-        _run_command(commands[0], log_dir / f"{stage}.log")
+        _run_command_with_retry(commands[0], log_dir / f"{stage}.log", retries)
         return
     with ThreadPoolExecutor(max_workers=len(commands)) as pool:
         futures = {
             pool.submit(
-                _run_command,
+                _run_command_with_retry,
                 command,
                 log_dir / f"{stage}_{platform}.log",
+                retries,
             ): platform
             for command, platform in (
                 (command, _command_platform(command, fallback))
@@ -568,6 +624,8 @@ def _run_unlocked(args: argparse.Namespace) -> Path:
         }},
     )
 
+    window = resolve_window(project)
+    registry_errors: dict[str, str] = {}
     try:
         for stage, commands in build_stage_plan(
             run_dir,
@@ -576,7 +634,11 @@ def _run_unlocked(args: argparse.Namespace) -> Path:
             args.embedding_model,
             x2_verdict=args.x2_verdict,
             platforms=platforms,
+            window=window,
         ):
+            if stage in BEST_EFFORT_STAGES and not result_path.exists():
+                # x4 已完成(续跑跳过)但结果文件缺失时先补写,保证主产物先落盘
+                _write_result(run_dir, result_path, rows)
             if stage in completed:
                 print(f"[c2] skip completed stage: {stage}", flush=True)
                 continue
@@ -588,12 +650,31 @@ def _run_unlocked(args: argparse.Namespace) -> Path:
                 project,
                 {"c2_cluster": {"status": "running", "stage": stage}},
             )
-            _run_stage(stage, commands, run_dir / "logs")
+            try:
+                _run_stage(stage, commands, run_dir / "logs")
+            except subprocess.CalledProcessError as error:
+                if stage not in BEST_EFFORT_STAGES:
+                    raise
+                # Registry 落库失败不影响本期 C2 结果,只影响下一窗口增量;记录后继续
+                registry_errors[stage] = f"exit {error.returncode},见 logs/{stage}.log"
+                print(f"[c2] ⚠️ {stage} 失败(不阻断): {registry_errors[stage]}", flush=True)
+                continue
+            if stage == "x4_detail":
+                _write_result(run_dir, result_path, rows)
             completed.add(stage)
             status["completed_stages"] = sorted(completed)
             _atomic_json(status_path, status)
 
-        _write_result(run_dir, result_path, rows)
+        if not result_path.exists():
+            _write_result(run_dir, result_path, rows)
+        registry_snapshot = run_dir / "merged" / "out" / "registry_snapshot.jsonl"
+        status["registry"] = {
+            "status": "failed" if registry_errors else (
+                "done" if registry_snapshot.exists() else "skipped"),
+            "window": window,
+            "snapshot": str(registry_snapshot) if registry_snapshot.exists() else "",
+            "errors": registry_errors,
+        }
         status.update({
             "status": "done",
             "current_stage": "done",
@@ -611,6 +692,7 @@ def _run_unlocked(args: argparse.Namespace) -> Path:
                 "output_file": str(result_path),
                 "chat_model": args.chat_model,
                 "embedding_model": args.embedding_model,
+                "registry_status": status["registry"]["status"],
                 "completed_at": status["completed_at"],
             }},
         )

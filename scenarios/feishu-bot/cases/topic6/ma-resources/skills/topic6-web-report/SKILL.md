@@ -10,6 +10,8 @@ description: "Generate and publish a BlueFocus weekly or monthly social-hotspot 
 
 > **与相似 skill 分工（Ada 接入补充）**：本 skill 仅负责 Topic6 热点报告的**网页版 HTML 生成与发布（Phase G）**，输入是已定稿的报告内容；`blueai-hotspot-weekly-skill`（社媒舆论周报原始数据处理）与本 skill 无调用关系、不同 Topic；`Export_to_Feishu` 负责飞书文档发布（Phase F），本 skill 负责独立 HTML 站点发布，二者输出格式不同、阶段不同，不互相替代。
 
+> **Topic6 Phase G 固定入口**：输入是 Phase F 合并报告 Markdown 时，必须用 `scripts/md2source.py <report.md> <source.json>` 确定性生成 source.json（链接→`block.links`、`[配图：待补充]` 跳过、案例 `链接：` 并入原始热点、热度列去"分"），禁止手工拼 source.json；Workflow 第 3 步的"转换"即由该脚本完成。营销观察案例统一渲染为左文右图卡片（`docx-grid-block`）：配图由 `scripts/fetch_case_images.py` 从 HC3 定稿飞书文档下载（`案例 N：` 标题后的首张图片 → `case-N.*`），经 `md2source.py --case-images <dir>` 挂载；缺图案例渲染"配图待补充"占位，非阻断。下方 Workflow 第 4 步"取不到图就停"对 Topic6 不适用。
+
 Create a self-contained HTML hotspot report from this template. Keep the retained source directory unchanged; always work on a copy.
 
 ## Workflow

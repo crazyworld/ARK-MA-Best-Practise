@@ -1,0 +1,2208 @@
+[
+  {
+    "className": "block docx-quote_container-block",
+    "id": "1",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "数据范围：微博、知乎、抖音、B站\n数据周期：W43（2026-10-19 ~ 2026-10-25）\n数据口径：基于全量 3771 条热搜，其中营销可用 1836 条（48.7%），五维标注仅覆盖该可用子集\n数据限制：上游数据中微博「热点描述」字段 100% 缺失、抖音 88.6% 缺失，平台解读以热搜标题与传播数据为依据",
+    "index": 0
+  },
+  {
+    "className": "block docx-heading1-block",
+    "id": "2",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "一、行业及热门话题",
+    "index": 1
+  },
+  {
+    "className": "block docx-text-block",
+    "id": "3",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "行业洞察：",
+    "index": 2
+  },
+  {
+    "className": "block docx-bullet-block",
+    "id": "4",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "上周营销可用热搜 1836 条，共覆盖 26 个行业，TOP3 行业（影视综艺+游戏+体育赛事）热点数量合计 697 条次，占行业条次（1776）的 39.2%，行业热搜数量较多；",
+    "index": 3
+  },
+  {
+    "className": "block docx-bullet-block",
+    "id": "5",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "「汽车出行」热点数量排名第7，但行业热度值达 80.3 分（TOP10 行业首位），主要由问界M9神木碰撞起火争议、张雪机车赛事获奖与水上漂吉尼斯纪录刷新相关动态引发，行业话题讨论较热；",
+    "index": 4
+  },
+  {
+    "className": "block docx-bullet-block",
+    "id": "6",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "与上期相比，本期为该系列首次归档，暂无上期数据可比。",
+    "index": 5
+  },
+  {
+    "className": "block docx-table-block",
+    "id": "7",
+    "images": [],
+    "links": [],
+    "tables": [
+      [
+        [
+          "TOP10行业",
+          "热点总计",
+          "热度值",
+          "主要驱动话题"
+        ],
+        [
+          "影视综艺",
+          "302",
+          "77.0",
+          "《小城良方》开播宣传与热度口碑\n《嫁金钗》播出宣传与剧情热度\n《尚公主》开播及宣传反响"
+        ],
+        [
+          "游戏",
+          "199",
+          "77.0",
+          "S16全球总决赛\n2026王者荣耀共创之夜\n《原神》7.2版本前瞻及PV发布"
+        ],
+        [
+          "体育赛事",
+          "196",
+          "77.0",
+          "S16全球总决赛\n乒乓球亚锦赛赛果及讨论\n张雪机车刷新水上漂吉尼斯纪录"
+        ],
+        [
+          "科技/AI产业",
+          "150",
+          "77.7",
+          "iPhone Duo发售及口碑市场反应\n马斯克承诺向美国儿童赠SpaceX股票\n宇树H2-X机器人发布与演示"
+        ],
+        [
+          "服饰鞋包",
+          "147",
+          "78.4",
+          "VOGUE盛典红毯阵容造型与花絮\n2026维密大秀洛杉矶举行\n迪丽热巴VOGUE盛典穿祖海高定引争议"
+        ],
+        [
+          "数码3C",
+          "120",
+          "80.1",
+          "iPhone Duo发售及口碑市场反应\n小天才手表封闭社交争议\n京东11.11促销与明星合作"
+        ],
+        [
+          "汽车出行",
+          "107",
+          "80.3",
+          "问界M9神木碰撞起火及争议\n张雪机车WSBK赛季斩获双奖项\n张雪机车刷新水上漂吉尼斯纪录"
+        ],
+        [
+          "音乐",
+          "94",
+          "75.0",
+          "肖战演唱会及二开无退票规则\n【英雄联盟】K/DA官方MV - “FIRESTARTER（燃）”正式上线\n王嘉尔上海演唱会两天连唱"
+        ],
+        [
+          "医疗健康",
+          "85",
+          "79.3",
+          "offer8医学季播出及诊疗争议\n国家癌症中心公布癌症发病排名\n京东11.11促销与明星合作"
+        ],
+        [
+          "食品零食",
+          "72",
+          "77.0",
+          "麻六记与阿宽食品财务往来及回应\n山姆牡蛎精胶囊召回及品质争议\n贾冰揭秘田嘉瑞版红烧排骨"
+        ]
+      ]
+    ],
+    "text": "",
+    "index": 6
+  },
+  {
+    "className": "block docx-heading1-block",
+    "id": "8",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "二、营销节点",
+    "index": 7
+  },
+  {
+    "className": "block docx-heading2-block",
+    "id": "9",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "1.1 上周节点",
+    "index": 8
+  },
+  {
+    "className": "block docx-bullet-block",
+    "id": "10",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "上周共命中 2 个已过节点（重阳节 10-18、霜降 10-23），关联可用热搜 2 条；节点营销素材整体偏少，C3 节点识别在窗口期内的命中率仅 0.11%",
+    "index": 9
+  },
+  {
+    "className": "block docx-bullet-block",
+    "id": "11",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "**霜降**无品牌主动营销动作介入，属于内容型热点，网民在社媒上的讨论集中于霜降时节健康防护注意事项，关联医疗健康品类。",
+    "index": 10
+  },
+  {
+    "className": "block docx-bullet-block",
+    "id": "12",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "**重阳节**由文旅类账号以「龙亭菊海」实景内容承接，属借节令做目的地种草，未见品牌定制动作，关联文旅酒店品类。",
+    "index": 11
+  },
+  {
+    "className": "block docx-bullet-block",
+    "id": "13",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "**万圣节**（10-31）已有 1 条提前讨论热搜（热度 44.5 分），尚处社媒预热期，见 1.2 本周节点预告。",
+    "index": 12
+  },
+  {
+    "className": "block docx-table-block",
+    "id": "14",
+    "images": [],
+    "links": [
+      {
+        "text": "霜降时节注意三防五不冻",
+        "href": "https://s.weibo.com/weibo?q=%E9%9C%9C%E9%99%8D%E6%97%B6%E8%8A%82%E6%B3%A8%E6%84%8F%E4%B8%89%E9%98%B2%E4%BA%94%E4%B8%8D%E5%86%BB"
+      },
+      {
+        "text": "龙亭菊海一眼梦回大宋",
+        "href": "https://www.douyin.com/"
+      }
+    ],
+    "tables": [
+      [
+        [
+          "节点",
+          "热点总计",
+          "热度值",
+          "涉及品牌IP",
+          "涉及品类",
+          "具体热搜"
+        ],
+        [
+          "霜降",
+          "1",
+          "77.5 分",
+          "—",
+          "医疗健康",
+          "霜降时节注意三防五不冻 (微博)"
+        ],
+        [
+          "重阳节",
+          "1",
+          "45.4 分",
+          "—",
+          "文旅酒店",
+          "龙亭菊海一眼梦回大宋 (抖音)"
+        ]
+      ]
+    ],
+    "text": "",
+    "index": 13
+  },
+  {
+    "className": "block docx-heading2-block",
+    "id": "15",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "1.2 本周节点预告",
+    "index": 14
+  },
+  {
+    "className": "block docx-text-block",
+    "id": "16",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "6个节点覆盖4/7天，其中1个长筹备节点（万圣节），需提前启动准备，剩余5个均为短周期节点，整体筹备负荷相对可控。另外，万圣节还有4天，已有1条提前讨论热搜，热度44.5分，社媒端预热信号已经出现。",
+    "index": 15
+  },
+  {
+    "className": "block docx-table-block",
+    "id": "17",
+    "images": [],
+    "links": [],
+    "tables": [
+      [
+        [
+          "节点日期",
+          "节点名称",
+          "节点类型",
+          "品类机会"
+        ],
+        [
+          "2026-10-27",
+          "国际熊猫日",
+          "小众节点",
+          "适配公益、环保、亲子、文旅领域，可产出治愈萌系风格内容"
+        ],
+        [
+          "2026-10-28",
+          "世界动画日",
+          "小众节点",
+          "适配文创、影视、二次元、潮玩领域，可产出怀旧、创意二创风格内容"
+        ],
+        [
+          "2026-10-28",
+          "世界男性健康日",
+          "小众节点",
+          "适配医疗健康、运动健身、男士消费领域，可产出健康科普、人文关怀风格内容"
+        ],
+        [
+          "2026-10-31",
+          "万圣节",
+          "大众节日",
+          "适配彩妆、服饰、餐饮、文旅、潮玩领域，可产出搞怪互动、沉浸式体验风格内容"
+        ],
+        [
+          "2026-10-31",
+          "世界城市日",
+          "小众节点",
+          "适配文旅、商业地产、城市服务、影像领域，可产出纪实、生活场景风格内容"
+        ],
+        [
+          "2026-11-01",
+          "世界流感日",
+          "小众节点",
+          "适配医疗健康、家居消杀、防护用品领域，可产出健康科普、实用提示风格内容"
+        ]
+      ]
+    ],
+    "text": "",
+    "index": 16
+  },
+  {
+    "className": "block docx-heading1-block",
+    "id": "18",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "三、平台新鲜事",
+    "index": 17
+  },
+  {
+    "className": "block docx-heading3-block",
+    "id": "19",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "微博",
+    "index": 18
+  },
+  {
+    "className": "block docx-text-block",
+    "id": "20",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "热门事件 TOP 5",
+    "index": 19
+  },
+  {
+    "className": "block docx-text-block",
+    "id": "21",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "公众对iPhone Duo的讨论集中在订单变动、应用适配及实测表现，可作为数码3C品类消费情绪参考。问界M9碰撞起火相关讨论涉事故数据争议，新能源汽车品类可留意社媒讨论动向。",
+    "index": 20
+  },
+  {
+    "className": "block docx-table-block",
+    "id": "22",
+    "images": [],
+    "links": [
+      {
+        "text": "iG全球总决赛首发名单",
+        "href": "https://s.weibo.com/weibo?q=iG%E5%85%A8%E7%90%83%E6%80%BB%E5%86%B3%E8%B5%9B%E9%A6%96%E5%8F%91%E5%90%8D%E5%8D%95"
+      },
+      {
+        "text": "iG抽到HLE",
+        "href": "https://s.weibo.com/weibo?q=iG%E6%8A%BD%E5%88%B0HLE"
+      },
+      {
+        "text": "TES与AL多人缺席S16",
+        "href": "https://s.weibo.com/weibo?q=TES%E4%B8%8EAL%E5%A4%9A%E4%BA%BA%E7%BC%BA%E5%B8%ADS16"
+      },
+      {
+        "text": "iPhoneDuo商家近百万元订单遭压价",
+        "href": "https://s.weibo.com/weibo?q=iPhoneDuo%E5%95%86%E5%AE%B6%E8%BF%91%E7%99%BE%E4%B8%87%E5%85%83%E8%AE%A2%E5%8D%95%E9%81%AD%E5%8E%8B%E4%BB%B7"
+      },
+      {
+        "text": "微信适配iPhoneDuo版本",
+        "href": "https://s.weibo.com/weibo?q=%E5%BE%AE%E4%BF%A1%E9%80%82%E9%85%8DiPhoneDuo%E7%89%88%E6%9C%AC"
+      },
+      {
+        "text": "影视飓风上手iPhoneDuo",
+        "href": "https://s.weibo.com/weibo?q=%E5%BD%B1%E8%A7%86%E9%A3%93%E9%A3%8E%E4%B8%8A%E6%89%8BiPhoneDuo"
+      },
+      {
+        "text": "小城良方辟谣刘铮亮涂美甲",
+        "href": "https://s.weibo.com/weibo?q=%E5%B0%8F%E5%9F%8E%E8%89%AF%E6%96%B9%E8%BE%9F%E8%B0%A3%E5%88%98%E9%93%AE%E4%BA%AE%E6%B6%82%E7%BE%8E%E7%94%B2"
+      },
+      {
+        "text": "小城良方开播口碑",
+        "href": "https://s.weibo.com/weibo?q=%E5%B0%8F%E5%9F%8E%E8%89%AF%E6%96%B9%E5%BC%80%E6%92%AD%E5%8F%A3%E7%A2%91"
+      },
+      {
+        "text": "小城良方 剧情硬伤",
+        "href": "https://s.weibo.com/weibo?q=%E5%B0%8F%E5%9F%8E%E8%89%AF%E6%96%B9+%E5%89%A7%E6%83%85%E7%A1%AC%E4%BC%A4"
+      },
+      {
+        "text": "VOGUE合影",
+        "href": "https://s.weibo.com/weibo?q=VOGUE%E5%90%88%E5%BD%B1"
+      },
+      {
+        "text": "VOGUE阵容官宣",
+        "href": "https://s.weibo.com/weibo?q=VOGUE%E9%98%B5%E5%AE%B9%E5%AE%98%E5%AE%A3"
+      },
+      {
+        "text": "VOGUE明星出图",
+        "href": "https://s.weibo.com/weibo?q=VOGUE%E6%98%8E%E6%98%9F%E5%87%BA%E5%9B%BE"
+      },
+      {
+        "text": "问界起火",
+        "href": "https://s.weibo.com/weibo?q=%E9%97%AE%E7%95%8C%E8%B5%B7%E7%81%AB"
+      },
+      {
+        "text": "问界事故车速数据为何有差异",
+        "href": "https://s.weibo.com/weibo?q=%E9%97%AE%E7%95%8C%E4%BA%8B%E6%95%85%E8%BD%A6%E9%80%9F%E6%95%B0%E6%8D%AE%E4%B8%BA%E4%BD%95%E6%9C%89%E5%B7%AE%E5%BC%82"
+      },
+      {
+        "text": "问界M9事故三连环站不住脚",
+        "href": "https://s.weibo.com/weibo?q=%E9%97%AE%E7%95%8CM9%E4%BA%8B%E6%95%85%E4%B8%89%E8%BF%9E%E7%8E%AF%E7%AB%99%E4%B8%8D%E4%BD%8F%E8%84%9A"
+      }
+    ],
+    "tables": [
+      [
+        [
+          "排名",
+          "事件名称",
+          "行业",
+          "热点总计",
+          "热度值",
+          "具体热搜"
+        ],
+        [
+          "1",
+          "S16全球总决赛",
+          "游戏、体育赛事",
+          "28",
+          "100.0",
+          "iG全球总决赛首发名单\niG抽到HLE\nTES与AL多人缺席S16"
+        ],
+        [
+          "2",
+          "iPhone Duo发售及口碑市场反应",
+          "数码3C",
+          "27",
+          "100.0",
+          "iPhoneDuo商家近百万元订单遭压价\n微信适配iPhoneDuo版本\n影视飓风上手iPhoneDuo"
+        ],
+        [
+          "3",
+          "《小城良方》开播宣传与热度口碑",
+          "影视综艺",
+          "26",
+          "100.0",
+          "小城良方辟谣刘铮亮涂美甲\n小城良方开播口碑\n小城良方 剧情硬伤"
+        ],
+        [
+          "4",
+          "VOGUE盛典红毯阵容造型与花絮",
+          "服饰鞋包",
+          "18",
+          "100.0",
+          "VOGUE合影\nVOGUE阵容官宣\nVOGUE明星出图"
+        ],
+        [
+          "5",
+          "问界M9神木碰撞起火及争议",
+          "汽车出行",
+          "14",
+          "100.0",
+          "问界起火\n问界事故车速数据为何有差异\n问界M9事故三连环站不住脚"
+        ]
+      ]
+    ],
+    "text": "",
+    "index": 21
+  },
+  {
+    "className": "block docx-text-block",
+    "id": "23",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "平台热点词 TOP 3",
+    "index": 22
+  },
+  {
+    "className": "block docx-table-block",
+    "id": "24",
+    "images": [],
+    "links": [
+      {
+        "text": "iPhoneDuo到手发现华为更香了",
+        "href": "https://s.weibo.com/weibo?q=iPhoneDuo%E5%88%B0%E6%89%8B%E5%8F%91%E7%8E%B0%E5%8D%8E%E4%B8%BA%E6%9B%B4%E9%A6%99%E4%BA%86"
+      },
+      {
+        "text": "iPhoneDuo 交互逻辑",
+        "href": "https://s.weibo.com/weibo?q=iPhoneDuo+%E4%BA%A4%E4%BA%92%E9%80%BB%E8%BE%91"
+      },
+      {
+        "text": "第一批排到iPhoneDuo的人后悔了吗",
+        "href": "https://s.weibo.com/weibo?q=%E7%AC%AC%E4%B8%80%E6%89%B9%E6%8E%92%E5%88%B0iPhoneDuo%E7%9A%84%E4%BA%BA%E5%90%8E%E6%82%94%E4%BA%86%E5%90%97"
+      },
+      {
+        "text": "京东AI玩惊喜日买3C数码低至0元",
+        "href": "https://s.weibo.com/weibo?q=%E4%BA%AC%E4%B8%9CAI%E7%8E%A9%E6%83%8A%E5%96%9C%E6%97%A5%E4%B9%B03C%E6%95%B0%E7%A0%81%E4%BD%8E%E8%87%B30%E5%85%83"
+      },
+      {
+        "text": "京东11.11多买多返最高返2000元",
+        "href": "https://s.weibo.com/weibo?q=%E4%BA%AC%E4%B8%9C11.11%E5%A4%9A%E4%B9%B0%E5%A4%9A%E8%BF%94%E6%9C%80%E9%AB%98%E8%BF%942000%E5%85%83"
+      },
+      {
+        "text": "上京东买家电家居折上7折",
+        "href": "https://s.weibo.com/weibo?q=%E4%B8%8A%E4%BA%AC%E4%B8%9C%E4%B9%B0%E5%AE%B6%E7%94%B5%E5%AE%B6%E5%B1%85%E6%8A%98%E4%B8%8A7%E6%8A%98"
+      },
+      {
+        "text": "今晚8点上淘宝双11开卖",
+        "href": "https://s.weibo.com/weibo?q=%E4%BB%8A%E6%99%9A8%E7%82%B9%E4%B8%8A%E6%B7%98%E5%AE%9D%E5%8F%8C11%E5%BC%80%E5%8D%96"
+      },
+      {
+        "text": "双11上淘宝王者好物加倍值得",
+        "href": "https://s.weibo.com/weibo?q=%E5%8F%8C11%E4%B8%8A%E6%B7%98%E5%AE%9D%E7%8E%8B%E8%80%85%E5%A5%BD%E7%89%A9%E5%8A%A0%E5%80%8D%E5%80%BC%E5%BE%97"
+      },
+      {
+        "text": "今晚8点双11买爆款上淘宝",
+        "href": "https://s.weibo.com/weibo?q=%E4%BB%8A%E6%99%9A8%E7%82%B9%E5%8F%8C11%E4%B9%B0%E7%88%86%E6%AC%BE%E4%B8%8A%E6%B7%98%E5%AE%9D"
+      }
+    ],
+    "tables": [
+      [
+        [
+          "平台热点词",
+          "热度值",
+          "具体热搜",
+          "适配领域",
+          "借势方向"
+        ],
+        [
+          "iPhoneDuo",
+          "100.0",
+          "iPhoneDuo到手发现华为更香了\niPhoneDuo 交互逻辑\n第一批排到iPhoneDuo的人后悔了吗",
+          "数码3C、消费电子、科技互联网",
+          "与数码产品消费决策场景关联性较强，可围绕新品实测、使用体验、选购对比等方向发起话题讨论、产出测评内容，适配微博内容生态"
+        ],
+        [
+          "京东",
+          "98.6",
+          "京东AI玩惊喜日买3C数码低至0元\n京东11.11多买多返最高返2000元\n上京东买家电家居折上7折",
+          "全品类电商、3C数码、家电家居",
+          "与大促消费场景关联性较强，可结合促销规则、品类优惠信息产出导购攻略、互动玩法类内容，契合微博用户讨论偏好"
+        ],
+        [
+          "双11",
+          "94.7",
+          "今晚8点上淘宝双11开卖\n双11上淘宝王者好物加倍值得\n今晚8点双11买爆款上淘宝",
+          "全品类零售、电商、大众消费品牌",
+          "与节点消费场景关联性强，可围绕优惠玩法、爆款清单、消费话题等方向发起互动、产出导购内容"
+        ]
+      ]
+    ],
+    "text": "",
+    "index": 23
+  },
+  {
+    "className": "block docx-heading3-block",
+    "id": "25",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "抖音",
+    "index": 24
+  },
+  {
+    "className": "block docx-text-block",
+    "id": "26",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "热门事件 TOP 5",
+    "index": 25
+  },
+  {
+    "className": "block docx-text-block",
+    "id": "27",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "公众对iPhone Duo的讨论集中在实测争议、外观设计吐槽，可作为数码3C品类消费反馈参考。",
+    "index": 26
+  },
+  {
+    "className": "block docx-table-block",
+    "id": "28",
+    "images": [],
+    "links": [
+      {
+        "text": "王一楠嫁金钗又横扫祠堂了",
+        "href": "https://www.douyin.com/search/%E7%8E%8B%E4%B8%80%E6%A5%A0%E5%AB%81%E9%87%91%E9%92%97%E5%8F%88%E6%A8%AA%E6%89%AB%E7%A5%A0%E5%A0%82%E4%BA%86"
+      },
+      {
+        "text": "嫁金钗外祖母真的无条件爱魏娆",
+        "href": "https://www.douyin.com/search/%E5%AB%81%E9%87%91%E9%92%97%E5%A4%96%E7%A5%96%E6%AF%8D%E7%9C%9F%E7%9A%84%E6%97%A0%E6%9D%A1%E4%BB%B6%E7%88%B1%E9%AD%8F%E5%A8%86"
+      },
+      {
+        "text": "跟随魏娆体会成长型爽文人生",
+        "href": "https://www.douyin.com/search/%E8%B7%9F%E9%9A%8F%E9%AD%8F%E5%A8%86%E4%BD%93%E4%BC%9A%E6%88%90%E9%95%BF%E5%9E%8B%E7%88%BD%E6%96%87%E4%BA%BA%E7%94%9F"
+      },
+      {
+        "text": "iPhone Duo防尘测试翻车",
+        "href": "https://www.douyin.com/search/iPhone+Duo%E9%98%B2%E5%B0%98%E6%B5%8B%E8%AF%95%E7%BF%BB%E8%BD%A6"
+      },
+      {
+        "text": "iPhone Duo成电子茅台",
+        "href": "https://www.douyin.com/search/iPhone+Duo%E6%88%90%E7%94%B5%E5%AD%90%E8%8C%85%E5%8F%B0"
+      },
+      {
+        "text": "iPhone Duo被吐槽“公摊面积”过大",
+        "href": "https://www.douyin.com/search/iPhone+Duo%E8%A2%AB%E5%90%90%E6%A7%BD%E2%80%9C%E5%85%AC%E6%91%8A%E9%9D%A2%E7%A7%AF%E2%80%9D%E8%BF%87%E5%A4%A7"
+      },
+      {
+        "text": "2026维密大秀",
+        "href": "https://www.douyin.com/search/2026%E7%BB%B4%E5%AF%86%E5%A4%A7%E7%A7%80"
+      },
+      {
+        "text": "奚梦瑶12张图晒维密工作花絮",
+        "href": "https://www.douyin.com/search/%E5%A5%9A%E6%A2%A6%E7%91%B612%E5%BC%A0%E5%9B%BE%E6%99%92%E7%BB%B4%E5%AF%86%E5%B7%A5%E4%BD%9C%E8%8A%B1%E7%B5%AE"
+      },
+      {
+        "text": "单依纯一跤摔到维密秀",
+        "href": "https://www.douyin.com/search/%E5%8D%95%E4%BE%9D%E7%BA%AF%E4%B8%80%E8%B7%A4%E6%91%94%E5%88%B0%E7%BB%B4%E5%AF%86%E7%A7%80"
+      },
+      {
+        "text": "刘亦菲连续三年VOGUE红毯压轴",
+        "href": "https://www.douyin.com/search/%E5%88%98%E4%BA%A6%E8%8F%B2%E8%BF%9E%E7%BB%AD%E4%B8%89%E5%B9%B4VOGUE%E7%BA%A2%E6%AF%AF%E5%8E%8B%E8%BD%B4"
+      },
+      {
+        "text": "迪丽热巴VOGUE盛典",
+        "href": "https://www.douyin.com/search/%E8%BF%AA%E4%B8%BD%E7%83%AD%E5%B7%B4VOGUE%E7%9B%9B%E5%85%B8"
+      },
+      {
+        "text": "锐评VOGUE红毯明星穿搭",
+        "href": "https://www.douyin.com/search/%E9%94%90%E8%AF%84VOGUE%E7%BA%A2%E6%AF%AF%E6%98%8E%E6%98%9F%E7%A9%BF%E6%90%AD"
+      },
+      {
+        "text": "亚锦赛女单决赛陈熠VS张本美和",
+        "href": "https://www.douyin.com/search/%E4%BA%9A%E9%94%A6%E8%B5%9B%E5%A5%B3%E5%8D%95%E5%86%B3%E8%B5%9B%E9%99%88%E7%86%A0VS%E5%BC%A0%E6%9C%AC%E7%BE%8E%E5%92%8C"
+      },
+      {
+        "text": "亚锦赛半决赛蒯曼vs张本美和",
+        "href": "https://www.douyin.com/search/%E4%BA%9A%E9%94%A6%E8%B5%9B%E5%8D%8A%E5%86%B3%E8%B5%9B%E8%92%AF%E6%9B%BCvs%E5%BC%A0%E6%9C%AC%E7%BE%8E%E5%92%8C"
+      },
+      {
+        "text": "亚锦赛国乒女团对阵日本",
+        "href": "https://www.douyin.com/search/%E4%BA%9A%E9%94%A6%E8%B5%9B%E5%9B%BD%E4%B9%92%E5%A5%B3%E5%9B%A2%E5%AF%B9%E9%98%B5%E6%97%A5%E6%9C%AC"
+      }
+    ],
+    "tables": [
+      [
+        [
+          "排名",
+          "事件名称",
+          "行业",
+          "热点总计",
+          "热度值",
+          "具体热搜"
+        ],
+        [
+          "1",
+          "《嫁金钗》播出宣传与剧情热度",
+          "影视综艺",
+          "11",
+          "66.5",
+          "王一楠嫁金钗又横扫祠堂了\n嫁金钗外祖母真的无条件爱魏娆\n跟随魏娆体会成长型爽文人生"
+        ],
+        [
+          "2",
+          "iPhone Duo发售及口碑市场反应",
+          "数码3C",
+          "7",
+          "73.1",
+          "iPhone Duo防尘测试翻车\niPhone Duo成电子茅台\niPhone Duo被吐槽“公摊面积”过大"
+        ],
+        [
+          "3",
+          "2026维密大秀洛杉矶举行",
+          "服饰鞋包",
+          "6",
+          "66.6",
+          "2026维密大秀\n奚梦瑶12张图晒维密工作花絮\n单依纯一跤摔到维密秀"
+        ],
+        [
+          "4",
+          "VOGUE盛典红毯阵容造型与花絮",
+          "服饰鞋包",
+          "6",
+          "46.4",
+          "刘亦菲连续三年VOGUE红毯压轴\n迪丽热巴VOGUE盛典\n锐评VOGUE红毯明星穿搭"
+        ],
+        [
+          "5",
+          "乒乓球亚锦赛赛果及讨论",
+          "体育赛事",
+          "5",
+          "99.3",
+          "亚锦赛女单决赛陈熠VS张本美和\n亚锦赛半决赛蒯曼vs张本美和\n亚锦赛国乒女团对阵日本"
+        ]
+      ]
+    ],
+    "text": "",
+    "index": 27
+  },
+  {
+    "className": "block docx-text-block",
+    "id": "29",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "平台热点词 TOP 3",
+    "index": 28
+  },
+  {
+    "className": "block docx-table-block",
+    "id": "30",
+    "images": [],
+    "links": [
+      {
+        "text": "饭店的暑假工，出餐口检查！#eLL面膜  #eLL水光面膜",
+        "href": "https://www.douyin.com/video/7698370385377208434"
+      },
+      {
+        "text": "饭店的暑假工，喊口号！",
+        "href": "https://www.douyin.com/video/7699116364452211110"
+      },
+      {
+        "text": "亚锦赛女单决赛陈熠VS张本美和",
+        "href": "https://www.douyin.com/search/%E4%BA%9A%E9%94%A6%E8%B5%9B%E5%A5%B3%E5%8D%95%E5%86%B3%E8%B5%9B%E9%99%88%E7%86%A0VS%E5%BC%A0%E6%9C%AC%E7%BE%8E%E5%92%8C"
+      },
+      {
+        "text": "亚锦赛半决赛蒯曼vs张本美和",
+        "href": "https://www.douyin.com/search/%E4%BA%9A%E9%94%A6%E8%B5%9B%E5%8D%8A%E5%86%B3%E8%B5%9B%E8%92%AF%E6%9B%BCvs%E5%BC%A0%E6%9C%AC%E7%BE%8E%E5%92%8C"
+      },
+      {
+        "text": "亚锦赛女单决赛陈熠VS张本美和",
+        "href": "https://www.douyin.com/search/%E4%BA%9A%E9%94%A6%E8%B5%9B%E5%A5%B3%E5%8D%95%E5%86%B3%E8%B5%9B%E9%99%88%E7%86%A0VS%E5%BC%A0%E6%9C%AC%E7%BE%8E%E5%92%8C"
+      },
+      {
+        "text": "亚锦赛半决赛蒯曼vs张本美和",
+        "href": "https://www.douyin.com/search/%E4%BA%9A%E9%94%A6%E8%B5%9B%E5%8D%8A%E5%86%B3%E8%B5%9B%E8%92%AF%E6%9B%BCvs%E5%BC%A0%E6%9C%AC%E7%BE%8E%E5%92%8C"
+      },
+      {
+        "text": "亚锦赛国乒女团对阵日本",
+        "href": "https://www.douyin.com/search/%E4%BA%9A%E9%94%A6%E8%B5%9B%E5%9B%BD%E4%B9%92%E5%A5%B3%E5%9B%A2%E5%AF%B9%E9%98%B5%E6%97%A5%E6%9C%AC"
+      }
+    ],
+    "tables": [
+      [
+        [
+          "平台热点词",
+          "热度值",
+          "具体热搜",
+          "适配领域",
+          "借势方向"
+        ],
+        [
+          "暑假工",
+          "100.0",
+          "饭店的暑假工，出餐口检查！#eLL面膜  #eLL水光面膜\n饭店的暑假工，喊口号！",
+          "快消品、餐饮、暑期服务、内容创作",
+          "与大众日常职场、消费场景关联性较强，可围绕暑期打工趣事创作剧情、搞笑挑战类短视频，适配抖音内容生态"
+        ],
+        [
+          "张本美和",
+          "99.3",
+          "亚锦赛女单决赛陈熠VS张本美和\n亚锦赛半决赛蒯曼vs张本美和",
+          "体育用品、运动户外、赛事垂类内容",
+          "与大众日常消费场景关联较弱，仅体育垂类可结合赛事产出相关讨论内容，非垂类不建议强行关联"
+        ],
+        [
+          "亚锦赛",
+          "93.8",
+          "亚锦赛女单决赛陈熠VS张本美和\n亚锦赛半决赛蒯曼vs张本美和\n亚锦赛国乒女团对阵日本",
+          "体育用品、运动户外、赛事运营",
+          "与大众日常消费场景关联较弱，仅体育垂类可结合赛事热点产出赛评、运动相关内容，非垂类不建议强行借势"
+        ]
+      ]
+    ],
+    "text": "",
+    "index": 29
+  },
+  {
+    "className": "block docx-heading3-block",
+    "id": "31",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "B站",
+    "index": 30
+  },
+  {
+    "className": "block docx-text-block",
+    "id": "32",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "热门事件 TOP 2",
+    "index": 31
+  },
+  {
+    "className": "block docx-text-block",
+    "id": "33",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "英雄联盟官方上线K/DA全新MV，可作为游戏、虚拟IP运营领域的用户内容反馈参考。",
+    "index": 32
+  },
+  {
+    "className": "block docx-table-block",
+    "id": "34",
+    "images": [],
+    "links": [
+      {
+        "text": "我的天呐！这S赛太让人痛苦了，突破历史的首日全败！观众做了什么坏事要熬夜看这种比赛？【1酱赛评S赛瑞士轮Day1】",
+        "href": "https://www.bilibili.com/video/av117493125353979/"
+      },
+      {
+        "text": "iG出征单曲《仁川共鸣》",
+        "href": "https://www.bilibili.com/video/av117471264638494/"
+      },
+      {
+        "text": "【極·出征】iG 2026全球总决赛出征片",
+        "href": "https://www.bilibili.com/video/av117472522935220/"
+      },
+      {
+        "text": "【英雄联盟】K/DA官方MV - “FIRESTARTER（燃）”正式上线",
+        "href": "https://www.bilibili.com/video/av117465090622706/"
+      },
+      {
+        "text": "K/DA最新单曲《FIRESTARTER》",
+        "href": "https://www.bilibili.com/video/av117465090624241/"
+      }
+    ],
+    "tables": [
+      [
+        [
+          "排名",
+          "事件名称",
+          "行业",
+          "热点总计",
+          "热度值",
+          "具体热搜"
+        ],
+        [
+          "1",
+          "S16全球总决赛",
+          "游戏",
+          "3",
+          "84.2",
+          "我的天呐！这S赛太让人痛苦了，突破历史的首日全败！观众做了什么坏事要熬夜看这种比赛？【1酱赛评S赛瑞士轮Day1】\niG出征单曲《仁川共鸣》\n【極·出征】iG 2026全球总决赛出征片"
+        ],
+        [
+          "2",
+          "【英雄联盟】K/DA官方MV - “FIRESTARTER（燃）”正式上线",
+          "游戏、音乐",
+          "2",
+          "82.1",
+          "【英雄联盟】K/DA官方MV - “FIRESTARTER（燃）”正式上线\nK/DA最新单曲《FIRESTARTER》"
+        ]
+      ]
+    ],
+    "text": "",
+    "index": 33
+  },
+  {
+    "className": "block docx-text-block",
+    "id": "35",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "平台热点词 TOP 3",
+    "index": 34
+  },
+  {
+    "className": "block docx-table-block",
+    "id": "36",
+    "images": [],
+    "links": [
+      {
+        "text": "“大肥鱼适合做女朋友吗？”",
+        "href": "https://www.bilibili.com/video/av117486045364444/"
+      },
+      {
+        "text": "新角色：大肥鱼",
+        "href": "https://www.bilibili.com/video/av117493544917579/"
+      },
+      {
+        "text": "什么是“鱼灾”？B站大肥鱼一周爆发始末全复盘【附安全养鱼指南】",
+        "href": "https://www.bilibili.com/video/av117489870770212/"
+      },
+      {
+        "text": "豆奶虫之殇【AI全民制作人】",
+        "href": "https://www.bilibili.com/video/av117473546471925/"
+      },
+      {
+        "text": "大难不死的男孩爱上纯血家族的女孩【AI全民制作人】",
+        "href": "https://www.bilibili.com/video/av117472019682726/"
+      },
+      {
+        "text": "里昂叔叔带你通关生化危机爆发夜【AI全民制作人】",
+        "href": "https://www.bilibili.com/video/av117464989964868/"
+      },
+      {
+        "text": "折1万次，会坏吗？iPhone Duo深度评测",
+        "href": "https://www.bilibili.com/video/av117478344627500/"
+      },
+      {
+        "text": "【何同学】能折！但代价呢？iPhone Duo首发体验",
+        "href": "https://www.bilibili.com/video/av117478629841817/"
+      }
+    ],
+    "tables": [
+      [
+        [
+          "平台热点词",
+          "热度值",
+          "具体热搜",
+          "适配领域",
+          "借势方向"
+        ],
+        [
+          "大肥鱼",
+          "100.0",
+          "“大肥鱼适合做女朋友吗？”\n新角色：大肥鱼\n什么是“鱼灾”？B站大肥鱼一周爆发始末全复盘【附安全养鱼指南】",
+          "二次元、内容创作、IP运营、可爱向快消",
+          "为B站站内二创类热点，与大众消费场景关联较弱，可结合IP进行鬼畜、混剪、深度解说类内容创作，非二次元垂类不建议强行关联"
+        ],
+        [
+          "AI全民制作人",
+          "97.7",
+          "豆奶虫之殇【AI全民制作人】\n大难不死的男孩爱上纯血家族的女孩【AI全民制作人】\n里昂叔叔带你通关生化危机爆发夜【AI全民制作人】",
+          "AI工具、内容创作、游戏、影视文娱",
+          "与内容创作场景关联性较强，可围绕AI二创、剧情改编等方向产出混剪、深度解析类内容，契合B站用户创作偏好"
+        ],
+        [
+          "iPhone Duo",
+          "91.1",
+          "折1万次，会坏吗？iPhone Duo深度评测\n【何同学】能折！但代价呢？iPhone Duo首发体验",
+          "数码3C、消费电子、科技测评",
+          "与消费电子选购场景关联性强，可围绕新品性能测试、使用体验等方向产出深度测评、技术解析类内容"
+        ]
+      ]
+    ],
+    "text": "",
+    "index": 35
+  },
+  {
+    "className": "block docx-heading3-block",
+    "id": "37",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "知乎",
+    "index": 36
+  },
+  {
+    "className": "block docx-text-block",
+    "id": "38",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "热门事件 TOP 5",
+    "index": 37
+  },
+  {
+    "className": "block docx-text-block",
+    "id": "39",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "公众对《原神》7.2版本前瞻的讨论集中在内容更新方向，可作为游戏、文娱领域IP内容运营参考。问界M9碰撞起火相关讨论涉事故数据争议，新能源汽车品类可留意舆情演化方向。公众对iPhone Duo的讨论集中在产品质量、应用适配问题，可作为数码3C品类消费反馈参考。",
+    "index": 38
+  },
+  {
+    "className": "block docx-table-block",
+    "id": "40",
+    "images": [],
+    "links": [
+      {
+        "text": "S16 全球总决赛瑞士轮首日 LPL 战队四战全败创联赛最差开局成绩，如何评价首日他们的表现？",
+        "href": "https://www.zhihu.com/question/2097190763675309990"
+      },
+      {
+        "text": "S16 瑞士轮首日 BLG 0:1 不敌 KOI，如何评价这场比赛？",
+        "href": "https://www.zhihu.com/question/2097161907279025390"
+      },
+      {
+        "text": "S16 瑞士轮首轮 TES 抽中强敌 HLE，临危受命的 369 能顶住压力吗？",
+        "href": "https://www.zhihu.com/question/2095394256655536817"
+      },
+      {
+        "text": "iPhone Duo 测评出炉，折叠 3000 次后，折痕明显加深，高负载下发热明显，还有哪些问题值得关注？",
+        "href": "https://www.zhihu.com/question/2096555342171563789"
+      },
+      {
+        "text": "如何评价 iPhone Duo 经拆机，纳米纹理表面并非玻璃而是纳米纹理膜（磨砂膜）？",
+        "href": "https://www.zhihu.com/question/2096744765073126686"
+      },
+      {
+        "text": "iPhone Duo 要开卖了微信等应用还没适配，为何会出现这样的错位？这会对购买意愿有多大影响？",
+        "href": "https://www.zhihu.com/question/2096569066114610825"
+      },
+      {
+        "text": "问界客服称「起火车辆 139.1km/h 车速」是后台数据，实际速度可能是多少？为何不公布碰撞瞬间速度？",
+        "href": "https://www.zhihu.com/question/2096266431193269713"
+      },
+      {
+        "text": "一问界 M9 撞击后爆燃，品牌初步核实为汽车超速撞击交通灯起火，否认电池爆燃、智驾撞击，哪些信息值得关注？",
+        "href": "https://www.zhihu.com/question/2096020660657059113"
+      },
+      {
+        "text": "问界称起火车辆速度为 139.1 km/h，部分网友质疑速度没有那么快，能仅凭视频分析出该车真实速度吗？",
+        "href": "https://www.zhihu.com/question/2096270477064757529"
+      },
+      {
+        "text": "如何评价 2026 年 10 月米哈游《原神》7.2 版本前瞻直播【坏灭肇始之时】？",
+        "href": "https://www.zhihu.com/question/2096896047893295237"
+      },
+      {
+        "text": "如何评价原神 7.2 版本前瞻特别节目《坏灭肇始之时》？",
+        "href": "https://www.zhihu.com/question/2097055022555084684"
+      },
+      {
+        "text": "如何评价《原神》7.2 版本「坏灭肇始之时」前瞻特别节目？",
+        "href": "https://www.zhihu.com/question/2096211412536369455"
+      },
+      {
+        "text": "如何看待《令人心动的 offer8》李子祺在节目里诊断用盲猜，称专博不临床，10 篇 SCI 被指为水刊凑数？",
+        "href": "https://www.zhihu.com/question/2096626576456507559"
+      },
+      {
+        "text": "如何评价《offer 第八季》出现医学生「盲猜诊断」「左右不分」的情况，真是因为学硕和专硕不一样吗？",
+        "href": "https://www.zhihu.com/question/2095599211068614093"
+      },
+      {
+        "text": "《offer 8》嘉宾称「专博期间不上临床」被质疑，福医大称其已完成 18 个月临床轮转，如何看待此事？",
+        "href": "https://www.zhihu.com/question/2096280893752960397"
+      }
+    ],
+    "tables": [
+      [
+        [
+          "排名",
+          "事件名称",
+          "行业",
+          "热点总计",
+          "热度值",
+          "具体热搜"
+        ],
+        [
+          "1",
+          "S16全球总决赛",
+          "体育赛事",
+          "11",
+          "89.0",
+          "S16 全球总决赛瑞士轮首日 LPL 战队四战全败创联赛最差开局成绩，如何评价首日他们的表现？\nS16 瑞士轮首日 BLG 0:1 不敌 KOI，如何评价这场比赛？\nS16 瑞士轮首轮 TES 抽中强敌 HLE，临危受命的 369 能顶住压力吗？"
+        ],
+        [
+          "2",
+          "iPhone Duo发售及口碑市场反应",
+          "数码3C",
+          "7",
+          "90.7",
+          "iPhone Duo 测评出炉，折叠 3000 次后，折痕明显加深，高负载下发热明显，还有哪些问题值得关注？\n如何评价 iPhone Duo 经拆机，纳米纹理表面并非玻璃而是纳米纹理膜（磨砂膜）？\niPhone Duo 要开卖了微信等应用还没适配，为何会出现这样的错位？这会对购买意愿有多大影响？"
+        ],
+        [
+          "3",
+          "问界M9神木碰撞起火及争议",
+          "汽车出行",
+          "5",
+          "92.5",
+          "问界客服称「起火车辆 139.1km/h 车速」是后台数据，实际速度可能是多少？为何不公布碰撞瞬间速度？\n一问界 M9 撞击后爆燃，品牌初步核实为汽车超速撞击交通灯起火，否认电池爆燃、智驾撞击，哪些信息值得关注？\n问界称起火车辆速度为 139.1 km/h，部分网友质疑速度没有那么快，能仅凭视频分析出该车真实速度吗？"
+        ],
+        [
+          "4",
+          "《原神》7.2版本前瞻及PV发布",
+          "游戏",
+          "4",
+          "96.6",
+          "如何评价 2026 年 10 月米哈游《原神》7.2 版本前瞻直播【坏灭肇始之时】？\n如何评价原神 7.2 版本前瞻特别节目《坏灭肇始之时》？\n如何评价《原神》7.2 版本「坏灭肇始之时」前瞻特别节目？"
+        ],
+        [
+          "5",
+          "offer8医学季播出及诊疗争议",
+          "影视综艺",
+          "4",
+          "85.8",
+          "如何看待《令人心动的 offer8》李子祺在节目里诊断用盲猜，称专博不临床，10 篇 SCI 被指为水刊凑数？\n如何评价《offer 第八季》出现医学生「盲猜诊断」「左右不分」的情况，真是因为学硕和专硕不一样吗？\n《offer 8》嘉宾称「专博期间不上临床」被质疑，福医大称其已完成 18 个月临床轮转，如何看待此事？"
+        ]
+      ]
+    ],
+    "text": "",
+    "index": 39
+  },
+  {
+    "className": "block docx-text-block",
+    "id": "41",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "平台热点词 TOP 3",
+    "index": 40
+  },
+  {
+    "className": "block docx-table-block",
+    "id": "42",
+    "images": [],
+    "links": [
+      {
+        "text": "如何看待 DeepSeek 开源的大规模云服务推理框架 DeepInfer ？",
+        "href": "https://www.zhihu.com/question/2095922064804636469"
+      },
+      {
+        "text": "DeepSeek 拟新融资 1000 亿元，腾讯、宁德时代出资最多，这会不会改写国内大模型的竞争格局？",
+        "href": "https://www.zhihu.com/question/2096713518582179306"
+      },
+      {
+        "text": "如何评价 SemiAnalysis 认为 DeepSeek 与华为已形成共生关系？",
+        "href": "https://www.zhihu.com/question/2096603053763846842"
+      },
+      {
+        "text": "问界客服称「起火车辆 139.1km/h 车速」是后台数据，实际速度可能是多少？为何不公布碰撞瞬间速度？",
+        "href": "https://www.zhihu.com/question/2096266431193269713"
+      },
+      {
+        "text": "曝问界海外车型计划采用「博世 inside」方案，是真的吗？这背后有哪些商业考量？",
+        "href": "https://www.zhihu.com/question/2095945448209098246"
+      },
+      {
+        "text": "问界称起火车辆速度为 139.1 km/h，部分网友质疑速度没有那么快，能仅凭视频分析出该车真实速度吗？",
+        "href": "https://www.zhihu.com/question/2096270477064757529"
+      },
+      {
+        "text": "过去引以为傲的技术能力被 AI 快速追上，是失落还是解脱？",
+        "href": "https://www.zhihu.com/question/2083279164409210139"
+      },
+      {
+        "text": "多款 3A 老游戏被 AI 光速反编译并移植网页端，将对游戏行业带来哪些冲击？",
+        "href": "https://www.zhihu.com/question/2094620721343481537"
+      },
+      {
+        "text": "澳洲一公司用 AI 假扮受害者接听诈骗电话以提前套取诈骗犯信息，这项技术值得在我国推广以解决诈骗问题吗？",
+        "href": "https://www.zhihu.com/question/2094749068610072751"
+      }
+    ],
+    "tables": [
+      [
+        [
+          "平台热点词",
+          "热度值",
+          "具体热搜",
+          "适配领域",
+          "借势方向"
+        ],
+        [
+          "DeepSeek",
+          "100.0",
+          "如何看待 DeepSeek 开源的大规模云服务推理框架 DeepInfer ？\nDeepSeek 拟新融资 1000 亿元，腾讯、宁德时代出资最多，这会不会改写国内大模型的竞争格局？\n如何评价 SemiAnalysis 认为 DeepSeek 与华为已形成共生关系？",
+          "AI科技、互联网、云计算、硬科技",
+          "与科技行业、B端服务场景关联性较强，可围绕技术开源、行业影响等方向产出专业问答、深度分析内容，契合知乎讨论氛围"
+        ],
+        [
+          "问界",
+          "80.6",
+          "问界客服称「起火车辆 139.1km/h 车速」是后台数据，实际速度可能是多少？为何不公布碰撞瞬间速度？\n曝问界海外车型计划采用「博世 inside」方案，是真的吗？这背后有哪些商业考量？\n问界称起火车辆速度为 139.1 km/h，部分网友质疑速度没有那么快，能仅凭视频分析出该车真实速度吗？",
+          "新能源汽车、汽车出行",
+          "风险话题，不建议借势"
+        ],
+        [
+          "AI",
+          "78.5",
+          "过去引以为傲的技术能力被 AI 快速追上，是失落还是解脱？\n多款 3A 老游戏被 AI 光速反编译并移植网页端，将对游戏行业带来哪些冲击？\n澳洲一公司用 AI 假扮受害者接听诈骗电话以提前套取诈骗犯信息，这项技术值得在我国推广以解决诈骗问题吗？",
+          "AI科技、互联网、全行业数字化服务",
+          "与科技发展、职场效率等场景关联性较强，可围绕技术应用、行业影响等方向产出经验分享、深度讨论内容"
+        ]
+      ]
+    ],
+    "text": "",
+    "index": 41
+  },
+  {
+    "className": "block docx-heading1-block",
+    "id": "43",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "四、营销发现",
+    "index": 42
+  },
+  {
+    "className": "block docx-heading3-block",
+    "id": "44",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "合作动态",
+    "index": 43
+  },
+  {
+    "className": "block docx-text-block",
+    "id": "45",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "上周合作动作以明星/IP合作、新代言官宣为主，仅1起合作负面事件。",
+    "index": 44
+  },
+  {
+    "className": "block docx-heading3-block",
+    "id": "46",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "明星/IP合作",
+    "index": 45
+  },
+  {
+    "className": "block docx-text-block",
+    "id": "47",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "本期合作覆盖多领域，形式包含活动联动、内容共创、赛事合作等。",
+    "index": 46
+  },
+  {
+    "className": "block docx-table-block",
+    "id": "48",
+    "images": [],
+    "links": [
+      {
+        "text": "沈腾马丽新合作明天京东上线",
+        "href": "https://s.weibo.com/weibo?q=%E6%B2%88%E8%85%BE%E9%A9%AC%E4%B8%BD%E6%96%B0%E5%90%88%E4%BD%9C%E6%98%8E%E5%A4%A9%E4%BA%AC%E4%B8%9C%E4%B8%8A%E7%BA%BF"
+      },
+      {
+        "text": "VOGUE阵容官宣",
+        "href": "https://s.weibo.com/weibo?q=VOGUE%E9%98%B5%E5%AE%B9%E5%AE%98%E5%AE%A3"
+      },
+      {
+        "text": "李汶翰方太智慧厨房封神之战",
+        "href": "https://s.weibo.com/weibo?q=%E6%9D%8E%E6%B1%B6%E7%BF%B0%E6%96%B9%E5%A4%AA%E6%99%BA%E6%85%A7%E5%8E%A8%E6%88%BF%E5%B0%81%E7%A5%9E%E4%B9%8B%E6%88%98"
+      },
+      {
+        "text": "刘雯第十次走维密秀",
+        "href": "https://s.weibo.com/weibo?q=%E5%88%98%E9%9B%AF%E7%AC%AC%E5%8D%81%E6%AC%A1%E8%B5%B0%E7%BB%B4%E5%AF%86%E7%A7%80"
+      },
+      {
+        "text": "宋佳 志愿军女配",
+        "href": "https://s.weibo.com/weibo?q=%E5%AE%8B%E4%BD%B3+%E5%BF%97%E6%84%BF%E5%86%9B%E5%A5%B3%E9%85%8D"
+      },
+      {
+        "text": "樊振东现场解说MLB",
+        "href": "https://s.weibo.com/weibo?q=%E6%A8%8A%E6%8C%AF%E4%B8%9C%E7%8E%B0%E5%9C%BA%E8%A7%A3%E8%AF%B4MLB"
+      },
+      {
+        "text": "VCTCN八支合作队伍官宣",
+        "href": "https://s.weibo.com/weibo?q=VCTCN%E5%85%AB%E6%94%AF%E5%90%88%E4%BD%9C%E9%98%9F%E4%BC%8D%E5%AE%98%E5%AE%A3"
+      },
+      {
+        "text": "孟子义尚公主剧宣排面",
+        "href": "https://s.weibo.com/weibo?q=%E5%AD%9F%E5%AD%90%E4%B9%89%E5%B0%9A%E5%85%AC%E4%B8%BB%E5%89%A7%E5%AE%A3%E6%8E%92%E9%9D%A2"
+      },
+      {
+        "text": "宋雨琦演唱会嘉宾是李晨",
+        "href": "https://s.weibo.com/weibo?q=%E5%AE%8B%E9%9B%A8%E7%90%A6%E6%BC%94%E5%94%B1%E4%BC%9A%E5%98%89%E5%AE%BE%E6%98%AF%E6%9D%8E%E6%99%A8"
+      },
+      {
+        "text": "BLG不夺冠雷鸟退全款",
+        "href": "https://s.weibo.com/weibo?q=BLG%E4%B8%8D%E5%A4%BA%E5%86%A0%E9%9B%B7%E9%B8%9F%E9%80%80%E5%85%A8%E6%AC%BE"
+      }
+    ],
+    "tables": [
+      [
+        [
+          "事件",
+          "代表热搜",
+          "行业",
+          "热度分",
+          "备注"
+        ],
+        [
+          "京东11.11促销与明星合作",
+          "沈腾马丽新合作明天京东上线",
+          "影视综艺",
+          "100.0",
+          "合作建立"
+        ],
+        [
+          "VOGUE盛典红毯阵容官宣",
+          "VOGUE阵容官宣",
+          "服饰鞋包",
+          "100.0",
+          "合作建立"
+        ],
+        [
+          "李汶翰方太智慧厨房合作",
+          "李汶翰方太智慧厨房封神之战",
+          "家电",
+          "98.6",
+          "合作履行"
+        ],
+        [
+          "2026维密大秀",
+          "刘雯第十次走维密秀",
+          "服饰鞋包",
+          "91.8",
+          "合作履行"
+        ],
+        [
+          "宋佳出演《志愿军》女配",
+          "宋佳 志愿军女配",
+          "影视综艺",
+          "90.1",
+          "合作建立"
+        ],
+        [
+          "樊振东解说MLB",
+          "樊振东现场解说MLB",
+          "体育赛事",
+          "89.7",
+          "合作履行"
+        ],
+        [
+          "VCTCN合作队伍官宣",
+          "VCTCN八支合作队伍官宣",
+          "体育赛事",
+          "89.2",
+          "合作建立"
+        ],
+        [
+          "《尚公主》剧宣",
+          "孟子义尚公主剧宣排面",
+          "影视综艺",
+          "86.1",
+          "合作履行"
+        ],
+        [
+          "宋雨琦演唱会嘉宾合作",
+          "宋雨琦演唱会嘉宾是李晨",
+          "音乐",
+          "86.1",
+          "合作建立"
+        ],
+        [
+          "S16雷鸟×BLG合作",
+          "BLG不夺冠雷鸟退全款",
+          "家电/体育赛事",
+          "85.6",
+          "合作履行"
+        ]
+      ]
+    ],
+    "text": "",
+    "index": 47
+  },
+  {
+    "className": "block docx-heading3-block",
+    "id": "49",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "新代言官宣",
+    "index": 48
+  },
+  {
+    "className": "block docx-text-block",
+    "id": "50",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "本期代言覆盖家清、个护等多品类，迪丽热巴同期新增2项代言合作。",
+    "index": 49
+  },
+  {
+    "className": "block docx-table-block",
+    "id": "51",
+    "images": [],
+    "links": [
+      {
+        "text": "檀健次可心柔全球品牌代言人",
+        "href": "https://s.weibo.com/weibo?q=%E6%AA%80%E5%81%A5%E6%AC%A1%E5%8F%AF%E5%BF%83%E6%9F%94%E5%85%A8%E7%90%83%E5%93%81%E7%89%8C%E4%BB%A3%E8%A8%80%E4%BA%BA"
+      },
+      {
+        "text": "迪丽热巴代言阿道夫",
+        "href": "https://s.weibo.com/weibo?q=%E8%BF%AA%E4%B8%BD%E7%83%AD%E5%B7%B4%E4%BB%A3%E8%A8%80%E9%98%BF%E9%81%93%E5%A4%AB"
+      },
+      {
+        "text": "FILA官宣宋威龙",
+        "href": "https://s.weibo.com/weibo?q=FILA%E5%AE%98%E5%AE%A3%E5%AE%8B%E5%A8%81%E9%BE%99"
+      },
+      {
+        "text": "迪丽热巴瑞士莲全新品牌代言人",
+        "href": "https://s.weibo.com/weibo?q=%E8%BF%AA%E4%B8%BD%E7%83%AD%E5%B7%B4%E7%91%9E%E5%A3%AB%E8%8E%B2%E5%85%A8%E6%96%B0%E5%93%81%E7%89%8C%E4%BB%A3%E8%A8%80%E4%BA%BA"
+      },
+      {
+        "text": "康师傅V田曦薇番茄面",
+        "href": "https://s.weibo.com/weibo?q=%E5%BA%B7%E5%B8%88%E5%82%85V%E7%94%B0%E6%9B%A6%E8%96%87%E7%95%AA%E8%8C%84%E9%9D%A2"
+      },
+      {
+        "text": "侯明昊雪中飞全球品牌代言人",
+        "href": "https://s.weibo.com/weibo?q=%E4%BE%AF%E6%98%8E%E6%98%8A%E9%9B%AA%E4%B8%AD%E9%A3%9E%E5%85%A8%E7%90%83%E5%93%81%E7%89%8C%E4%BB%A3%E8%A8%80%E4%BA%BA"
+      }
+    ],
+    "tables": [
+      [
+        [
+          "事件",
+          "代表热搜",
+          "行业",
+          "热度分",
+          "备注"
+        ],
+        [
+          "檀健次任可心柔全球代言人",
+          "檀健次可心柔全球品牌代言人",
+          "家清家护",
+          "100.0",
+          "合作建立"
+        ],
+        [
+          "迪丽热巴代言阿道夫",
+          "迪丽热巴代言阿道夫",
+          "个人护理",
+          "94.1",
+          "合作建立"
+        ],
+        [
+          "FILA官宣宋威龙代言",
+          "FILA官宣宋威龙",
+          "服饰鞋包",
+          "93.0",
+          "合作建立"
+        ],
+        [
+          "迪丽热巴代言瑞士莲",
+          "迪丽热巴瑞士莲全新品牌代言人",
+          "食品零食",
+          "92.2",
+          "合作建立"
+        ],
+        [
+          "田曦薇代言康师傅番茄面",
+          "康师傅V田曦薇番茄面",
+          "食品零食",
+          "91.0",
+          "合作建立"
+        ],
+        [
+          "侯明昊任雪中飞全球代言人",
+          "侯明昊雪中飞全球品牌代言人",
+          "服饰鞋包",
+          "90.1",
+          "合作建立"
+        ]
+      ]
+    ],
+    "text": "",
+    "index": 50
+  },
+  {
+    "className": "block docx-heading3-block",
+    "id": "52",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "合作破裂/负面",
+    "index": 51
+  },
+  {
+    "className": "block docx-text-block",
+    "id": "53",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "本期仅1起合作履行纠纷，涉及餐饮与食品零食领域。",
+    "index": 52
+  },
+  {
+    "className": "block docx-table-block",
+    "id": "54",
+    "images": [],
+    "links": [
+      {
+        "text": "麻六记位列阿宽食品第一大欠款方",
+        "href": "https://s.weibo.com/weibo?q=%E9%BA%BB%E5%85%AD%E8%AE%B0%E4%BD%8D%E5%88%97%E9%98%BF%E5%AE%BD%E9%A3%9F%E5%93%81%E7%AC%AC%E4%B8%80%E5%A4%A7%E6%AC%A0%E6%AC%BE%E6%96%B9"
+      }
+    ],
+    "tables": [
+      [
+        [
+          "事件",
+          "代表热搜",
+          "行业",
+          "热度分",
+          "备注"
+        ],
+        [
+          "麻六记与阿宽食品财务纠纷",
+          "麻六记位列阿宽食品第一大欠款方",
+          "餐饮连锁/食品零食",
+          "99.4",
+          "涉欠款纠纷"
+        ]
+      ]
+    ],
+    "text": "",
+    "index": 53
+  },
+  {
+    "className": "block docx-heading3-block",
+    "id": "55",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "舆情风险",
+    "index": 54
+  },
+  {
+    "className": "block docx-text-block",
+    "id": "56",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "上周舆情以品牌危机公关类为主，汽车、消费电子领域事件相对集中。",
+    "index": 55
+  },
+  {
+    "className": "block docx-heading3-block",
+    "id": "57",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "品牌危机公关",
+    "index": 56
+  },
+  {
+    "className": "block docx-table-block",
+    "id": "58",
+    "images": [],
+    "links": [
+      {
+        "text": "宝马员工争着离职挤崩系统",
+        "href": "https://s.weibo.com/weibo?q=%E5%AE%9D%E9%A9%AC%E5%91%98%E5%B7%A5%E4%BA%89%E7%9D%80%E7%A6%BB%E8%81%8C%E6%8C%A4%E5%B4%A9%E7%B3%BB%E7%BB%9F"
+      },
+      {
+        "text": "小天才手表回应「有意封闭平台利用孩子社交需求」，称能正常添加到联系人，能平息质疑吗？这对孩子影响多大？",
+        "href": "https://www.zhihu.com/question/2095810210455445682"
+      },
+      {
+        "text": "小天才手表回应封闭社交",
+        "href": "https://s.weibo.com/weibo?q=%E5%B0%8F%E5%A4%A9%E6%89%8D%E6%89%8B%E8%A1%A8%E5%9B%9E%E5%BA%94%E5%B0%81%E9%97%AD%E7%A4%BE%E4%BA%A4"
+      },
+      {
+        "text": "小天才手表封闭社交被质疑",
+        "href": "https://s.weibo.com/weibo?q=%E5%B0%8F%E5%A4%A9%E6%89%8D%E6%89%8B%E8%A1%A8%E5%B0%81%E9%97%AD%E7%A4%BE%E4%BA%A4%E8%A2%AB%E8%B4%A8%E7%96%91"
+      },
+      {
+        "text": "汇源集团发布严正声明，宣布和「汇源」品牌切割、推出新品牌咱家果源，具体怎么回事？会带来哪些市场影响？",
+        "href": "https://www.zhihu.com/question/2095447353687815341"
+      },
+      {
+        "text": "汇源集团与汇源品牌切割",
+        "href": "https://s.weibo.com/weibo?q=%E6%B1%87%E6%BA%90%E9%9B%86%E5%9B%A2%E4%B8%8E%E6%B1%87%E6%BA%90%E5%93%81%E7%89%8C%E5%88%87%E5%89%B2"
+      },
+      {
+        "text": "汇源集团不再生产汇源果汁",
+        "href": "https://s.weibo.com/weibo?q=%E6%B1%87%E6%BA%90%E9%9B%86%E5%9B%A2%E4%B8%8D%E5%86%8D%E7%94%9F%E4%BA%A7%E6%B1%87%E6%BA%90%E6%9E%9C%E6%B1%81"
+      },
+      {
+        "text": "赛车星冰乐向尊界汽车道歉",
+        "href": "https://s.weibo.com/weibo?q=%E8%B5%9B%E8%BD%A6%E6%98%9F%E5%86%B0%E4%B9%90%E5%90%91%E5%B0%8A%E7%95%8C%E6%B1%BD%E8%BD%A6%E9%81%93%E6%AD%89"
+      },
+      {
+        "text": "如何评价博主「赛车星冰乐」涉嫌诋毁嘲讽尊界 S800，公开向尊界汽车道歉？具体发生了什么？",
+        "href": "https://www.zhihu.com/question/2097007117353883602"
+      },
+      {
+        "text": "韩路爆料汽车之家白嫖",
+        "href": "https://s.weibo.com/weibo?q=%E9%9F%A9%E8%B7%AF%E7%88%86%E6%96%99%E6%B1%BD%E8%BD%A6%E4%B9%8B%E5%AE%B6%E7%99%BD%E5%AB%96"
+      },
+      {
+        "text": "汽车之家回应韩路",
+        "href": "https://s.weibo.com/weibo?q=%E6%B1%BD%E8%BD%A6%E4%B9%8B%E5%AE%B6%E5%9B%9E%E5%BA%94%E9%9F%A9%E8%B7%AF"
+      },
+      {
+        "text": "麻六记位列阿宽食品第一大欠款方",
+        "href": "https://s.weibo.com/weibo?q=%E9%BA%BB%E5%85%AD%E8%AE%B0%E4%BD%8D%E5%88%97%E9%98%BF%E5%AE%BD%E9%A3%9F%E5%93%81%E7%AC%AC%E4%B8%80%E5%A4%A7%E6%AC%A0%E6%AC%BE%E6%96%B9"
+      },
+      {
+        "text": "麻六记回应阿宽食品应收账款",
+        "href": "https://s.weibo.com/weibo?q=%E9%BA%BB%E5%85%AD%E8%AE%B0%E5%9B%9E%E5%BA%94%E9%98%BF%E5%AE%BD%E9%A3%9F%E5%93%81%E5%BA%94%E6%94%B6%E8%B4%A6%E6%AC%BE"
+      },
+      {
+        "text": "圆通深夜致歉",
+        "href": "https://s.weibo.com/weibo?q=%E5%9C%86%E9%80%9A%E6%B7%B1%E5%A4%9C%E8%87%B4%E6%AD%89"
+      },
+      {
+        "text": "圆通回应快递员上门致女子先兆流产",
+        "href": "https://s.weibo.com/weibo?q=%E5%9C%86%E9%80%9A%E5%9B%9E%E5%BA%94%E5%BF%AB%E9%80%92%E5%91%98%E4%B8%8A%E9%97%A8%E8%87%B4%E5%A5%B3%E5%AD%90%E5%85%88%E5%85%86%E6%B5%81%E4%BA%A7"
+      },
+      {
+        "text": "华为Mate90四款芯片被吐槽",
+        "href": "https://s.weibo.com/weibo?q=%E5%8D%8E%E4%B8%BAMate90%E5%9B%9B%E6%AC%BE%E8%8A%AF%E7%89%87%E8%A2%AB%E5%90%90%E6%A7%BD"
+      },
+      {
+        "text": "红果短剧收费担忧",
+        "href": "https://s.weibo.com/weibo?q=%E7%BA%A2%E6%9E%9C%E7%9F%AD%E5%89%A7%E6%94%B6%E8%B4%B9%E6%8B%85%E5%BF%A7"
+      },
+      {
+        "text": "红果短剧回应下架金币功能",
+        "href": "https://s.weibo.com/weibo?q=%E7%BA%A2%E6%9E%9C%E7%9F%AD%E5%89%A7%E5%9B%9E%E5%BA%94%E4%B8%8B%E6%9E%B6%E9%87%91%E5%B8%81%E5%8A%9F%E8%83%BD"
+      },
+      {
+        "text": "红果短剧回应收费担忧",
+        "href": "https://s.weibo.com/weibo?q=%E7%BA%A2%E6%9E%9C%E7%9F%AD%E5%89%A7%E5%9B%9E%E5%BA%94%E6%94%B6%E8%B4%B9%E6%8B%85%E5%BF%A7"
+      },
+      {
+        "text": "连英伟达都承认消费级显卡已超出其控制，AI 显卡内存涨价狂潮何时结束?",
+        "href": "https://www.zhihu.com/question/2095674841978488596"
+      },
+      {
+        "text": "iPhoneDuo屏下前摄翻车",
+        "href": "https://s.weibo.com/weibo?q=iPhoneDuo%E5%B1%8F%E4%B8%8B%E5%89%8D%E6%91%84%E7%BF%BB%E8%BD%A6"
+      },
+      {
+        "text": "iPhone Duo 测评出炉，折叠 3000 次后，折痕明显加深，高负载下发热明显，还有哪些问题值得关注？",
+        "href": "https://www.zhihu.com/question/2096555342171563789"
+      },
+      {
+        "text": "多位网友晒iPhoneDuo屏幕裂了",
+        "href": "https://s.weibo.com/weibo?q=%E5%A4%9A%E4%BD%8D%E7%BD%91%E5%8F%8B%E6%99%92iPhoneDuo%E5%B1%8F%E5%B9%95%E8%A3%82%E4%BA%86"
+      },
+      {
+        "text": "广州商学院涨租逼走快递网点，又要求老师每天投诉 6 单，倒逼快递返回学校，如何看待这一操作？暴露什么问题？",
+        "href": "https://www.zhihu.com/question/2096242853957710863"
+      },
+      {
+        "text": "劳动争议开庭前夕，娃哈哈法定代表人许思敏突然辞职，从宗馥莉卸任到许思敏离职，娃哈哈内部管理发生了什么？",
+        "href": "https://www.zhihu.com/question/2096884177970925776"
+      }
+    ],
+    "tables": [
+      [
+        [
+          "风险事件",
+          "具体热搜",
+          "风险影响"
+        ],
+        [
+          "宝马员工离职挤崩系统",
+          "宝马员工争着离职挤崩系统 · 微博 · 100.0",
+          "汽车品牌遇同类舆情，可公开人员管理规则，弱化对立解读"
+        ],
+        [
+          "小天才手表封闭社交争议",
+          "小天才手表回应「有意封闭平台利用孩子社交需求」，称能正常添加到联系人，能平息质疑吗？这对孩子影响多大？ · 知乎 · 100.0\n小天才手表回应封闭社交 · 微博 · 80.1\n小天才手表封闭社交被质疑 · 微博 · 79.3",
+          "儿童数码品牌遇质疑，可开放功能实测路径，回应家长关切"
+        ],
+        [
+          "汇源集团与汇源品牌切割",
+          "汇源集团发布严正声明，宣布和「汇源」品牌切割、推出新品牌咱家果源，具体怎么回事？会带来哪些市场影响？ · 知乎 · 100.0\n汇源集团与汇源品牌切割 · 微博 · 96.4\n汇源集团不再生产汇源果汁 · 微博 · 79.3",
+          "饮料品牌遇主体调整，可明确产能、售后衔接方案，降低消费顾虑"
+        ],
+        [
+          "赛车星冰乐诋毁尊界S800道歉",
+          "赛车星冰乐向尊界汽车道歉 · 微博 · 100.0\n如何评价博主「赛车星冰乐」涉嫌诋毁嘲讽尊界 S800，公开向尊界汽车道歉？具体发生了什么？ · 知乎 · 77.0",
+          "汽车品牌遇第三方诋毁，可澄清核心事实，引导舆论回归产品"
+        ],
+        [
+          "韩路爆料汽车之家白嫖",
+          "韩路爆料汽车之家白嫖 · 微博 · 100.0\n汽车之家回应韩路 · 微博 · 89.2",
+          "内容平台遇合作纠纷，可公开结算标准，回应行业规则质疑"
+        ],
+        [
+          "麻六记涉阿宽食品欠款",
+          "麻六记位列阿宽食品第一大欠款方 · 微博 · 99.4\n麻六记回应阿宽食品应收账款 · 微博 · 86.1",
+          "餐饮品牌遇供应商纠纷，可公示还款安排，稳定供应链信任"
+        ],
+        [
+          "圆通快递员涉女子受伤事件",
+          "圆通深夜致歉 · 微博 · 97.5\n圆通回应快递员上门致女子先兆流产 · 微博 · 80.1",
+          "快递品牌遇服务纠纷，可公布处置进展，明确人员管控规则"
+        ],
+        [
+          "华为Mate90芯片配置争议",
+          "华为Mate90四款芯片被吐槽 · 微博 · 97.2",
+          "数码品牌遇配置争议，可说明配置差异逻辑，匹配用户需求"
+        ],
+        [
+          "红果短剧下线金币功能争议",
+          "红果短剧收费担忧 · 微博 · 94.1\n红果短剧回应下架金币功能 · 微博 · 93.7\n红果短剧回应收费担忧 · 微博 · 83.7",
+          "内容平台遇调价争议，可说明权益调整规则，降低负面预期"
+        ],
+        [
+          "英伟达显卡涨价争议",
+          "连英伟达都承认消费级显卡已超出其控制，AI 显卡内存涨价狂潮何时结束? · 知乎 · 93.9",
+          "硬件品牌遇价格争议，可同步供给端说明，稳定消费预期"
+        ],
+        [
+          "iPhone Duo新品口碑争议",
+          "iPhoneDuo屏下前摄翻车 · 微博 · 91.4\niPhone Duo 测评出炉，折叠 3000 次后，折痕明显加深，高负载下发热明显，还有哪些问题值得关注？ · 知乎 · 90.7\n多位网友晒iPhoneDuo屏幕裂了 · 微博 · 86.1",
+          "数码品牌遇品控吐槽，可跟进问题核查，同步售后保障方案"
+        ],
+        [
+          "广州商学院快递网点争议",
+          "广州商学院涨租逼走快递网点，又要求老师每天投诉 6 单，倒逼快递返回学校，如何看待这一操作？暴露什么问题？ · 知乎 · 90.5",
+          "教育机构遇管理争议，可公开合作调整逻辑，回应相关方关切"
+        ],
+        [
+          "娃哈哈法定代表人辞职争议",
+          "劳动争议开庭前夕，娃哈哈法定代表人许思敏突然辞职，从宗馥莉卸任到许思敏离职，娃哈哈内部管理发生了什么？ · 知乎 · 89.4",
+          "食品品牌遇人事舆情，可明确经营稳定安排，降低市场疑虑"
+        ]
+      ]
+    ],
+    "text": "",
+    "index": 57
+  },
+  {
+    "className": "block docx-heading3-block",
+    "id": "59",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "食品/产品安全",
+    "index": 58
+  },
+  {
+    "className": "block docx-table-block",
+    "id": "60",
+    "images": [],
+    "links": [
+      {
+        "text": "问界起火",
+        "href": "https://s.weibo.com/weibo?q=%E9%97%AE%E7%95%8C%E8%B5%B7%E7%81%AB"
+      },
+      {
+        "text": "问界事故车速数据为何有差异",
+        "href": "https://s.weibo.com/weibo?q=%E9%97%AE%E7%95%8C%E4%BA%8B%E6%95%85%E8%BD%A6%E9%80%9F%E6%95%B0%E6%8D%AE%E4%B8%BA%E4%BD%95%E6%9C%89%E5%B7%AE%E5%BC%82"
+      },
+      {
+        "text": "问界M9事故三连环站不住脚",
+        "href": "https://s.weibo.com/weibo?q=%E9%97%AE%E7%95%8CM9%E4%BA%8B%E6%95%85%E4%B8%89%E8%BF%9E%E7%8E%AF%E7%AB%99%E4%B8%8D%E4%BD%8F%E8%84%9A"
+      }
+    ],
+    "tables": [
+      [
+        [
+          "风险事件",
+          "具体热搜",
+          "风险影响"
+        ],
+        [
+          "问界M9碰撞起火争议",
+          "问界起火 · 微博 · 100.0\n问界事故车速数据为何有差异 · 微博 · 97.5\n问界M9事故三连环站不住脚 · 微博 · 95.7",
+          "新能源车企遇安全事故舆情，可披露权威检测数据，回应安全关切"
+        ]
+      ]
+    ],
+    "text": "",
+    "index": 59
+  },
+  {
+    "className": "block docx-heading3-block",
+    "id": "61",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "文娱作品口碑",
+    "index": 60
+  },
+  {
+    "className": "block docx-table-block",
+    "id": "62",
+    "images": [],
+    "links": [
+      {
+        "text": "2026 年中国票房第三名《功夫女足》跌至 5.9 分，是否可以印证冯小刚当年的话是对的？",
+        "href": "https://www.zhihu.com/question/2097104543138030945"
+      },
+      {
+        "text": "功夫女足烂番茄0分开局",
+        "href": "https://s.weibo.com/weibo?q=%E5%8A%9F%E5%A4%AB%E5%A5%B3%E8%B6%B3%E7%83%82%E7%95%AA%E8%8C%840%E5%88%86%E5%BC%80%E5%B1%80"
+      },
+      {
+        "text": "「红果短剧降智」引发广泛热议，为什么越是剧情粗糙的短剧越让人停不下来？",
+        "href": "https://www.zhihu.com/question/2095511427201159433"
+      },
+      {
+        "text": "小城良方 剧情硬伤",
+        "href": "https://s.weibo.com/weibo?q=%E5%B0%8F%E5%9F%8E%E8%89%AF%E6%96%B9+%E5%89%A7%E6%83%85%E7%A1%AC%E4%BC%A4"
+      },
+      {
+        "text": "小城良方发文辟谣",
+        "href": "https://s.weibo.com/weibo?q=%E5%B0%8F%E5%9F%8E%E8%89%AF%E6%96%B9%E5%8F%91%E6%96%87%E8%BE%9F%E8%B0%A3"
+      },
+      {
+        "text": "肖战小城良方骗人骗到本尊",
+        "href": "https://s.weibo.com/weibo?q=%E8%82%96%E6%88%98%E5%B0%8F%E5%9F%8E%E8%89%AF%E6%96%B9%E9%AA%97%E4%BA%BA%E9%AA%97%E5%88%B0%E6%9C%AC%E5%B0%8A"
+      }
+    ],
+    "tables": [
+      [
+        [
+          "风险事件",
+          "具体热搜",
+          "风险影响"
+        ],
+        [
+          "《功夫女足》高票房低评分争议",
+          "2026 年中国票房第三名《功夫女足》跌至 5.9 分，是否可以印证冯小刚当年的话是对的？ · 知乎 · 91.7\n功夫女足烂番茄0分开局 · 微博 · 75.6",
+          "影视项目遇口碑争议，可收集观众反馈，调整宣发侧重点"
+        ],
+        [
+          "「红果短剧降智」热议",
+          "「红果短剧降智」引发广泛热议，为什么越是剧情粗糙的短剧越让人停不下来？ · 知乎 · 91.0",
+          "短剧平台遇内容质疑，可优化内容分级，匹配不同用户需求"
+        ],
+        [
+          "《小城良方》剧情争议",
+          "小城良方 剧情硬伤 · 微博 · 87.7\n小城良方发文辟谣 · 微博 · 77.5\n肖战小城良方骗人骗到本尊 · 微博 · 63.9",
+          "影视项目遇内容争议，可针对性回应疑点，避免负面扩散"
+        ]
+      ]
+    ],
+    "text": "",
+    "index": 61
+  },
+  {
+    "className": "block docx-heading3-block",
+    "id": "63",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "营销观察",
+    "index": 62
+  },
+  {
+    "className": "block docx-heading3-block",
+    "id": "64",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "案例 1：绿箭×拼多多联动推广（微博 · 99.2 分）",
+    "index": 63
+  },
+  {
+    "className": "block docx-bullet-block",
+    "id": "65",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "原始热点：拼着买嚼着香 买绿箭山茶花上拼多多（微博）",
+    "index": 64
+  },
+  {
+    "className": "block docx-bullet-block",
+    "id": "66",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "营销发现：采用平台slogan与品牌名双关话术，强化消费场景关联，快消品牌可低成本复用。",
+    "index": 65
+  },
+  {
+    "className": "block docx-bullet-block",
+    "id": "67",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "https://s.weibo.com/weibo?q=%E6%8B%BC%E7%9D%80%E4%B9%B0%E5%9A%BC%E7%9D%80%E9%A6%99+%E4%B9%B0%E7%BB%BF%E7%AE%AD%E5%B1%B1%E8%8C%B6%E8%8A%B1%E4%B8%8A%E6%8B%BC%E5%A4%9A%E5%A4%9A",
+    "index": 66
+  },
+  {
+    "className": "block docx-heading3-block",
+    "id": "68",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "案例 2：张亮到访张亮麻辣烫同名玩梗（微博 · 90.1 分）",
+    "index": 67
+  },
+  {
+    "className": "block docx-bullet-block",
+    "id": "69",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "原始热点：张亮到访张亮麻辣烫引同名玩梗（微博）",
+    "index": 68
+  },
+  {
+    "className": "block docx-bullet-block",
+    "id": "70",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "营销发现：借名人与品牌同名巧合制造社交话题，降低传播门槛，线下服务品牌可参考。",
+    "index": 69
+  },
+  {
+    "className": "block docx-bullet-block",
+    "id": "71",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "https://s.weibo.com/weibo?q=%E5%BC%A0%E4%BA%AE%E8%AF%B7%E5%BC%A0%E4%BA%AE%E5%90%83%E5%BC%A0%E4%BA%AE",
+    "index": 70
+  },
+  {
+    "className": "block docx-heading3-block",
+    "id": "72",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "案例 3：雷鸟S16赛事夺冠退全款活动（微博 · 85.6 分）",
+    "index": 71
+  },
+  {
+    "className": "block docx-bullet-block",
+    "id": "73",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "原始热点：S16全球总决赛（微博）",
+    "index": 72
+  },
+  {
+    "className": "block docx-bullet-block",
+    "id": "74",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "营销发现：赛事赞助中设置风险逆转承诺撬动话题，家电、快消等赞助品牌可复用。",
+    "index": 73
+  },
+  {
+    "className": "block docx-bullet-block",
+    "id": "75",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "https://s.weibo.com/weibo?q=BLG%E4%B8%8D%E5%A4%BA%E5%86%A0%E9%9B%B7%E9%B8%9F%E9%80%80%E5%85%A8%E6%AC%BE",
+    "index": 74
+  },
+  {
+    "className": "block docx-heading3-block",
+    "id": "76",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "案例 4：DeepSeek鲸鱼娘接管B站账号（B站 · 86.2 分）",
+    "index": 75
+  },
+  {
+    "className": "block docx-bullet-block",
+    "id": "77",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "原始热点：我是DeepSeek鲸鱼娘，这个B站账号现在归我了（B站）",
+    "index": 76
+  },
+  {
+    "className": "block docx-bullet-block",
+    "id": "78",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "营销发现：打造AI虚拟人格运营官方账号，强化内容辨识度，科技类品牌可参考。",
+    "index": 77
+  },
+  {
+    "className": "block docx-bullet-block",
+    "id": "79",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "https://www.bilibili.com/video/av117466583798250/",
+    "index": 78
+  },
+  {
+    "className": "block docx-heading3-block",
+    "id": "80",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "消费洞察",
+    "index": 79
+  },
+  {
+    "className": "block docx-heading3-block",
+    "id": "81",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "洞察 1：泛消费者安全信任阈值提升",
+    "index": 80
+  },
+  {
+    "className": "block docx-bullet-block",
+    "id": "82",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "群体：泛消费者",
+    "index": 81
+  },
+  {
+    "className": "block docx-bullet-block",
+    "id": "83",
+    "images": [],
+    "links": [
+      {
+        "text": "问界起火",
+        "href": "https://s.weibo.com/weibo?q=%E9%97%AE%E7%95%8C%E8%B5%B7%E7%81%AB"
+      },
+      {
+        "text": "司美格鲁肽在美遭批量起诉",
+        "href": "https://www.zhihu.com/question/2085486428255774078"
+      },
+      {
+        "text": "泰国旅游部长回应中国游客安全",
+        "href": "https://s.weibo.com/weibo?q=%E6%B3%B0%E5%9B%BD%E6%97%85%E6%B8%B8%E9%83%A8%E9%95%BF%E5%9B%9E%E5%BA%94%E4%B8%AD%E5%9B%BD%E6%B8%B8%E5%AE%A2%E5%AE%89%E5%85%A8"
+      }
+    ],
+    "tables": [],
+    "text": "触发事件：问界起火（微博·100.0分）+司美格鲁肽在美遭批量起诉（知乎·100.0分）+泰国旅游部长回应中国游客安全（微博·100.0分）",
+    "index": 82
+  },
+  {
+    "className": "block docx-bullet-block",
+    "id": "84",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "行为反应：社媒上消费者对多品类安全属性关注度上升，有信任疑虑时易调整决策。",
+    "index": 83
+  },
+  {
+    "className": "block docx-bullet-block",
+    "id": "85",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "营销发现：出行、医疗、文旅类品牌可强化安全信息披露，降低决策顾虑。",
+    "index": 84
+  },
+  {
+    "className": "block docx-heading3-block",
+    "id": "86",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "洞察 2：泛内容用户呈现双重消费特征",
+    "index": 85
+  },
+  {
+    "className": "block docx-bullet-block",
+    "id": "87",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "群体：泛内容消费者",
+    "index": 86
+  },
+  {
+    "className": "block docx-bullet-block",
+    "id": "88",
+    "images": [],
+    "links": [
+      {
+        "text": "红果短剧收费担忧",
+        "href": "https://s.weibo.com/weibo?q=%E7%BA%A2%E6%9E%9C%E7%9F%AD%E5%89%A7%E6%94%B6%E8%B4%B9%E6%8B%85%E5%BF%A7"
+      },
+      {
+        "text": "「红果短剧降智」引发广泛热议",
+        "href": "https://www.zhihu.com/question/2095511427201159433"
+      }
+    ],
+    "tables": [],
+    "text": "触发事件：红果短剧收费担忧（微博·94.1分）+「红果短剧降智」引发广泛热议（知乎·91.0分）",
+    "index": 87
+  },
+  {
+    "className": "block docx-bullet-block",
+    "id": "89",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "行为反应：社媒上用户对内容调价存在担忧，同时呈现出对低门槛内容的观看倾向。",
+    "index": 88
+  },
+  {
+    "className": "block docx-bullet-block",
+    "id": "90",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "营销发现：内容平台可采用梯度定价、分级供给模式，匹配不同用户需求。",
+    "index": 89
+  },
+  {
+    "className": "block docx-heading3-block",
+    "id": "91",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "洞察 3：国产耐用品消费偏好有所提升",
+    "index": 90
+  },
+  {
+    "className": "block docx-bullet-block",
+    "id": "92",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "群体：数码、汽车品类消费者",
+    "index": 91
+  },
+  {
+    "className": "block docx-bullet-block",
+    "id": "93",
+    "images": [],
+    "links": [
+      {
+        "text": "曝华为Mate90连续多周国产旗舰销量第一",
+        "href": "https://s.weibo.com/weibo?q=%E6%9B%9D%E5%8D%8E%E4%B8%BAMate90%E8%BF%9E%E7%BB%AD%E5%A4%9A%E5%91%A8%E5%9B%BD%E4%BA%A7%E6%97%97%E8%88%B0%E9%94%80%E9%87%8F%E7%AC%AC%E4%B8%80"
+      },
+      {
+        "text": "新能源车渗透率攀升至67%创历史新高",
+        "href": "https://www.zhihu.com/question/2094934531933468296"
+      },
+      {
+        "text": "9月BBA旗下无一车型零售破万",
+        "href": "https://www.zhihu.com/question/2095630667409254223"
+      }
+    ],
+    "tables": [],
+    "text": "触发事件：曝华为Mate90连续多周国产旗舰销量第一（微博·100.0分）+新能源车渗透率攀升至67%创历史新高（知乎·96.5分）+9月BBA旗下无一车型零售破万（知乎·90.0分）",
+    "index": 92
+  },
+  {
+    "className": "block docx-bullet-block",
+    "id": "94",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "行为反应：社媒数据呈现出消费者采购耐用品时更倾向国产品牌的特征。",
+    "index": 93
+  },
+  {
+    "className": "block docx-bullet-block",
+    "id": "95",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "营销发现：国产耐用品品牌可强化产品力沟通，挖掘存量替代市场空间。",
+    "index": 94
+  },
+  {
+    "className": "block docx-heading3-block",
+    "id": "96",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "洞察 4：游戏玩家面对供给波动易产生焦虑",
+    "index": 95
+  },
+  {
+    "className": "block docx-bullet-block",
+    "id": "97",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "群体：游戏玩家、数码硬件爱好者",
+    "index": 96
+  },
+  {
+    "className": "block docx-bullet-block",
+    "id": "98",
+    "images": [],
+    "links": [
+      {
+        "text": "MC国内下载渠道遭封禁",
+        "href": "https://www.zhihu.com/question/2095905104423662975"
+      },
+      {
+        "text": "连英伟达都承认消费级显卡已超出其控制",
+        "href": "https://www.zhihu.com/question/2095674841978488596"
+      }
+    ],
+    "tables": [],
+    "text": "触发事件：MC国内下载渠道遭封禁（知乎·100.0分）+连英伟达都承认消费级显卡已超出其控制（知乎·93.9分）",
+    "index": 97
+  },
+  {
+    "className": "block docx-bullet-block",
+    "id": "99",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "行为反应：社媒上玩家面对渠道封禁、硬件涨价时，会主动找替代方案并表达不满。",
+    "index": 98
+  },
+  {
+    "className": "block docx-bullet-block",
+    "id": "100",
+    "images": [],
+    "links": [],
+    "tables": [],
+    "text": "营销发现：游戏、硬件品牌可布局多元供给渠道，稳定用户消费预期。",
+    "index": 99
+  }
+]

@@ -49,5 +49,5 @@
    - 消息与卡片:gateway 侧 `FeishuSender`(卡片渲染与消息推送)
    - 数据接入:MA MCP 挂载(`datahub-cli` / `hot-topics-mcp`)
    - LLM:统一走 Ark OpenAI 兼容接口(`ARK_API_KEY` / `ARK_BASE_URL`,支持回退到 `OPENAI_*`)
-3. **子 Agent 并发**:Phase C 第二批 R1~R5 五路、Phase E 四路,由 `topic6-annotator` / `topic6-insighter` 子 Agent 并发执行;其余阶段串行走协调器。
+3. **子 Agent 并发**:Phase C 第一批 C0/C3 两路、第二批 R1~R5 五路由 `topic6-annotator` 子 Agent 并发启动;Phase E 不再委派 `topic6-insighter`,由 `pipeline_e.py` 脚本内部有限并发 E1~E4;HC 前质检委派 `topic6-validator`(可选);其余阶段串行走协调器。
 4. **HITL**:HC1/HC2/HC3 关卡输出结构化 JSON + `end_turn`,由 gateway 渲染飞书交互卡片,回帖以 `user.message` 塞回 MA Session。

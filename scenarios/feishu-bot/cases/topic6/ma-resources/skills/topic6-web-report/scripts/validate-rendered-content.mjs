@@ -106,5 +106,32 @@ for (const block of activeBlocks) {
   }
 }
 
+// ---- 布局断言(1027 分析师测试 MA-01~06):内容全在但布局退化也必须失败 ----
+const mainHtml = html.slice(Math.max(0, html.indexOf("<main")));
+function listGridFields(label) {
+  const re = new RegExp(`<div class="data-card-field[^"]*data-card-field--list-grid[^"]*"><dt>${label}</dt><dd>([\\s\\S]*?)</dd></div>`, "gu");
+  return [...mainHtml.matchAll(re)].map((m) => m[1]);
+}
+for (const [label, code] of [["主要驱动话题", "MA-01"], ["具体热搜", "MA-02/03"]]) {
+  const fields = listGridFields(label);
+  // 单值字段(只有一条热搜)允许不成列表;多值(含 <br>)未渲染为 cell-list 即退化为单列
+  const degraded = fields.filter((f) => !f.includes('<ul class="cell-list">') && /<br\s*\/?>/u.test(f));
+  if (degraded.length) errors.push(`${code} ${label}: ${degraded.length}/${fields.length} 个多值字段未渲染为 cell-list 网格(退化为单列)`);
+}
+// MA-04:页面上「案例 N：」标题数必须等于左文右图卡片数(旧模板会退化为 heading+bullet)
+const renderedCaseTitles = (mainHtml.replace(/<[^>]+>/gu, "\n").match(/^\s*案例\s*\d+\s*[：:]/gmu) ?? []).length;
+if (renderedCaseTitles && renderedCaseTitles !== renderedCaseCount) {
+  errors.push(`MA-04 营销观察: ${renderedCaseTitles} 个案例只有 ${renderedCaseCount} 个渲染为左文右图卡片`);
+}
+// MA-05:源数据「触发事件」带链接时,页面上每条「触发事件」都必须包含 source-link
+const insightSourceHasLinks = activeBlocks.some((block) => /触发事件/u.test(String(block?.text ?? "")) && (block?.links ?? []).length);
+const triggerItems = [...mainHtml.matchAll(/<li[^>]*>(?:(?!<\/li>)[\s\S])*?触发事件[\s\S]*?<\/li>/gu)].map((m) => m[0]);
+const unlinkedTriggers = triggerItems.filter((item) => !/source-link/u.test(item));
+if (insightSourceHasLinks && unlinkedTriggers.length) {
+  errors.push(`MA-05 消费洞察: ${unlinkedTriggers.length}/${triggerItems.length} 条「触发事件」热搜未渲染为超链接`);
+}
+const footerLabel = mainHtml.match(/<aside class="footer-note"[^>]*><strong>([^<]*)<\/strong>/u)?.[1] ?? "";
+if (!/^热度值说明/u.test(decodeEntities(footerLabel))) errors.push(`MA-06 尾注应为「热度值说明」,实际为「${footerLabel || "(无)"}」`);
+
 if (errors.length) throw new Error(`Rendered-content validation failed:\n- ${[...new Set(errors)].join("\n- ")}`);
 console.log(`Validated complete rendered coverage for ${activeBlocks.length} source blocks and ${caseBlocks.length} case cards.`);

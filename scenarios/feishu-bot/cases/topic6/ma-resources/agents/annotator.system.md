@@ -15,7 +15,7 @@
   "project_dir": "W40热点周报_20260921-20260927",
   "input_path": "/workspace/Projects/W40热点周报_20260921-20260927/03_抽样/sample_500.xlsx",
   "output_path": "/workspace/Projects/W40热点周报_20260921-20260927/04_标注/c0_raw.jsonl",
-  "prompt_version": "v4"
+  "prompt_version": "v5"
 }
 ```
 
