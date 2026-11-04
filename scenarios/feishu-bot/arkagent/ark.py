@@ -706,6 +706,11 @@ class ArkClient:
             extra_headers=extra_headers,
         )
 
+    async def get_session(self, session_id: str) -> dict:
+        """读取 Session 详情(含创建时的 agent 快照,可据 agent.model.provider 判断是否 BYOK)。"""
+        payload = await self._request("GET", f"/sessions/{quote(session_id, safe='')}")
+        return _unwrap(payload)
+
     async def list_session_events(self, session_id: str, limit: int = 200) -> list[dict]:
         """读取已持久化的 Session 事件，用于 Gateway 重启后的本地状态对账。"""
         page_size = max(1, min(limit, 200))

@@ -43,7 +43,7 @@
 - **THEN** 立即 force patch，不受 4s 节流
 
 ### Requirement: SSE 消费与断线重连
-`_drive_session` SHALL 先打开事件流再发送首条消息（仅发送一次，携带 BYOK `extra_headers`）。Runner 向 Session 注入的每一条 user.message（首条、HC 续跑、/continue、idle 催促、provider 重试、重启恢复）MUST 经 `Topic6Runner._send_message` 发送并携带 BYOK `extra_headers`；Header 值 MUST NOT 写入日志、数据库或消息正文。事件流在未观察到终态前结束 MUST 视为断线，最多重连 `SSE_RECONNECT_MAX_ATTEMPTS=5` 次，延迟 `min(1·2^n, 16)s × U(0.8,1.2)`；重连 MUST NOT 重发 user.message，并以事件 `id` 去重。重连耗尽 MUST `mark_failed("sse_stream_error: …"[:400])`。同一 Session 同时只允许一个消费任务（`_active_streams`），续跑前 MUST cancel 旧任务；退出时仅当自己仍是登记任务才移除引用。
+`_drive_session` SHALL 先打开事件流再发送首条消息（仅发送一次，携带 BYOK `extra_headers`）。Runner 向 Session 注入的每一条 user.message（首条、HC 续跑、/continue、/republish、idle 催促、provider 重试、重启恢复）MUST 经 `Topic6Runner._send_message` 发送；BYOK `extra_headers` 按该 Session 创建时的 agent 快照决定：`agent.model.provider` 非空才携带（方舟原生模型的旧 Session 携带会 400 InvalidModelHeader），结果按 Session 缓存，查询失败时按当前配置携带；Header 值 MUST NOT 写入日志、数据库或消息正文。事件流在未观察到终态前结束 MUST 视为断线，最多重连 `SSE_RECONNECT_MAX_ATTEMPTS=5` 次，延迟 `min(1·2^n, 16)s × U(0.8,1.2)`；重连 MUST NOT 重发 user.message，并以事件 `id` 去重。重连耗尽 MUST `mark_failed("sse_stream_error: …"[:400])`。同一 Session 同时只允许一个消费任务（`_active_streams`），续跑前 MUST cancel 旧任务；退出时仅当自己仍是登记任务才移除引用。
 
 #### Scenario: 瞬时断线
 - **WHEN** 事件流在 Phase C 中途断开一次
@@ -138,6 +138,20 @@ Runner SHALL 提供以下三个入口并保持语义：
 #### Scenario: 已发布但被误判失败
 - **WHEN** 任务 `failed`，但 Session 历史中已有 Phase H `online_url`，用户发送 `/continue`
 - **THEN** 任务直接置 `done` 并回复发布链接，不向 Session 注入消息
+
+### Requirement: 网页重新发布（/republish）
+用于 HC3 通过后才在飞书文档补/换营销观察配图。Runner SHALL 提供：
+- `find_republishable_job(chat_id, ref)`：`ref` 为 job_id 或 session_id 时定位该任务，MUST 属于当前会话且已过 HC3（`done`，或最近一次 HC3 决策为 `pass`）；无 `ref` 时取本会话按 `updated_at` 最近的已过 HC3 任务。不满足时抛 `Topic6RunnerError`。
+- `republish_job(job)`：在启动锁内执行；全局已有 `running|wait_hc` 任务、或 Session 状态不是 `idle` 时 MUST 拒绝且不改本地状态。通过后 `resume_running(phase=G)`，发一张新的进度卡并落库其 message_id，在同一 Session 注入 `REPUBLISH_MESSAGE`（自包含：不重跑 A~F、按 Phase G 重新读取飞书文档配图并生成网页、按 Phase H 更新 `status.h.app_id` 同一应用、成功后只输出发布 JSON），旧 Session（切换模型/coordinator 版本前创建、已 `done`）同样适用。
+- 判定本轮完成时，`_find_published_online_url` MUST 只扫描 `/republish` 之前事件数（`history_floor`）之后的消息，历史中的旧 `online_url` 不得把本轮发布失败误判为 `done`。
+
+#### Scenario: 已完成任务补图后重新发布
+- **WHEN** 任务 `done`，用户在飞书文档补图后发送 `/republish`
+- **THEN** 同一 Session 只重跑 Phase G+H，本轮输出新的 `online_url` 后任务回到 `done`
+
+#### Scenario: 本轮发布失败
+- **WHEN** `/republish` 后 Phase H idle 且本轮没有新的发布 JSON
+- **THEN** 任务置 `failed`，不因历史旧链接判为 `done`
 
 ### Requirement: Gateway 重启恢复
 `recover_job` SHALL 只读取 `list_session_events`，回放 agent.message 更新 phase/project_dir，再看最后一个终态类事件（`user.interrupt`、`session.error`、`status_failed`、`status_terminated`、`status_idle`）：

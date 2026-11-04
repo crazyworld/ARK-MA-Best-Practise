@@ -234,6 +234,9 @@ class _HeaderArk:
     def __init__(self):
         self.calls: list[tuple[str, object]] = []
 
+    async def get_session(self, _sid):
+        return {"status": "running", "agent": {"model": {"id": "m", "provider": "bmc-llm-relay"}}}
+
     async def send_message(self, _sid, msg, extra_headers=None):
         self.calls.append((msg, extra_headers))
 
@@ -448,3 +451,56 @@ class TestBackgroundRefreshCircuitBreaker:
         )
         asyncio.run(gateway.refresh_tokens_once())
         assert called == ["ou-ok"]
+
+
+class TestRepublishCommand:
+    """/republish 命令解析与回复(业务逻辑见 test_topic6_new_command 的 republish 用例)。"""
+
+    def _gateway(self, runner):
+        from types import SimpleNamespace
+
+        gateway_mod = _load("topic6_gateway_for_republish_test", CASE_DIR / "gateway.py")
+        replies = []
+
+        async def reply(chat_id, text):
+            replies.append((chat_id, text))
+
+        gateway = gateway_mod.Topic6Gateway(
+            SimpleNamespace(authorized_open_ids=(), lark_bot_vault_id=""),
+            SimpleNamespace(), runner, SimpleNamespace(), SimpleNamespace(), reply, None,
+        )
+        return gateway_mod, gateway, replies
+
+    def test_regex_accepts_optional_ref(self):
+        gateway_mod = _load("topic6_gateway_for_republish_test", CASE_DIR / "gateway.py")
+        rx = gateway_mod.REPUBLISH_COMMAND_RE
+        assert rx.fullmatch("/republish").group(1) is None
+        assert rx.fullmatch("/REPUBLISH job_abc").group(1) == "job_abc"
+        assert rx.fullmatch("/republish sesn-1 extra") is None
+
+    def test_success_and_error_replies(self):
+        from types import SimpleNamespace
+
+        calls = []
+
+        class Runner:
+            _ark = None
+
+            def find_republishable_job(self, chat_id, ref):
+                calls.append(("find", chat_id, ref))
+                if ref == "bad":
+                    raise runner_mod.Topic6RunnerError("未找到任务 bad")
+                return SimpleNamespace(job_id="job_1", ma_session_id="s")
+
+            async def republish_job(self, job):
+                calls.append(("republish", job.job_id))
+                return job
+
+        gateway_mod, gateway, replies = self._gateway(Runner())
+        assert gateway_mod.Topic6RunnerError is runner_mod.Topic6RunnerError
+        asyncio.run(gateway._handle_republish("c1", ""))
+        asyncio.run(gateway._handle_republish("c1", "bad"))
+        assert calls == [("find", "c1", ""), ("republish", "job_1"), ("find", "c1", "bad")]
+        assert "已开始重新发布网页 job_id=job_1" in replies[0][1]
+        assert replies[1][1] == "[/republish] 未找到任务 bad"
+

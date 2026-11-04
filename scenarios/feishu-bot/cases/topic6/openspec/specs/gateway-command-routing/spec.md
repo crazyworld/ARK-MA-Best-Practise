@@ -57,18 +57,23 @@
 
 1. `/new` → 取消当前会话键的活跃任务（见 session-runner）；取消后停止该 job 的产物同步并做一次最终 `sync_once`
 2. `/continue` 或 `/resume` [补充消息]（正则 `^/(?:continue|resume)(?:\s+(.*))?$`，忽略大小写）→ 注入补充消息，缺省为"继续"；若任务已因历史 `online_url` 收口为 `done`，回复发布链接
-3. `/log [session_id]` → 列出 Session 事件摘要（>4000 字截断）；无参数时取**全局**最新活跃任务，没有则取最近一条任务的 Session
-4. `/test_feishu` → 用 tenant token 在 Drive 建文件夹/表格/上传文件后删除，返回各步结果
-5. `/test_phase_f` → 以子进程运行 `publish_report_to_feishu.py` 的 mock 数据（超时 120s，剔除 `LARKSUITE_CLI_*` 环境变量）验证 fallback 链路
-6. HC 备注正文（`hitl.handle_remark_message`）
-7. 触发词（`parse_trigger`）
-8. 以上都不命中 → 回复用法提示（列出 demo/smoke/full/skip_sampling、/continue、/new、/log）
+3. `/republish [job_id|session_id]`（正则 `^/republish(?:\s+(\S+))?$`，忽略大小写）→ 在原 Session 里只重跑 Phase G+H（见 session-runner「网页重新发布」）；无参数时取本会话最近一个已过 HC3 的任务；`Topic6RunnerError` 以 `[/republish] <原因>` 原文回复；成功后启动该 job 的产物同步
+4. `/log [session_id]` → 列出 Session 事件摘要（>4000 字截断）；无参数时取**全局**最新活跃任务，没有则取最近一条任务的 Session
+5. `/test_feishu` → 用 tenant token 在 Drive 建文件夹/表格/上传文件后删除，返回各步结果
+6. `/test_phase_f` → 以子进程运行 `publish_report_to_feishu.py` 的 mock 数据（超时 120s，剔除 `LARKSUITE_CLI_*` 环境变量）验证 fallback 链路
+7. HC 备注正文（`hitl.handle_remark_message`）
+8. 触发词（`parse_trigger`）
+9. 以上都不命中 → 回复用法提示（列出 demo/smoke/full/skip_sampling、/continue、/republish、/new、/log）
 
 新增命令 MUST 插入此顺序并更新用法提示文案。
 
 #### Scenario: /continue 带补充
 - **WHEN** 用户发送 `/continue A`
 - **THEN** 注入的 user.message 为 `A`
+
+#### Scenario: /republish 补配图
+- **WHEN** 任务已发布完成（done），用户在飞书文档补图后发送 `/republish`
+- **THEN** 在原 Session 注入只重跑 Phase G+H 的指令，更新同一个妙搭应用，回复 `[/republish] 已开始重新发布网页 job_id=…`
 
 #### Scenario: 备注优先于触发词
 - **WHEN** 用户刚点了"备注"按钮，随后发送含"热点周报"的文字

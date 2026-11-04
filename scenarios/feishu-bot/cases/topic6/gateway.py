@@ -59,6 +59,8 @@ BOT_VAULT_READY_TIMEOUT_S = 30.0
 IN_CHAT_AUTH_TIMEOUT_S = 300.0
 CONTINUE_COMMAND_RE = re.compile(r"^/(?:continue|resume)(?:\s+(.*))?$", re.IGNORECASE)
 LOG_COMMAND_RE = re.compile(r"^/log(?:\s+(\S+))?$", re.IGNORECASE)
+# /republish [job_id|session_id]:HC3 后补/换配图,只重跑 Phase G+H(网页+妙搭)
+REPUBLISH_COMMAND_RE = re.compile(r"^/republish(?:\s+(\S+))?$", re.IGNORECASE)
 TEST_FEISHU_COMMAND_RE = re.compile(r"^/test_feishu$", re.IGNORECASE)
 TEST_PHASE_F_COMMAND_RE = re.compile(r"^/test_phase_f$", re.IGNORECASE)
 
@@ -225,6 +227,14 @@ class Topic6Gateway:
                 self._store.complete_event(message.event_id, "completed")
                 return
 
+            republish_match = REPUBLISH_COMMAND_RE.fullmatch(text)
+            if republish_match:
+                await self._handle_republish(
+                    message.chat_id, (republish_match.group(1) or "").strip()
+                )
+                self._store.complete_event(message.event_id, "completed")
+                return
+
             log_match = LOG_COMMAND_RE.fullmatch(text)
             if log_match:
                 await self._handle_log_command(
@@ -256,7 +266,7 @@ class Topic6Gateway:
             if mode is None:
                 await self._reply(
                     message.chat_id,
-                    "当前 Bot 仅启用 topic6 场景。发送「热点周报 demo」(50 条出报告)、「热点周报 smoke」(30 条全流程冒烟测试,含 HC1+HC2+HC3)、「热点周报 full」(先 500 条校准再跑全量)或「热点周报 skip_sampling」(跳过 500 条采样,直接跑全量)触发;发送 /continue 续跑最近一次任务;发送 /new 可取消当前任务;发送 /log 查看当前任务日志，或 /log <session_id> 查看指定 Session 日志。",
+                    "当前 Bot 仅启用 topic6 场景。发送「热点周报 demo」(50 条出报告)、「热点周报 smoke」(30 条全流程冒烟测试,含 HC1+HC2+HC3)、「热点周报 full」(先 500 条校准再跑全量)或「热点周报 skip_sampling」(跳过 500 条采样,直接跑全量)触发;发送 /continue 续跑最近一次任务;发送 /republish 在补充营销观察配图后重新发布网页;发送 /new 可取消当前任务;发送 /log 查看当前任务日志，或 /log <session_id> 查看指定 Session 日志。",
                 )
                 self._store.complete_event(message.event_id, "completed")
                 return
@@ -502,6 +512,26 @@ class Topic6Gateway:
             results.append(f"❌ 异常: {err}")
 
         await self._reply(chat_id, f"[/test_feishu] 飞书 Drive API 测试\n\n" + "\n".join(results))
+
+    async def _handle_republish(self, chat_id: str, ref: str) -> None:
+        """/republish [job_id|session_id]:在原 Session 里只重跑 Phase G+H。
+
+        用于 HC3 通过后才在飞书文档里补/换营销观察配图：重新读取文档配图、生成网页并更新
+        同一个妙搭应用。默认取本会话最近一个已过 HC3 的任务；已完成(done)的旧任务也支持。
+        """
+        try:
+            job = self._runner.find_republishable_job(chat_id, ref)
+            job = await self._runner.republish_job(job)
+        except Topic6RunnerError as error:
+            await self._reply(chat_id, f"[/republish] {error}")
+            return
+        if self._artifact_sync is not None:
+            self._artifact_sync.start(job, self._loop)
+        await self._reply(
+            chat_id,
+            f"[/republish] 已开始重新发布网页 job_id={job.job_id}:从飞书文档重新读取配图 → "
+            "生成网页 → 更新同一个妙搭应用。进度见新的进度卡片。",
+        )
 
     async def _handle_log_command(
         self, chat_id: str, user_open_id: str, session_id_arg: str | None,

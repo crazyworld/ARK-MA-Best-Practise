@@ -13,12 +13,28 @@
 
 ## 2026-11-04
 
+### 新增 /republish：HC3 后补营销观察配图，只重跑网页与妙搭发布
+
+- **触发现象**：营销观察配图只来自 HC3 定稿飞书文档里的人工图片；HC3 通过后才发现漏传，只能在网页里
+  看到「配图待补充」。`/continue` 对已完成（done）任务不生效，重新触发又要从取数跑起。
+- **做法**：新命令 `/republish [job_id|session_id]`，默认取本会话最近一个已过 HC3 的任务，在原 Session
+  注入自包含指令：不重跑 A~F，只重跑 Phase G（从飞书文档重新读取配图并生成网页）和 Phase H（更新
+  `status.h.app_id` 同一个妙搭应用）。新发一张进度卡跟踪本轮进度。
+- **旧 Session 兼容**：指令自包含，不依赖 Session 创建时的 coordinator 版本；BYOK Header 改为按
+  Session 的 agent 快照决定（`agent.model.provider` 非空才带），切模型前用方舟原生模型的旧 Session
+  不会因多带 Header 被 400 InvalidModelHeader 拒绝。
+- **防误判**：判定本轮完成时只看 `/republish` 之后的消息，历史旧 `online_url` 不会把本轮发布失败误判
+  为完成。有其他任务在运行、或 Session 非 idle 时拒绝，不改本地状态。
+- **影响文件**：`gateway.py`、`topic6_runner.py`、`pipeline_store.py`（`list_jobs_for_chat`）、
+  `arkagent/ark.py`（`get_session`）、`openspec/specs/{gateway-command-routing,session-runner}`、
+  `TOPIC6_DEBUG_QUICKSTART.md` §2.5.1、`tests/test_topic6_{new_command,interrupt_recovery}.py`
+
 ### Agent 模型改为 DeepSeek-V4-Flash-0731，token_limits 按模型原生规格
 
 - **变更**：4 个 Agent（`agents/{coordinator,annotator,insighter,validator}.json`）`model.id`
   `DeepSeek-V4.1-Flash` → `DeepSeek-V4-Flash-0731`（bmc-llm-relay 模型列表标注：上下文 1,000k、
   输出上限 384k、OpenAI/Anthropic/OpenAI-response 协议）。`token_limits` 256000/200000/56000 →
-  1000000/616000/384000（输入上限 = 上下文 − 输出上限，保证输入+输出不超过模型窗口）。
+  1000000/1000000/384000（该模型的上下文只计输入，输出上限另计，所以最大输入 = 上下文）。
 - **原因**：256K 是为避开"~180K 平台 bug"而人为压低的；该 bug 已查明是 BYOK Header 漏带（见下条），
   不再需要压低窗口，按模型原生能力配置，长流程不再在 ~200K 被迫压缩历史。
 - **实测**：212 → relay 以 BYOK Header 调 `DeepSeek-V4-Flash-0731` 带 tools 请求，`finish_reason=tool_calls`。

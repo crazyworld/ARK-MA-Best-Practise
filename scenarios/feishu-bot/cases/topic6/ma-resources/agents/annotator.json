@@ -8,7 +8,7 @@
     "protocol": "openai_chat_completions",
     "token_limits": {
       "context_window": 1000000,
-      "max_input_token_length": 616000,
+      "max_input_token_length": 1000000,
       "max_output_token_length": 384000
     }
   },

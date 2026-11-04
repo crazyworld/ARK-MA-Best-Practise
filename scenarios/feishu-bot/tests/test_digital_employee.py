@@ -262,7 +262,9 @@ def test_direct_session_mounts_bot_and_sender_user_vault(loop):
         chat_id="oc-direct",
     )
     assert bot.accept(message) is True
-    _drain(loop, lambda: len(sender.chat_sends) == 1)
+    # 回复与撤回「稍等」表情是 _reply → _unack 两个连续的 run_in_executor 步骤,
+    # 只等 chat_sends 会在两者之间断言(全量并发负载下偶发失败);等到最终状态再断言
+    _drain(loop, lambda: len(sender.chat_sends) == 1 and sender.deleted_reactions, tries=200)
 
     assert ark.create_calls[0]["vault_ids"] == ["vlt-bot", "vlt-user"]
     env = ark.create_calls[0]["env_overrides"]

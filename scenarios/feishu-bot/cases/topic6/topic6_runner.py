@@ -63,6 +63,16 @@ MODE_SMOKE_KEYWORDS = ("smoke", "冒烟", "冒烟测试", "快速测试", "test"
 MAX_IDLE_NUDGES = 3
 # Agent 需要用户做决定时输出的行首标记（coordinator.system.md R14）；Gateway 不催促。
 NEED_DECISION_MARKER = "[need_decision]"
+# /republish:已过 HC3 的任务只重跑 Phase G(网页)+ H(妙搭),用于 HC3 后补/换营销观察配图。
+# 消息自包含步骤,不依赖 Session 创建时的 coordinator 版本(旧 Session 也能执行)。
+REPUBLISH_MESSAGE = (
+    "[republish] 用户已在 HC3 定稿的飞书文档中补充/替换了营销观察配图，请重新发布网页：\n"
+    "1. 不要重跑 Phase A~F，不要修改报告内容和飞书文档。\n"
+    "2. 输出 `[phase] G`，按 Phase G 规定从飞书文档(status.f.feishu_doc_url)重新读取最新配图，"
+    "重新生成并校验网页。\n"
+    "3. 输出 `[phase] H`，按 Phase H 规定更新同一个妙搭应用(status.h.app_id)，不要新建应用。\n"
+    '4. 成功后最后一条消息只输出发布 JSON：{"phase":"H","release_status":"finished","online_url":"<发布 API 返回的链接>"}'
+)
 NEED_DECISION_REPLY_LIMIT = 3000
 # HC 卡点的 idle 是正常业务行为（等人审），不做自动催促。
 _HC_PHASE_PREFIXES = tuple(HC_KINDS)
@@ -345,6 +355,9 @@ class _ProgressState:
     # provider 重试已发出唤醒消息、尚未看到其后的 idle：紧随 session.error 的
     # retries_exhausted idle 属于同一次故障，不能再走 nudge（否则一次故障吃两份额度）。
     provider_retry_pending: bool = False
+    # 只在该下标之后的 Session 事件里找 Phase H online_url:/republish 前的旧链接不能把
+    # 本轮发布失败误判为完成。
+    history_floor: int = 0
 
     def push_tool_line(self, line: str) -> None:
         if len(self.tool_lines) == self.tool_lines.maxlen:
@@ -385,6 +398,8 @@ class Topic6Runner:
         self._progress: dict[str, "_ProgressState"] = {}
         # 同一任务的进度事件与 HITL 回调可能并发 patch；按 job 串行，避免旧快照覆盖新状态。
         self._card_locks: dict[str, asyncio.Lock] = {}
+        # ma_session_id → 该 Session 的 Agent 是否走 BYOK(创建时的 agent 快照决定,之后不变)。
+        self._session_byok: dict[str, bool] = {}
 
     def add_vault_id(self, vault_id: str) -> None:
         """追加一个每个新 Session 都要挂的 Vault（如 Gateway 异步置备的 bot token Vault）。"""
@@ -527,8 +542,29 @@ class Topic6Runner:
         user.message 漏带，方舟触发的那次模型请求就会以 model_request_failed_error
         (input=0/output=0)失败。所以首条消息、HC 续跑、idle 催促、provider 重试、
         重启恢复都必须经过这里，禁止直接调用 self._ark.send_message。
+        Header 按 Session 决定:方舟原生模型的 Session 收到 X-User-Model-Header-* 会 400
+        InvalidModelHeader,所以切换模型前创建的旧 Session 不带 Header。
         """
-        await self._ark.send_message(session_id, text, extra_headers=self._extra_headers)
+        headers = await self._headers_for(session_id)
+        await self._ark.send_message(session_id, text, extra_headers=headers)
+
+    async def _headers_for(self, session_id: str) -> Optional[dict]:
+        if not self._extra_headers:
+            return None
+        byok = self._session_byok.get(session_id)
+        if byok is None:
+            try:
+                session = await self._ark.get_session(session_id)
+            except Exception as error:  # noqa: BLE001 - 查不到快照时按当前配置带 Header
+                log.warning(
+                    "topic6 get_session failed session=%s, keep BYOK header: %s",
+                    session_id, error,
+                )
+                return self._extra_headers
+            model = (session.get("agent") or {}).get("model") or {}
+            byok = bool(model.get("provider"))
+            self._session_byok[session_id] = byok
+        return self._extra_headers if byok else None
 
     async def resume_job(self, job: PipelineJob, decision_message: str) -> None:
         """HITL 卡片回调路径:注入 user.message 后重新订阅 SSE。"""
@@ -574,7 +610,9 @@ class Topic6Runner:
         # 直接按历史收口为 done，不再注入「继续」——注入后 Agent 只会回复收尾/裁决
         # 文本，不会重复输出发布 JSON，反而被 P0-4 再判一次失败。
         if job.status != STATUS_DONE and job.ma_session_id:
-            published = await self._find_published_online_url(job.ma_session_id)
+            published = await self._find_published_online_url(
+                job.ma_session_id, self._history_floor(job.job_id)
+            )
             if published:
                 log.info(
                     "topic6 /continue found published url in history job=%s url=%s",
@@ -599,20 +637,103 @@ class Topic6Runner:
         await self.resume_job(job, message)
         return job
 
-    async def _find_published_online_url(self, session_id: str) -> str:
-        """倒序扫描 Session 全部 agent.message，返回最近一次有效的 Phase H online_url。"""
+    async def _find_published_online_url(self, session_id: str, floor: int = 0) -> str:
+        """倒序扫描 Session 第 floor 条之后的 agent.message，返回最近一次有效的 Phase H online_url。"""
         try:
             events = await self._ark.list_session_events(session_id)
         except Exception as error:  # noqa: BLE001 - 查不到历史就按原逻辑续跑
             log.warning("topic6 list_session_events failed session=%s: %s", session_id, error)
             return ""
-        for event in reversed(events or []):
+        for event in reversed((events or [])[floor:]):
             if event.get("type") != "agent.message":
                 continue
             url = extract_final_online_url(event_text(event))
             if url:
                 return url
         return ""
+
+    def _history_floor(self, job_id: str) -> int:
+        state = self._progress.get(job_id)
+        return state.history_floor if state is not None else 0
+
+    def _hc3_passed(self, job: PipelineJob) -> bool:
+        if job.status == STATUS_DONE:  # 已妙搭发布 ⇒ 必然过了 HC3(含审核记录缺失的早期任务)
+            return True
+        hc = self._store.latest_hc_for_job(job.job_id, "HC3")
+        return hc is not None and hc.user_decision == "pass"
+
+    def find_republishable_job(self, chat_id: str, ref: str = "") -> PipelineJob:
+        """/republish 的目标:指定 job_id/session_id,否则取本会话最近一个已过 HC3 的任务。"""
+        if ref:
+            job = self._store.get_job(ref) or self._store.get_job_by_ma_session(ref)
+            if job is None:
+                raise Topic6RunnerError(f"未找到任务 {ref}(可传 job_id 或 session_id)。")
+            if job.chat_id != chat_id:
+                raise Topic6RunnerError(f"任务 {job.job_id} 不属于当前会话，请在原会话里发送。")
+            if not self._hc3_passed(job):
+                raise Topic6RunnerError(
+                    f"任务 {job.job_id} 还没通过 HC3,网页尚未生成，无需重新发布。"
+                )
+            return job
+        for job in self._store.list_jobs_for_chat(chat_id):
+            if self._hc3_passed(job):
+                return job
+        raise Topic6RunnerError("当前会话没有已通过 HC3 的任务，无法重新发布网页。")
+
+    async def republish_job(self, job: PipelineJob) -> PipelineJob:
+        """在原 Session 里只重跑 Phase G+H(重新读取飞书文档配图 → 网页 → 更新同一妙搭应用)。"""
+        async with self._start_lock:
+            active = self._store.get_active_job()
+            if active is not None:
+                raise Topic6RunnerError(
+                    f"当前已有任务在运行(job={active.job_id},phase={active.current_phase}),"
+                    "请等它结束后再重新发布。"
+                )
+            try:
+                session = await self._ark.get_session(job.ma_session_id)
+                events = await self._ark.list_session_events(job.ma_session_id)
+            except Exception as error:  # noqa: BLE001
+                raise Topic6RunnerError(f"读取 Session {job.ma_session_id} 失败：{error!s}"[:300]) from error
+            status = str(session.get("status") or "")
+            if status != "idle":
+                raise Topic6RunnerError(
+                    f"Session {job.ma_session_id} 当前状态为 {status or '未知'},只有空闲的 Session 才能重新发布。"
+                )
+            model = (session.get("agent") or {}).get("model") or {}
+            self._session_byok[job.ma_session_id] = bool(model.get("provider"))
+
+            self._store.resume_running(job.job_id, next_phase="G")
+            job = self._store.get_job(job.job_id) or job
+            state = _ProgressState(history_floor=len(events or []))
+            self._progress[job.job_id] = state
+            self._card_locks.setdefault(job.job_id, asyncio.Lock())
+            # 原进度卡在聊天记录里很靠上:重发一张新卡,后续进度与结果都 patch 到这张卡
+            card = build_progress_card(
+                job=job, status=STATUS_RUNNING, elapsed_sec=0, tool_lines=[], overflow=0
+            )
+            try:
+                message_id = await self._loop_run(
+                    lambda: self._feishu.send_interactive_card(job.chat_id, card)
+                )
+            except Exception as error:  # noqa: BLE001
+                log.warning("topic6 republish card failed job=%s: %s", job.job_id, error)
+                message_id = None
+            if message_id:
+                self._store.set_progress_card_message_id(job.job_id, message_id)
+                job.progress_card_message_id = message_id
+                state.last_signature = self._signature(card)
+
+            prev = self._active_streams.get(job.ma_session_id)
+            if prev is not None and not prev.done():
+                prev.cancel()
+            log.info(
+                "topic6 republish job=%s session=%s byok=%s floor=%d",
+                job.job_id, job.ma_session_id, self._session_byok[job.ma_session_id],
+                state.history_floor,
+            )
+            task = self._spawn_stream(job, first_user_message=REPUBLISH_MESSAGE)
+            self._active_streams[job.ma_session_id] = task
+            return job
 
     async def cancel_active_job(
         self, chat_id: str, thread_id: str, user_open_id: str
@@ -1132,7 +1253,9 @@ class Topic6Runner:
         online_url = extract_final_online_url(last)
         if not online_url and (job.current_phase or "") == "H" and job.ma_session_id:
             # 最后一条不含发布 JSON（如收尾说明/裁决文本），但本 Session 早先已交付过。
-            online_url = await self._find_published_online_url(job.ma_session_id)
+            online_url = await self._find_published_online_url(
+                job.ma_session_id, self._history_floor(job_id)
+            )
         if online_url:
             # Phase H 正常完成。
             self._store.mark_done(job_id, online_url=online_url)

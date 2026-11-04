@@ -48,10 +48,10 @@ RELAY_AGENT_MODEL = {
     "provider": "bmc-llm-relay",
     "base_url": "https://bmc-llm-relay.bluemediagroup.cn/v1/chat/completions",
     "protocol": "openai_chat_completions",
-    # BYOK 必须带 token_limits;按模型原生规格:上下文 1M、输出上限 384K,输入=上下文-输出
+    # BYOK 必须带 token_limits;按模型原生规格:上下文(仅指输入)1M,输出上限 384K 另计
     "token_limits": {
         "context_window": 1000000,
-        "max_input_token_length": 616000,
+        "max_input_token_length": 1000000,
         "max_output_token_length": 384000,
     },
 }

@@ -430,6 +430,16 @@ class PipelineStore:
                 ).fetchall()
         return [self._row_to_job(r) for r in rows]
 
+    def list_jobs_for_chat(self, chat_id: str, limit: int = 20) -> list[PipelineJob]:
+        """某会话最近的任务(新→旧),供 /republish 默认选取最近一次可重发的任务。"""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM pipeline_jobs WHERE chat_id = ? "
+                "ORDER BY updated_at DESC LIMIT ?",
+                (chat_id, limit),
+            ).fetchall()
+        return [self._row_to_job(r) for r in rows]
+
     def update_phase(self, job_id: str, current_phase: str) -> None:
         with self._lock:
             self._conn.execute(

@@ -905,3 +905,177 @@ def test_phase_h_idle_uses_earlier_published_url(loop, tmp_path):
     reloaded = store.get_job(job.job_id)
     assert reloaded.status == pipeline_store.STATUS_DONE
     assert reloaded.online_url == _PUBLISHED_URL
+
+
+# ---------------------------------------------------------------------------
+# /republish:HC3 后补配图,只重跑 Phase G+H;旧 Session(切模型前、已 done)也支持
+# ---------------------------------------------------------------------------
+
+_OLD_URL = "https://bluefocus.feishu.cn/page/OldPage123"
+
+
+class _RepublishArk:
+    def __init__(self, *, provider="bmc-llm-relay", status="idle", events=None):
+        self.provider = provider
+        self.status = status
+        self.events = list(events or [])
+        self.sent: list[tuple[str, str, object]] = []
+
+    async def get_session(self, _sid):
+        model = {"id": "m"}
+        if self.provider:
+            model["provider"] = self.provider
+        return {"status": self.status, "agent": {"model": model}}
+
+    async def list_session_events(self, _sid):
+        return list(self.events)
+
+    async def send_message(self, sid, text, extra_headers=None):
+        self.sent.append((sid, text, extra_headers))
+
+
+class _CardSender:
+    def __init__(self):
+        self.cards = []
+
+    def send_interactive_card(self, chat_id, card):
+        self.cards.append(chat_id)
+        return "om-new-card"
+
+
+def _published_events(url=_OLD_URL):
+    return [{"type": "agent.message", "content": [{"type": "text", "text": (
+        '{"phase":"H","release_status":"finished","online_url":"' + url + '"}'
+    )}]}]
+
+
+def _done_job(store, *, session="sesn-old", chat="c1"):
+    job = store.create_job(
+        chat_id=chat, thread_id="", user_open_id="u1",
+        ma_session_id=session, mode="full", project_dir="/workspace/W44",
+    )
+    store.update_phase(job.job_id, "H")
+    store.mark_done(job.job_id, online_url=_OLD_URL)
+    return store.get_job(job.job_id)
+
+
+def _republish_runner(tmp_path, loop, ark, headers=None):
+    store = PipelineStore(str(tmp_path / "topic6.db"))
+    cfg = RunnerConfig(coordinator_agent_id="a", environment_id="e", memory_store_id="m", vault_ids=())
+    runner = Topic6Runner(ark, _CardSender(), store, cfg, loop=loop, extra_headers=headers)
+
+    async def _noop(*_a, **_k):
+        return None
+
+    runner._render_and_patch = _noop  # type: ignore[assignment]
+    spawned = {}
+
+    def _fake_spawn(job_arg, first_user_message):
+        spawned["session"] = job_arg.ma_session_id
+        spawned["message"] = first_user_message
+        return object()
+
+    runner._spawn_stream = _fake_spawn  # type: ignore[method-assign]
+    return runner, store, spawned
+
+
+def test_republish_done_job_reruns_g_h_in_same_session(loop, tmp_path):
+    ark = _RepublishArk(events=_published_events())
+    runner, store, spawned = _republish_runner(tmp_path, loop, ark)
+    job = _done_job(store)
+    target = runner.find_republishable_job("c1")
+    assert target.job_id == job.job_id
+    loop.run_until_complete(runner.republish_job(target))
+    assert spawned["session"] == "sesn-old"
+    assert spawned["message"] == topic6_runner.REPUBLISH_MESSAGE
+    assert "[phase] G" in spawned["message"] and "status.h.app_id" in spawned["message"]
+    reloaded = store.get_job(job.job_id)
+    assert reloaded.status == pipeline_store.STATUS_RUNNING and reloaded.current_phase == "G"
+    assert reloaded.progress_card_message_id == "om-new-card"
+    # 本轮之前的旧链接不能算作本轮完成
+    assert runner._progress[job.job_id].history_floor == 1
+
+
+def test_republish_old_link_not_mistaken_for_new_result(loop, tmp_path):
+    """Phase H 失败时历史里的旧 online_url 不得让本轮误判为 done。"""
+    ark = _RepublishArk(events=_published_events())
+    runner, store, _ = _republish_runner(tmp_path, loop, ark)
+    job = _done_job(store)
+    loop.run_until_complete(runner.republish_job(job))
+    store.update_phase(job.job_id, "H")
+    loop.run_until_complete(runner._handle_idle(job.job_id, ["妙搭发布失败：OAuth 过期"]))
+    assert store.get_job(job.job_id).status == pipeline_store.STATUS_FAILED
+    # 本轮真正发布成功后按新链接收口
+    new_url = "https://bluefocus.feishu.cn/page/NewPage456"
+    ark.events += _published_events(new_url)
+    store.resume_running(job.job_id, next_phase="H")
+    loop.run_until_complete(runner._handle_idle(job.job_id, [
+        '{"phase":"H","release_status":"finished","online_url":"' + new_url + '"}'
+    ]))
+    reloaded = store.get_job(job.job_id)
+    assert reloaded.status == pipeline_store.STATUS_DONE and reloaded.online_url == new_url
+
+
+def test_republish_rejects_before_hc3_busy_session_and_other_chat(loop, tmp_path):
+    ark = _RepublishArk()
+    runner, store, _ = _republish_runner(tmp_path, loop, ark)
+    pending = store.create_job(
+        chat_id="c1", thread_id="", user_open_id="u1",
+        ma_session_id="sesn-e", mode="full", project_dir="/workspace/W45",
+    )
+    store.mark_failed(pending.job_id, "Phase E 失败")
+    with pytest.raises(Topic6RunnerError, match="HC3"):
+        runner.find_republishable_job("c1", pending.job_id)
+    with pytest.raises(Topic6RunnerError, match="没有已通过 HC3"):
+        runner.find_republishable_job("c1")
+    done = _done_job(store, session="sesn-x", chat="c2")
+    with pytest.raises(Topic6RunnerError, match="不属于当前会话"):
+        runner.find_republishable_job("c1", done.job_id)
+    # 指定 session_id 也能定位
+    assert runner.find_republishable_job("c2", "sesn-x").job_id == done.job_id
+    # Session 非 idle 时拒绝,不改本地状态
+    ark.status = "running"
+    with pytest.raises(Topic6RunnerError, match="空闲"):
+        loop.run_until_complete(runner.republish_job(done))
+    assert store.get_job(done.job_id).status == pipeline_store.STATUS_DONE
+
+
+def test_republish_blocked_while_another_job_active(loop, tmp_path):
+    ark = _RepublishArk()
+    runner, store, _ = _republish_runner(tmp_path, loop, ark)
+    done = _done_job(store)
+    store.create_job(
+        chat_id="c9", thread_id="", user_open_id="u9",
+        ma_session_id="sesn-run", mode="full", project_dir="/workspace/W46",
+    )
+    with pytest.raises(Topic6RunnerError, match="已有任务在运行"):
+        loop.run_until_complete(runner.republish_job(done))
+    assert store.get_job(done.job_id).status == pipeline_store.STATUS_DONE
+
+
+def test_republish_failed_after_hc3_is_supported(loop, tmp_path):
+    ark = _RepublishArk()
+    runner, store, spawned = _republish_runner(tmp_path, loop, ark)
+    job = store.create_job(
+        chat_id="c1", thread_id="", user_open_id="u1",
+        ma_session_id="sesn-h", mode="full", project_dir="/workspace/W44",
+    )
+    event_id = store.append_hc_event(job.job_id, "HC3", {"feishu_doc_url": "https://x.feishu.cn/docx/a"})
+    store.resolve_hc_event(event_id, "pass")
+    store.update_phase(job.job_id, "H")
+    store.mark_failed(job.job_id, "Phase H 妙搭发布失败")
+    assert runner.find_republishable_job("c1").job_id == job.job_id
+    loop.run_until_complete(runner.republish_job(job))
+    assert spawned["session"] == "sesn-h"
+
+
+@pytest.mark.parametrize("provider, expect_header", [("bmc-llm-relay", True), (None, False)])
+def test_byok_header_follows_session_model(loop, tmp_path, provider, expect_header):
+    """旧 Session 用方舟原生模型:带 BYOK Header 会 400 InvalidModelHeader,必须不带。"""
+    headers = {"X-User-Model-Header-Authorization": "Bearer k"}
+    ark = _RepublishArk(provider=provider)
+    runner, _store, _ = _republish_runner(tmp_path, loop, ark, headers=headers)
+    loop.run_until_complete(runner._send_message("sesn-1", "hi"))
+    loop.run_until_complete(runner._send_message("sesn-1", "hi again"))
+    assert [h for _, _, h in ark.sent] == [headers if expect_header else None] * 2
+
