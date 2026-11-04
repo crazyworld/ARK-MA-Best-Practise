@@ -27,7 +27,12 @@ WORKSPACE_ROOT = Path("/workspace")
 
 from e1_industry import prep_e1_industry
 from e2_nodes import prep_e2_nodes
-from e3_platforms import prep_e3_platforms, prep_e3_word_freq_audit
+from e3_platforms import (
+    prep_e3_platforms,
+    prep_e3_word_freq_audit,
+    prep_e3_word_candidates,
+    prep_e3_event_fulltext,
+)
 from e4_marketing import prep_e4_marketing, prep_e4_candidates
 
 
@@ -139,8 +144,21 @@ def main():
     (out_dir / "e3_word_freq_audit.md").write_text(audit_content, encoding="utf-8")
     print(f"[run_stats]   ✅ {out_dir / 'e3_word_freq_audit.md'}")
 
+    # E3 打标(_tagging)与洞察初稿(_insight_draft)的结构化输入,供 pipeline_e 的 E3 1a/1b 并发步骤读取
+    for label, fname, fn in (
+        ("E3 平台热点词候选(供打标)", "e3_word_candidates.json", prep_e3_word_candidates),
+        ("E3 热门事件全量标题(供洞察初稿)", "e3_event_fulltext.json", prep_e3_event_fulltext),
+    ):
+        print(f"[run_stats] 生成 {label}...")
+        (out_dir / fname).write_text(
+            json.dumps(fn(df_y), ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        print(f"[run_stats]   ✅ {out_dir / fname}")
+
     print("[run_stats] 生成 E2 节点数据...")
-    e2_result = prep_e2_nodes(df_y, pub_date)
+    # E2 上周节点回顾用全量 df(对齐 CC V2 E17):节点是否展示不应被"是否营销可用"预先卡掉
+    # (W43 霜降只出现在 1 条非商业热点里,用 df_y 会被过滤成"上周无节点");E1/E3/E4 仍用 df_y
+    e2_result = prep_e2_nodes(df, pub_date)
     e2_flags_path = out_dir / "e2_flags.json"
     e2_flags_path.write_text(
         json.dumps(e2_result, ensure_ascii=False, indent=2), encoding="utf-8"

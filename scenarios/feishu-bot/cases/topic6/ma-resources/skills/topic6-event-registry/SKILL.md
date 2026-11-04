@@ -179,8 +179,9 @@ x3 同时做过合方向的拆分，所以它不是只会合——实测微博�
 ### 运行契约：授权、超时、失败恢复、并行
 
 **开跑前不需要向用户索要凭据**，脚本从环境变量读：
-`ARK_BASE_URL` → `OPENAI_BASE_URL`，`ARK_API_KEY` → `OPENAI_API_KEY`。
-Base URL 必须包含版本前缀（方舟示例：`https://ark.cn-beijing.volces.com/api/v3`）。
+`LLM_RELAY_BASE_URL` + `LLM_RELAY_API_KEY`（bmc-llm-relay / blueai 模型网关，OpenAI 兼容），
+Embedding 可用 `EMBEDDING_BASE_URL` / `EMBEDDING_API_KEY` 单独指定。缺失直接报错，不回退 `ARK_*`。
+Base URL 必须包含版本前缀（示例：`https://bmc-llm-relay.bluemediagroup.cn/v1`）。
 
 **所有阶段都有断点，任何中断后原样重跑即可续跑**，已完成批次读缓存、不重复计费。
 这覆盖了绝大多数异常：工具超时、进程被杀、网络断、**API 额度用尽换 Key**、限流。
@@ -423,15 +424,17 @@ python3 $S/07_block_archive.py --run-dir . --prior-events work/prior_events.json
 分阶段明细见 [references/benchmarks.md](references/benchmarks.md)，
 台账缺陷的复现细节见 [references/runbook.md](references/runbook.md)。
 
-## 向量化用 doubao-embedding-vision-251215
+## 向量化用 Doubao-embedding（bmc-llm-relay）
 
-阶段 04 默认使用方舟当前推荐的 `doubao-embedding-vision-251215`，文本请求走
-`POST /api/v3/embeddings/multimodal`。该接口会把同一个 `input` 列表融合成一个向量，
-所以脚本逐条提交文本，再用 `--concurrency` 并发；不能把多条标题塞进一个请求。
+阶段 04 默认使用 bmc-llm-relay 上的 `Doubao-embedding`（网关实际路由到
+`doubao-embedding-text-240715`，2560 维），走标准 `POST {LLM_RELAY_BASE_URL}/embeddings`
+批量协议（`EMBEDDING_IS_MULTIMODAL=false`）。跨周召回依赖向量空间一致，MUST NOT 随意更换
+向量模型；确需更换时先重置上一周 registry 快照。可通过 `EMBEDDING_MODEL_ID` 或 `--model` 覆盖。
 
-`Doubao-embedding` 是旧模型名，当前端点会返回
-`InvalidEndpointOrModel.NotFound`，不得再作为默认值。可通过
-`EMBEDDING_MODEL_ID` 或 `--model` 显式覆盖模型。
+若改用方舟原生多模态模型 `doubao-embedding-vision-251215`，需设 `EMBEDDING_IS_MULTIMODAL=true`
+并通过 `EMBEDDING_BASE_URL/EMBEDDING_API_KEY` 指向对应端点：该接口会把同一个 `input` 列表
+融合成一个向量，脚本逐条提交文本再用 `--concurrency` 并发。方舟端点上 `Doubao-embedding`
+旧名会返回 `InvalidEndpointOrModel.NotFound`（relay 上可用）。
 
 旧基准中，从出海的 `text-embedding-3-small` 换到当时可用的 `Doubao-embedding`
 曾把 1816 条从 20~30 分钟降到 15.8 秒；这只是历史对照，不代表旧模型当前仍可调用。

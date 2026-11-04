@@ -238,7 +238,7 @@ class _FakeStreamingHttpResponse:
         return iter(self._lines)
 
 
-def test_relay_appends_resource_to_versioned_ark_base_url(monkeypatch):
+def test_relay_appends_resource_to_versioned_relay_base_url(monkeypatch):
     module = _load_relay_module()
     requested_urls = []
     requested_bodies = []
@@ -263,20 +263,18 @@ def test_relay_appends_resource_to_versioned_ark_base_url(monkeypatch):
             ]
         )
 
-    monkeypatch.delenv("LLM_RELAY_BASE_URL", raising=False)
-    monkeypatch.delenv("LLM_RELAY_API_KEY", raising=False)
-    monkeypatch.setenv("ARK_BASE_URL", "https://ark.example/api/v3/")
-    monkeypatch.setenv("ARK_API_KEY", "test-key")
+    monkeypatch.setenv("LLM_RELAY_BASE_URL", "https://relay.example/v1/")
+    monkeypatch.setenv("LLM_RELAY_API_KEY", "test-key")
     monkeypatch.setattr(module.urllib.request, "urlopen", fake_urlopen)
 
     assert module.Relay("test-model", 10, "system").call("hello") == "ok"
-    assert requested_urls == ["https://ark.example/api/v3/chat/completions"]
+    assert requested_urls == ["https://relay.example/v1/chat/completions"]
     assert requested_bodies[0]["stream"] is True
     assert requested_bodies[0]["stream_options"] == {"include_usage": True}
 
 
-def test_relay_prefers_llm_relay_env_over_ark_env(monkeypatch):
-    """BYOK Direct 模式：LLM_RELAY_* 必须优先于 ARK_*，后者仍专职方舟控制面。"""
+def test_relay_uses_llm_relay_env_and_ignores_ark_env(monkeypatch):
+    """模型统一走 bmc-llm-relay：ARK_* 只是方舟控制面凭据，不得用于模型调用。"""
     module = _load_relay_module()
     requested_urls = []
 
@@ -298,6 +296,22 @@ def test_relay_prefers_llm_relay_env_over_ark_env(monkeypatch):
     assert requested_urls == ["https://bmc-llm-relay.example.com/v1/chat/completions"]
 
 
+@pytest.mark.parametrize("loader", ["relay", "embedder"])
+def test_relay_and_embedder_do_not_fall_back_to_ark_env(monkeypatch, loader):
+    """缺 LLM_RELAY_* 时必须报错,不得静默改用 ARK_*/OPENAI_*(会改走火山方舟计费与配额)。"""
+    module = _load_relay_module()
+    for name in ("LLM_RELAY_BASE_URL", "LLM_RELAY_API_KEY", "EMBEDDING_BASE_URL", "EMBEDDING_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ARK_BASE_URL", "https://ark.example/api/v3")
+    monkeypatch.setenv("ARK_API_KEY", "ark-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://openai.example/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    with pytest.raises(SystemExit, match="LLM_RELAY"):
+        if loader == "relay":
+            module.Relay("m", 10, "s")
+        else:
+            module.Embedder(model="Doubao-embedding")
+
 def test_vision_embedder_uses_multimodal_protocol_one_text_per_request(monkeypatch):
     module = _load_relay_module()
     requested_urls = []
@@ -311,12 +325,10 @@ def test_vision_embedder_uses_multimodal_protocol_one_text_per_request(monkeypat
             {"usage": {"input_tokens": 1}, "data": {"embedding": [0.1, 0.2]}}
         )
 
-    monkeypatch.setenv("ARK_BASE_URL", "https://ark.example/api/v3")
-    monkeypatch.setenv("ARK_API_KEY", "test-key")
+    monkeypatch.setenv("LLM_RELAY_BASE_URL", "https://ark.example/api/v3")
+    monkeypatch.setenv("LLM_RELAY_API_KEY", "test-key")
     monkeypatch.delenv("EMBEDDING_BASE_URL", raising=False)
     monkeypatch.delenv("EMBEDDING_API_KEY", raising=False)
-    monkeypatch.delenv("LLM_RELAY_BASE_URL", raising=False)
-    monkeypatch.delenv("LLM_RELAY_API_KEY", raising=False)
     monkeypatch.setattr(module.urllib.request, "urlopen", fake_urlopen)
 
     assert module.Embedder(model="doubao-embedding-vision-251215").embed(
@@ -361,12 +373,10 @@ def test_embedder_keeps_standard_batch_protocol_for_legacy_override(monkeypatch)
             }
         )
 
-    monkeypatch.setenv("ARK_BASE_URL", "https://ark.example/api/v3")
-    monkeypatch.setenv("ARK_API_KEY", "test-key")
+    monkeypatch.setenv("LLM_RELAY_BASE_URL", "https://ark.example/api/v3")
+    monkeypatch.setenv("LLM_RELAY_API_KEY", "test-key")
     monkeypatch.delenv("EMBEDDING_BASE_URL", raising=False)
     monkeypatch.delenv("EMBEDDING_API_KEY", raising=False)
-    monkeypatch.delenv("LLM_RELAY_BASE_URL", raising=False)
-    monkeypatch.delenv("LLM_RELAY_API_KEY", raising=False)
     monkeypatch.setattr(module.urllib.request, "urlopen", fake_urlopen)
 
     embedder = module.Embedder(model="text-embedding-3-small")
@@ -821,8 +831,8 @@ def test_demo_routes_start_all_five_routes_concurrently(tmp_path, monkeypatch):
     lock = threading.Lock()
 
     monkeypatch.setattr(module.pd, "read_excel", lambda _path: frame.copy())
-    monkeypatch.setenv("ARK_API_KEY", "test-key")
-    monkeypatch.setenv("ARK_BASE_URL", "https://ark.example")
+    monkeypatch.setenv("LLM_RELAY_API_KEY", "test-key")
+    monkeypatch.setenv("LLM_RELAY_BASE_URL", "https://relay.example/v1")
     monkeypatch.setattr(module, "_record_cost", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         module,
@@ -884,8 +894,8 @@ def test_demo_routes_persist_completed_routes_and_resume_missing_chunk(
 
     monkeypatch.setattr(module.pd, "read_excel", lambda _path: input_frame.copy())
     monkeypatch.setattr(module, "_atomic_excel", fake_atomic_excel)
-    monkeypatch.setenv("ARK_API_KEY", "test-key")
-    monkeypatch.setenv("ARK_BASE_URL", "https://ark.example")
+    monkeypatch.setenv("LLM_RELAY_API_KEY", "test-key")
+    monkeypatch.setenv("LLM_RELAY_BASE_URL", "https://relay.example/v1")
     monkeypatch.setattr(module, "_record_cost", lambda *_args, **_kwargs: None)
 
     failed_once = False
@@ -1078,7 +1088,7 @@ def test_pipeline_e_checkpoints_each_section_and_resumes_only_failure(
     insight_dir = tmp_path / "06_洞察" / "v1"
     insight_dir.mkdir(parents=True)
     (insight_dir / "e1_data.md").write_text("E1 data", encoding="utf-8")
-    (insight_dir / "e3_data.md").write_text("E3 data", encoding="utf-8")
+    (insight_dir / "ex_data.md").write_text("EX data", encoding="utf-8")
     checkpoint_path = insight_dir / "pipeline_e_checkpoint_v1.json"
     checkpoint = {
         "checkpoint_version": module.CHECKPOINT_VERSION,
@@ -1099,17 +1109,17 @@ def test_pipeline_e_checkpoints_each_section_and_resumes_only_failure(
             "output_file": "e1_v1.md",
         },
         {
-            "id": "e3",
-            "name": "E3",
-            "prompt_dir": "E3",
-            "data_file": "e3_data.md",
-            "section_title": "# E3",
+            "id": "ex",  # 通用版块(e3/e4 有专属分步路由,另有测试覆盖)
+            "name": "EX",
+            "prompt_dir": "EX",
+            "data_file": "ex_data.md",
+            "section_title": "# EX",
             "max_tokens": 128,
-            "output_file": "e3_v1.md",
+            "output_file": "ex_v1.md",
         },
     ]
-    monkeypatch.setenv("ARK_API_KEY", "test-key")
-    monkeypatch.setenv("ARK_BASE_URL", "https://ark.example")
+    monkeypatch.setenv("LLM_RELAY_API_KEY", "test-key")
+    monkeypatch.setenv("LLM_RELAY_BASE_URL", "https://relay.example/v1")
     monkeypatch.setattr(module, "load_prompt_template", lambda _name: "{{data}}")
 
     output_written = asyncio.Event()
@@ -1132,13 +1142,13 @@ def test_pipeline_e_checkpoints_each_section_and_resumes_only_failure(
         active += 1
         max_active = max(max_active, active)
         try:
-            if sec["id"] == "e3":
+            if sec["id"] == "ex":
                 await output_written.wait()
                 saved = json.loads(checkpoint_path.read_text(encoding="utf-8"))
                 assert saved["sections"]["e1"]["status"] == "ok"
                 return {
-                    "id": "e3",
-                    "name": "E3",
+                    "id": "ex",
+                    "name": "EX",
                     "status": "error",
                     "error": "disconnect",
                     "content": "",
@@ -1180,7 +1190,7 @@ def test_pipeline_e_checkpoints_each_section_and_resumes_only_failure(
 
     assert [result["status"] for result in first_results] == ["ok", "error"]
     assert (insight_dir / "e1_v1.md").exists()
-    assert not (insight_dir / "e3_v1.md").exists()
+    assert not (insight_dir / "ex_v1.md").exists()
     assert max_active == 2
 
     resumed_calls = []
@@ -1213,12 +1223,12 @@ def test_pipeline_e_checkpoints_each_section_and_resumes_only_failure(
         )
     )
 
-    assert resumed_calls == ["e3"]
+    assert resumed_calls == ["ex"]
     assert resumed[0]["cached"] is True
     assert resumed[1]["status"] == "ok"
-    assert (insight_dir / "e3_v1.md").exists()
+    assert (insight_dir / "ex_v1.md").exists()
     saved = json.loads(checkpoint_path.read_text(encoding="utf-8"))
-    assert set(saved["sections"]) == {"e1", "e3"}
+    assert set(saved["sections"]) == {"e1", "ex"}
 
 
 def test_c2_runner_resumes_and_invalidates_outputs_when_model_changes(

@@ -57,6 +57,9 @@ ARK_BETA_HEADER="X-Ark-Beta: agentic-2026-06-01"
 : "${HOT_TOPICS_MCP_URL:?please export HOT_TOPICS_MCP_URL(topic6 数据源 MCP endpoint)}"
 : "${LARK_APP_ID:?please export LARK_APP_ID or FEISHU_APP_ID}"
 : "${LARK_APP_SECRET:?please export LARK_APP_SECRET or FEISHU_APP_SECRET}"
+# 沙箱脚本(C2/E/demo 路由)的模型统一走 bmc-llm-relay;缺失时 environment.json 会被展开成空串
+: "${LLM_RELAY_BASE_URL:?please export LLM_RELAY_BASE_URL(bmc-llm-relay 模型网关,如 https://bmc-llm-relay.bluemediagroup.cn/v1)}"
+: "${LLM_RELAY_API_KEY:?please export LLM_RELAY_API_KEY(bmc-llm-relay 模型网关 Key)}"
 
 # 本环境专属资源名后缀,隔离多环境/多人共用同一方舟账号时的 name 撞车。留空=不加后缀。
 RESOURCE_SUFFIX="${TOPIC6_RESOURCE_SUFFIX:-}"

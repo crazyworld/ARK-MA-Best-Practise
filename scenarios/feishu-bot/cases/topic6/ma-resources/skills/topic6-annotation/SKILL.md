@@ -15,10 +15,10 @@ description: 社媒热点周刊 Phase C 标注：调用 DataHub 完成 C0 基础
 ├── prompts/          # C0/R1~R5/C3 各任务活跃版本 (版本历史见 ma-resources/memory/topic6/_版本状态.md)
 │   ├── C0_基础事实/v5.md      # 活跃版 v5 (v1~v4 归档保留)
 │   ├── R1_平台借势/v2.md      # 活跃版 v2 (v1 归档保留)
-│   ├── R2_商业合作/v1.md
+│   ├── R2_商业合作/v2.md      # 活跃版 v2 (v1 归档保留)
 │   ├── R3_风险预警/v1.md
 │   ├── R4_创意借鉴/v2.md      # 活跃版 v2 (v1 归档保留)
-│   ├── R5_消费者行为/v2.md    # 活跃版 v2 (v1 归档保留)
+│   ├── R5_消费者行为/v3.md    # 活跃版 v3 (v1~v2 归档保留)
 │   └── 节点标注/v7.md         # 活跃版 v7
 ├── scripts/          # 一体化脚本 (submit+poll+postprocess 合并)
 │   ├── datahub_annotate.py    # 单任务 worker + 幂等后台启动

@@ -26,12 +26,19 @@ topic6-insight/
 │   └── e4_marketing.py         E4 营销发现(舆情风险/合作动态/营销观察/消费洞察)
 ├── 02_洞察/                    Prompt 目录
 │   ├── _shared/role_style.md   共享角色/风格,拼在每个版块 prompt 前
-│   ├── E1_行业话题/v2.md
-│   ├── E2_营销节点/v3.md
-│   ├── E3_平台新鲜事/v2.md
+│   ├── E1_行业话题/v3.md
+│   ├── E2_营销节点/v7.md
+│   ├── E3_平台新鲜事/
+│   │   ├── v6.md               分平台撰写 prompt(每平台一次调用)
+│   │   ├── _tagging/v3.md      热点词打标(主体是否明确/是否可借势)
+│   │   └── _insight_draft/v1.md 事件洞察初稿(全量标题判信号类型)
 │   └── E4_营销发现/
-│       ├── v6.md               撰写 prompt
-│       └── _tagging/v1.md      打标 prompt(舆情风险可接性/合作动态参考价值)
+│       ├── _tagging/v5.md      打标(舆情风险可接性/合作动态参考价值)
+│       ├── _curation/v3.md     营销观察/消费洞察草稿枚举
+│       ├── _arbitration/v3.md  跨板块归属仲裁 + 同池去重
+│       ├── _writing_coop_risk/v4.md          A 组撰写(合作动态+舆情风险)
+│       └── _writing_marketing_consumer/v1.md B 组撰写(营销观察+消费洞察)
+│       (v6.md 等旧版保留供回退,E4 主路径不再读取)
 └── references/
     ├── E3_统计口径说明.md
     └── 综合热度指数算法说明.md
@@ -46,29 +53,39 @@ python /mnt/skills/topic6-insight/scripts/pipeline_e.py \
   --project-dir /workspace/Projects/W35_20260824-20260830 \
   --mode skip_sampling \
   --publish-date 2026-08-31 \
-  --model ep-your-endpoint-id
+  --model Doubao-Seed-Evolving
 ```
 
 该入口一次完成数据预处理，并在进程内以默认最大并发 2 流式调用 E1~E4。每次调用
 失败最多尝试 5 次（429、5xx、断连等可恢复错误使用指数退避和全新客户端），每个成功
 版块立即原子写入 Markdown 和 checkpoint。相同参数重跑时会复用成功版块，只补失败
 版块。正常整轮不得拆成四次 `--sections eN` 调用；`--sections` 只用于审核打回后的
-单版块强制重跑。
+单版块强制重跑；未传 `--version` 时写回最新一轮，不新开只含部分版块的轮次。
+
+E3/E4 为分步路由（参照 CC V2.0），所有子调用共用同一个并发上限、升档和重试：
+- E3：热点词打标 ∥ 事件洞察初稿 → 本地合并（打标后重新打分取热点词 TOP3）→ 四平台
+  并发撰写，按微博/抖音/B站/知乎拼接；任一平台失败则 E3 失败。打标失败本轮不展示
+  「平台热点词」，初稿失败则撰写阶段自行判断信号。
+- E4：打标 ∥ 草稿枚举 → 跨板块仲裁 + 同池去重 → 脚本完成分组/排序 → A 组（合作动态
+  +舆情风险）∥ B 组（营销观察+消费洞察）撰写。每组做格式校验（B 组卡片字段）与链接
+  溯源校验（引用 URL 必须来自本组输入），不过则该组重写 1 次，仍不过则 E4 失败。
+- 每个版块成功后还要过完整性闸（正文非空、未截断、表格列数一致），不过重跑 1 次。
 
 关键参数:
 - `--project-dir`: 项目目录(绝对路径,或相对 `/workspace`)
 - `--publish-date`: 报告发布日,影响 E2 节点窗口判断
-- `--model`: 火山方舟 endpoint id
+- `--model`: bmc-llm-relay 模型 ID(默认 `Doubao-Seed-Evolving`,大小写与网关 `/v1/models` 一致)
 - `--version N`: 强制指定洞察版本(默认自增)
 - `--sections e1,e2`: 只跑指定版块
 - `--skip-data-prep`: 跳过统计脚本,从上一轮复制数据
-- `--max-workers`: LLM 最大并发数,默认 2
+- `--max-workers`: LLM 最大并发数,默认 6(E 阶段峰值并发路数,不排队)
 - `--max-attempts`: 每次版块调用最大尝试次数,默认 5
 
 产出目录 `{project_dir}/06_洞察/v{N}/`:
 - `e1_v{N}.md` ~ `e4_v{N}.md`
 - `e1_data.md` / `e3_data.md` / `e4_data.md`
-- `e2_flags.json` / `e4_candidates.json` / `e4_tagging_audit.md` / `e3_word_freq_audit.md`
+- `e2_flags.json` / `e3_word_candidates.json` / `e3_event_fulltext.json` / `e4_candidates.json` / `e3_word_freq_audit.md`
+- 子步骤审计：`e3_tagging_audit.md` / `e3_insight_draft_audit.md` / `e4_tagging_audit.md` / `e4_curation_audit.md` / `e4_arbitration_audit.md`
 - `pipeline_e_checkpoint_v{N}.json`
 - `pipeline_e_report_v{N}.json`
 
@@ -84,8 +101,7 @@ python /mnt/skills/topic6-insight/scripts/pipeline_f.py \
 ## 依赖
 
 - 环境变量:
-  - `ARK_API_KEY`(fallback `OPENAI_API_KEY`)
-  - `ARK_BASE_URL`(fallback `OPENAI_BASE_URL`) — MA 环境请指向火山方舟 endpoint
+  - `LLM_RELAY_API_KEY` / `LLM_RELAY_BASE_URL`(必填) — bmc-llm-relay(blueai 模型网关,OpenAI 兼容,如 `https://bmc-llm-relay.bluemediagroup.cn/v1`);缺失直接报错,不回退 `ARK_*`
   - `MARKETING_CALENDAR_PATH`(可选,默认 `/mnt/skills/topic6-fetch-normalize/references/marketing_calendar_2026.csv`)
 - 上游数据:正式模式使用 `{project_dir}/05_合并/wide_table_skip_sampling_r{N}.xlsx`,演示模式使用 `wide_table_demo_r{N}.xlsx`
 - 跨 skill 依赖: cost-tracker 调用 `/mnt/skills/topic6-annotation/tool/cost-tracker/cost_tracker.py`

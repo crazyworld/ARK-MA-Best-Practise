@@ -154,3 +154,52 @@ def test_retry_works_for_dict_tasks(tmp_path, dh, monkeypatch):
     )
     _, stats = dh._postprocess(df_new, task)
     assert stats["invalid"] == 0
+
+
+def test_annotate_retries_failed_rows_up_to_three_rounds(tmp_path, dh, monkeypatch):
+    """对齐 CC V2.0 补标最多 3 轮:每轮只提交上轮剩余失败行,第 2 轮起审计文件按轮分开。"""
+    project = tmp_path / "proj"
+    (project / "04_标注").mkdir(parents=True)
+    upload = tmp_path / "in.xlsx"
+    pd.DataFrame({"row_id": ["T1", "T2", "T3"], "title": list("abc")}).to_excel(upload, index=False)
+    prompt = tmp_path / "p.md"
+    prompt.write_text("p", encoding="utf-8")
+    first = pd.DataFrame({"row_id": ["T1", "T2", "T3"], "title": list("abc"),
+                          "llm_result": [C3_OK, "", ""]})
+    # 第 1 轮修好 T2、T3 仍空;第 2 轮修好 T3
+    rounds = [[{"row_id": "T2", "title": "b", "llm_result": C3_OK},
+               {"row_id": "T3", "title": "c", "llm_result": ""}],
+              [{"row_id": "T3", "title": "c", "llm_result": C3_OK}]]
+    submitted = []
+    monkeypatch.setenv("DATAHUB_API_KEY", "k")
+    monkeypatch.setattr(dh, "_list_models", lambda _k: [
+        {"model_id": "M", "platform": "ByteDance", "input_price": 0, "output_price": 0}])
+    monkeypatch.setattr(dh, "_prepare_input", lambda _p: upload)
+
+    def fake_upload(_k, path):
+        submitted.append(pd.read_excel(path)["row_id"].tolist())
+        return "ds"
+
+    created = []
+
+    def fake_create(*_a):
+        created.append(2000 + len(created))
+        return created[-1]
+
+    def fake_poll(_k, task_id):
+        if task_id == 2000:
+            return {"result_url": "u", "total_tokens": 10}
+        return {"result_list": rounds[task_id - 2001], "total_tokens": 5}
+
+    monkeypatch.setattr(dh, "_upload_file", fake_upload)
+    monkeypatch.setattr(dh, "_create_task", fake_create)
+    monkeypatch.setattr(dh, "_poll_until_done", fake_poll)
+    monkeypatch.setattr(dh, "_download_result", lambda _u, out: first.to_excel(out, index=False))
+    monkeypatch.setattr(dh, "_get_task", lambda _k, tid, **_kw: {"result_list": rounds[tid - 2001]})
+    meta = dh.annotate("c3", str(project), str(upload), str(prompt), "M", run_id=1)
+    assert submitted[1:] == [["T2", "T3"], ["T3"]]
+    assert meta["retry"]["rounds"] == 2 and meta["retry"]["recovered_rows"] == 2
+    assert meta["retry"]["retry_tokens"] == 10
+    task_dir = project / "04_标注" / dh.TASK_META["c3"]["subdir"]
+    assert (task_dir / "c3_retry_meta.json").exists() and (task_dir / "c3_retry_2_meta.json").exists()
+    assert dh.FAILED_ROW_RETRY_ROUNDS == 3

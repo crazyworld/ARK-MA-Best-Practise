@@ -46,6 +46,8 @@ set -a
 source "$CONFIG_FILE"
 set +a
 
+# 模型统一走 bmc-llm-relay(blueai 模型网关):沙箱脚本用 LLM_RELAY_*,4 个 Agent 的
+# BYOK 鉴权由 Gateway 按请求附加 BYOK_MODEL_AUTH_HEADER_*;ARK_API_KEY 只调方舟控制面。
 for name in \
   ARK_API_KEY \
   FEISHU_APP_ID \
@@ -53,7 +55,11 @@ for name in \
   HOT_TOPICS_MCP_URL \
   BLUEAI_API_KEY \
   DATAHUB_ENDPOINT \
-  DATAHUB_API_KEY
+  DATAHUB_API_KEY \
+  LLM_RELAY_BASE_URL \
+  LLM_RELAY_API_KEY \
+  BYOK_MODEL_AUTH_HEADER_NAME \
+  BYOK_MODEL_AUTH_HEADER_VALUE
 do
   if [[ -z "${!name:-}" ]]; then
     echo "缺少环境变量: $name（来源: $CONFIG_FILE）" >&2

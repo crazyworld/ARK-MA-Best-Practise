@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 01_统计 · E1 行业及热门话题
-统计口径唯一权威。02_洞察/E1_行业话题/v1.md 不重复。
+统计口径唯一权威。02_洞察/E1_行业话题/v3.md 不重复。
 """
 
 from __future__ import annotations
@@ -44,31 +44,25 @@ def parse_top10_from_e1_data(text: str) -> list[str]:
     return industries
 
 
-def build_wow_comparison(proj: Path, current_top10: list[str]) -> str:
+def build_wow_comparison(proj: Path, current_top10: list[str]) -> str | None:
     """生成「环比数据」文本块：只比较两期 TOP10 行业的排序变化（新进/跌出/排名升降），
-    不比具体数值。找不到上一期数据时，明确告知 LLM 如实说明，不允许编造。"""
+    不比具体数值。找不到可比的上一期数据时返回 None（2026-10-09改为None，此前这三种
+    情况各自返回一段"要求LLM原文照抄"的兜底文案字符串，导致报告固定写出"本期为该
+    系列首次归档，暂无上期数据可比"这类占位句——改成返回None后，调用方`prep_e1_industry()`
+    不会把任何"环比数据"文本块塞进喂给LLM的输入里，Prompt层据此判断"没有这个区块就
+    不写第三句"，跟E2"无数据的子部分完全不出现在Prompt输入里"是同一套设计哲学：
+    缺失本身就是最干净的信号，不需要靠一句指令性文案去赌LLM会不会老实听话。"""
     prev_proj = find_prev_project_dir(proj)
     if prev_proj is None:
-        return (
-            "**环比数据**：Projects/ 下未找到对应上一自然周日期区间的项目目录，"
-            "本期是该系列的首次归档（或上一期尚未跑到 E 阶段）。"
-            "无可比上期：省略第三句环比，不允许编造任何变化。"
-        )
+        return None
 
     prev_e1_data = find_latest_e1_data(prev_proj)
     if prev_e1_data is None:
-        return (
-            f"**环比数据**：找到了上一期项目目录（{prev_proj.name}），"
-            "但其 06_洞察/ 下没有可用的 e1_data.md 快照（可能上一期还没跑到 E 阶段）。"
-            "无可比上期：省略第三句环比，不允许编造任何变化。"
-        )
+        return None
 
     prev_top10 = parse_top10_from_e1_data(prev_e1_data.read_text(encoding="utf-8"))
     if not prev_top10:
-        return (
-            f"**环比数据**：上一期 e1_data.md（{prev_e1_data}）解析不到 TOP10 行业列表。"
-            "无可比上期：省略第三句环比，不允许编造任何变化。"
-        )
+        return None
 
     cur_rank = {ind: i + 1 for i, ind in enumerate(current_top10)}
     prev_rank = {ind: i + 1 for i, ind in enumerate(prev_top10)}
@@ -205,6 +199,11 @@ def prep_e1_industry(df_y: pd.DataFrame, proj: Path) -> str:
         )
 
     lines.append("")
-    lines.append(build_wow_comparison(proj, result["TOP10行业"].tolist()))
+    wow = build_wow_comparison(proj, result["TOP10行业"].tolist())
+    if wow:
+        lines.append(wow)
+    # 无上一期可比数据时（三种情况见 build_wow_comparison() docstring）不追加任何
+    # "环比数据"文本块——不喂等于喂了一条"没有这件事"的清晰信号，Prompt层据此判断
+    # 不写第三句，不需要一句指令性兜底文案去要求LLM"如实说明没有数据"。
 
     return "\n".join(lines)

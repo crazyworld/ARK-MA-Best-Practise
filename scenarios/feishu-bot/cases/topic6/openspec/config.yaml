@@ -1,0 +1,24 @@
+schema: spec-driven
+
+context: |
+  Topic6 社媒热点周刊：飞书 Bot Gateway（本地 Python）+ 火山方舟 Managed Agents（Coordinator + annotator/validator 子 Agent + 7 个 Skill）。
+  完整上下文、代码地图、跨层契约表见 openspec/project.md；修改前先用 `openspec show <capability> --type spec` 读对应 spec，再只读 spec 中列出的源码文件。
+  Capabilities：gateway-command-routing, session-runner, pipeline-job-store, hitl-review, credential-management, artifact-sync,
+  coordinator-orchestration, sub-agents, skill-fetch-normalize, skill-annotation, skill-event-registry, skill-insight, skill-web-publish,
+  ma-resource-deployment, testing-and-verification。
+  语言：中文文档，代码/标识符保持英文；Requirement 必须含 SHALL/MUST，每个 Requirement 至少一个 `#### Scenario:`（WHEN/THEN）。
+
+rules:
+  proposal:
+    - "Impact 必须列出受影响的 capability 与具体文件路径（Gateway 文件 / ma-resources 下的 Prompt 或脚本）"
+    - "涉及 project.md「跨层关键契约」表中任一契约时，必须同时列出生产方与消费方两个 capability"
+    - "优先给出零新依赖的最简方案；不引入新表/新服务，除非说明为何现有基础设施不够"
+  design:
+    - "跨 Gateway 与 MA 两层，或修改 HC JSON / 阶段标记 / run_config 状态块时必须写 design.md"
+    - "决策用 D1~Dn：Decision / Alternatives / Rationale；列出 Gateway 重启、Session 恢复、旧 Session 兼容的影响"
+  tasks:
+    - "按顺序分组：Skill/Prompt 源码 → Gateway 代码 → 测试（../../tests/test_topic6_*.py）→ 文档（CHANGELOG/QUICKSTART/version_mapping）→ 部署（update_ma.sh、重启 Gateway）→ 端到端（飞书 热点周报 smoke/demo + session_triage）"
+    - "Prompt 变更必须新建 v{N+1}.md 并同步 SKILL.md、memory/_版本状态.md、version_mapping.md"
+  specs:
+    - "修改已有行为用 MODIFIED 并复制完整 Requirement 块；新增关注点用 ADDED"
+    - "Scenario 优先覆盖失败路径与恢复路径（idle、断线、重启、重复回调、超时）"

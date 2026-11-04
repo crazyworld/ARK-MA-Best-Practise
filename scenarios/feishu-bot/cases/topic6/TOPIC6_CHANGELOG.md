@@ -11,6 +11,126 @@
 
 ---
 
+## 2026-11-04
+
+### Agent 模型改为 DeepSeek-V4-Flash-0731，token_limits 按模型原生规格
+
+- **变更**：4 个 Agent（`agents/{coordinator,annotator,insighter,validator}.json`）`model.id`
+  `DeepSeek-V4.1-Flash` → `DeepSeek-V4-Flash-0731`（bmc-llm-relay 模型列表标注：上下文 1,000k、
+  输出上限 384k、OpenAI/Anthropic/OpenAI-response 协议）。`token_limits` 256000/200000/56000 →
+  1000000/616000/384000（输入上限 = 上下文 − 输出上限，保证输入+输出不超过模型窗口）。
+- **原因**：256K 是为避开"~180K 平台 bug"而人为压低的；该 bug 已查明是 BYOK Header 漏带（见下条），
+  不再需要压低窗口，按模型原生能力配置，长流程不再在 ~200K 被迫压缩历史。
+- **实测**：212 → relay 以 BYOK Header 调 `DeepSeek-V4-Flash-0731` 带 tools 请求，`finish_reason=tool_calls`。
+  PRICING 由现有 `DeepSeek-V4-Flash` 键按子串匹配命中，无需新增。
+- **待验证**：212 部署后 smoke/full 的单步耗时与成本（窗口放大后每步输入更长）；若明显变慢再评估折中值。
+- **影响文件**：`ma-resources/agents/*.json`、`topic6-annotation/prompts/0{6,7,8}_*.md`（cost_tracker `--model`）、
+  `openspec/{project.md,specs/coordinator-orchestration,specs/sub-agents}`、`tests/test_topic6_ma_resources.py`
+
+### BYOK 鉴权 Header 漏带导致 relay 模式 model_request_failed（10/27 切回方舟原生的真实根因）
+
+- **触发现象**：Agent 走 bmc-llm-relay（BYOK）时，长流程中途连续 `model_request_failed_error`
+  （`retry_status=exhausted`，`span.model_request_end` input=0/output=0），Gateway 重试 3~5 次都失败，
+  只有用户手动 `/continue` 能恢复；此前被归因为"方舟 ~180K 上下文 bug"，10/27 因此把 Agent 切回方舟原生。
+- **根因**：方舟 BYOK 的模型鉴权 Header 按请求生效（不持久化到 Agent/Session）。`topic6_runner.py` 只有
+  首条消息（`_drive_session`）带了 `extra_headers`；idle 催促、provider 重试、Gateway 重启恢复三处
+  `send_message` 都没带。Gateway 自动发的这类消息触发的模型请求因缺鉴权直接失败，而失败后的
+  provider 重试同样不带 Header，于是连续失败。
+- **证据**：212 上 4 个 relay Session（sesn-20261022115226-co63m、sesn-20261022212837-g2kib、
+  sesn-20261025233436-o7mfl、sesn-20261026150456-vmpfi）共 30 条 user.message：Gateway 自动发出的
+  "你在 Phase X 中途停止了"/"[系统] 模型服务已恢复"**全部**失败（input=0）；触发、HC 通过、手动
+  `/continue`（走首条消息路径，带 Header）**全部**成功，最高 184,029 input 也成功；vmpfi 首次失败时仅
+  140,507 input，与上下文长度无关。
+- **修复**：新增 `Topic6Runner._send_message` 作为注入 user.message 的唯一入口，统一携带 BYOK Header；
+  四处调用全部改走它。Header 值只在内存中透传给 HTTP 请求，不记日志、不落库、不进消息正文
+  （`ArkError` 只含状态码/request-id/响应体，不含请求头）。
+- **测试**：`TestByokHeaderOnEveryMessage` 断言 provider 重试与 idle 催促都带 Header、日志不含 Header 值，
+  并静态断言 Runner 内除 `_send_message` 外不直接调用 `self._ark.send_message`。修复前 2 条均失败，修复后通过。
+- **影响文件**：`topic6_runner.py`、`tests/test_topic6_interrupt_recovery.py`、`openspec/specs/session-runner/spec.md`
+
+### 按 CC V2.0 继续提效（节点功能不变）
+
+- **E 阶段并发上限 2 → 6**（`pipeline_e.DEFAULT_MAX_WORKERS`）：拆分后 E 阶段峰值为 6 路
+  (E1、E2、E3 打标∥初稿、E4 打标∥枚举)，上限 2 时 E3 四平台和 E4 A/B 组实际排队，V2 的并发提效吃不到。
+  CC V2.0 不设上限；6 与峰值相等，不排队又保留护栏。bmc-llm-relay 6 路并发实测全部成功、无 429。
+- **E1/E2 起始 max_tokens 对齐 V2**（1536→4000、4096→5000）：E1 实测输出约 1200 + thinking，1536 易触发
+  一次升档重跑；起始预算贴近实际用量，省一次重试往返。升档逻辑不变。
+- **行级失败自动重提 1 轮 → 最多 3 轮**（`datahub_annotate.FAILED_ROW_RETRY_ROUNDS`，对齐 V2 补标"最多
+  自动 3 轮"）：每轮只提交上一轮仍失败的行；把补标闭环收在脚本内，减少 5% 熔断后 coordinator 再委派一次
+  的往返。第 2 轮起审计文件 `{task}_retry_N_meta.json` 按轮分开、可续跑。
+- **E4 A 组组内表格校验**：`validate_e4_group` 对 A 组补上表格列数检查（V2 validate-writing
+  `_check_table_integrity`），错列只重写 A 组，不再等版块级校验失败后整个 E4 重跑。
+- **demo 路由 Prompt 版本对齐（git diff review 发现）**：`run_demo_routes.py` 硬编码 R2=v1、R5=v2，
+  正式模式已按 `_版本状态.md` 升到 R2 v2 / R5 v3，demo 会静默沿用旧口径。已改为 v2/v3，并新增测试
+  `test_demo_routes_prompt_versions_match_version_status` 锁定两处一致。
+- **未纳入（会改变节点功能/交付结构）**：任务周期 4 周回溯限制、交付目录 6 子夹与按人大根、网页改读飞书最终稿、
+  G/H 发布非阻塞、C2 rc.14、C0 v13、A-2.5 软预警退出码 3。见 `Topic6_MA对照V2.0流程说明_覆盖度Review.md`。
+- **影响文件**：`topic6-insight/{scripts/pipeline_e.py,SKILL.md}`、`topic6-annotation/scripts/datahub_annotate.py`、
+  `openspec/specs/{skill-insight,skill-annotation}/spec.md`、
+  `topic6-annotation/scripts/run_demo_routes.py`、
+  `tests/test_topic6_{v2_efficiency,annotate_parse_retry}.py`
+
+## 2026-11-03
+
+### 模型从火山方舟切换到 bmc-llm-relay（blueai 模型资源）
+
+- **范围**：4 个 MA Agent 与所有沙箱脚本的模型调用统一走 bmc-llm-relay
+  （`https://bmc-llm-relay.bluemediagroup.cn/v1`，OpenAI 兼容）。DataHub 标注模型由 DataHub 侧调度，
+  不变；`ARK_API_KEY/ARK_BASE_URL` 只保留给 Managed Agent 控制面（Agent/Environment/Session/Skill/Vault）。
+- **Agent 层**：`agents/{coordinator,annotator,insighter,validator}.json` 的 `model` 改为 BYOK
+  `DeepSeek-V4.1-Flash` + `provider=bmc-llm-relay` + `token_limits` 256000/200000/56000（BYOK 必填；
+  256K 让方舟在 ~200K 自动压缩，避开 ~180K 平台 bug）。Gateway 发消息附加
+  `X-User-Model-Header-Authorization`；coordinator 走 relay 而缺 `BYOK_MODEL_AUTH_HEADER_*` 时
+  `_byok_model_headers` 启动即报错（原来静默不附加，每次模型请求都会被 relay 拒绝）。
+- **脚本层**：`pipeline_e.py`、`relay.py`（C2 chat + embedding）、`run_demo_routes.py` 只读
+  `LLM_RELAY_*`，删除 `ARK_*`/`OPENAI_*` 回退，缺失直接报错；成本台账 platform 改记 `bmc-llm-relay`。
+  `fetch_hot_topics.py` 删除 `ARK_API_KEY` 作为取数 key 的回退（方舟 Key 对热点 MCP 无效）。
+  `environment.json` 不再向沙箱注入 `ARK_API_KEY/ARK_BASE_URL`。
+- **模型 ID**：C2/E/demo `Doubao-Seed-Evolving`、Embedding `Doubao-embedding`（relay 路由到
+  `doubao-embedding-text-240715`，2560 维，与历史 registry 向量维度一致）不变；Phase E/F/G 成本记录的
+  `--model` 改为 `DeepSeek-V4.1-Flash`；PRICING 删除方舟原生 ID。
+- **部署**：`update_ma.sh` 与 `create_all.sh` 新增校验 `LLM_RELAY_BASE_URL/API_KEY`（及
+  `BYOK_MODEL_AUTH_HEADER_*`），缺失时不部署；`env.example`、`TOPIC6_DEBUG_QUICKSTART.md` §2.2.1 同步。
+- **实测（本机→relay）**：`/v1/models` 含上述 4 个模型 ID；`DeepSeek-V4.1-Flash` 带 tools 请求返回
+  `finish_reason=tool_calls`；`relay.Relay`(Doubao-Seed-Evolving) 返回正常；`relay.Embedder` 返回 2 条
+  2560 维向量；`pipeline_e.call_llm_async` 流式返回 `stop`。MA 侧 Agent 经 BYOK 的端到端尚未在 212 验证。
+- **影响文件**：`ma-resources/agents/*.json`、`ma-resources/environment.json`、`ma-resources/create_all.sh`、
+  `update_ma.sh`、`gateway.py`、`config.py`、`topic6_runner.py`、`env.example`、`TOPIC6_DEBUG_QUICKSTART.md`、
+  `topic6-insight/{scripts/pipeline_e.py,SKILL.md}`、`topic6-event-registry/{scripts/relay.py,SKILL.md,references/runbook.md,references/pipeline.md}`、
+  `topic6-annotation/{scripts/run_demo_routes.py,prompts/06~08}`、`topic6-fetch-normalize/scripts/fetch_hot_topics.py`、
+  `memory/topic6/MEMORY.md`、`CUSTOMER_TO_MA_FILE_MAPPING.md`、`openspec/{project.md,specs/*}`、
+  `tests/test_topic6_{ma_resources,pipeline_optimizations,v2_efficiency}.py`
+
+### 参照 CC V2.0 提效:E3/E4 分步并发、截断升档、版块级校验、取数/标注质量前置
+
+- **触发现象**：客户 V2.0(bundle 20261030)实测 E3 打标+初稿 92.3s→60.9s、E4 撰写
+  449.5s→266.2s(-40.8%)；MA 版存在 E3/E4 单次长输出易截断、截断后整段重跑、`--sections`
+  定点重跑会新开只含部分版块的轮次导致 Phase F 缺文件、日历缺 7 个节点、R1~R5 主字段为空
+  仍计为有效等问题，均会引起返工。依据：Obsidian《Topic6 MA 提效优化清单》。
+- **改动**：
+  - `pipeline_e.py`：`finish_reason=length` 时 max_tokens 翻倍重试(≤2 次，上限 32000)，截断稿不进
+    checkpoint；版块完整性闸(空/截断/表格列数)不过重跑 1 次；单版块异常隔离；Prompt 版本按数字
+    排序；`--sections` 无 `--version` 时复用最新轮次；E3 打标∥初稿→四平台并发撰写；E4 打标∥枚举
+    →仲裁+同池去重→脚本排序→A/B 两组并发撰写，每组做卡片格式+链接溯源校验，不过则重写 1 次；
+    伪表格解析修复漏写表头吞第一条、"无重复事件"被当数据行；子步骤 Prompt 纳入 checkpoint 签名。
+  - `fetch_hot_topics.py`：A-2.5 数据质量报告，硬错误退出 1，软预警进 HC1。
+  - `datahub_annotate.py`：主字段为空计入 `parse_error`，走失败行重提和有效率熔断。
+  - `01_统计`：升级到 V2.0(E1 无上期不输出环比块；E2 用全量 df、代表热搜 TOP3、品牌IP候选列；
+    E3 热点词改到 pipeline_e 打标后拼接，新增 `e3_word_candidates.json`/`e3_event_fulltext.json`；
+    E4 新增营销观察/消费洞察结构化候选)；日历 CSV +7 节点，日历解析为 0 行时报错。
+  - Prompt：R2 v2、R5 v3、E1 v3、E2 v7、E3 v6 + 子 Prompt、E4 五个子 Prompt；旧版保留可回退。
+- **未采纳**：V2 E4 子 Agent 分步模式(MA 改为脚本内直连方舟)、C2 审核门禁与联网补证、C0 v13
+  (先做对照实验)。
+- **待验证**：提效数字均为 V2 实测，尚未在 MA 上跑过。（并发上限已于 11-04 调为 6，见下条）
+- **影响文件**：`ma-resources/skills/topic6-insight/{scripts/pipeline_e.py,01_统计/*,02_洞察/*}`、
+  `topic6-fetch-normalize/{scripts/fetch_hot_topics.py,references/marketing_calendar_2026.csv}`、
+  `topic6-annotation/{scripts/datahub_annotate.py,prompts/R2_商业合作/v2.md,prompts/R5_消费者行为/v3.md}`、
+  `ma-resources/agents/{coordinator,insighter}.system.md`、`ma-resources/memory/topic6/_版本状态.md`、
+  `ma-resources/version_mapping.md`、`openspec/specs/{skill-insight,skill-fetch-normalize,skill-annotation}`、
+  `tests/test_topic6_v2_efficiency.py`、`tests/test_topic6_mock_nodes.py`、`tests/test_topic6_pipeline_optimizations.py`
+
+---
+
 ## 2026-10-27
 
 ### Phase H online_url 取消域名白名单

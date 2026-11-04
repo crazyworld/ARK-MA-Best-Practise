@@ -24,7 +24,7 @@
 |---|---|---|---|
 | `topic6/skill/fetch-normalize/` | `ma-resources/skills/topic6-fetch-normalize/` | 适配迁入 | Phase A+B；原单入口被拆为取数、标准化、抽样 3 个脚本 |
 | `topic6/skill/annotation/` + `topic6/ks/` + `topic6/prompt/` + `topic6/tool/cost-tracker/` | `ma-resources/skills/topic6-annotation/` | 重组迁入 | Phase C+D；业务口径、活跃 Prompt、标注与合并脚本集中到一个 Skill |
-| `blueai-canonical-event-registry/` | `ma-resources/skills/topic6-event-registry/` | 适配迁入 | C2 事件归档；主体原样保留，LLM Relay 改接 Ark OpenAI 兼容协议 |
+| `blueai-canonical-event-registry/` | `ma-resources/skills/topic6-event-registry/` | 适配迁入 | C2 事件归档；主体原样保留，LLM Relay 改接 OpenAI 兼容协议（bmc-llm-relay） |
 | `topic6/skill/insight/` | `ma-resources/skills/topic6-insight/` | 适配迁入 | Phase E+F；保留活跃 Prompt，脚本改为 MA 沙箱路径和 Ark API |
 | `artifact-template-bluefocus-hotspot-web-report/` | `ma-resources/skills/topic6-web-report/` | 适配迁入 | Phase G；模板和素材原样保留，Skill 名称改为 `topic6-web-report` |
 | `miaoda-web-publish/` | `ma-resources/skills/miaoda-web-publish/` | 原样迁入 | Phase H；保留用户 OAuth、Git 发布和恢复契约 |
@@ -64,9 +64,11 @@
 | `prompts/C0_基础事实/v5.md` | 基于客户 `v4.md` 精简 | MA 优化新增 | 保留 9 字段契约和关键边界，待真实 HC1 对比 |
 | `prompts/R1_平台借势/v1.md`～`v2.md` | 客户侧同路径文件 | 原样迁入 | 2 个版本全部保留 |
 | `prompts/R2_商业合作/v1.md` | 客户侧同路径文件 | 原样迁入 | SHA-256 一致 |
+| `prompts/R2_商业合作/v2.md` | 客户 V2.0 bundle(20261030)同路径文件 | 原样迁入(去 CRLF) | 2026-11-03 活跃版 |
 | `prompts/R3_风险预警/v1.md` | 客户侧同路径文件 | 原样迁入 | SHA-256 一致 |
 | `prompts/R4_创意借鉴/v1.md`～`v2.md` | 客户侧同路径文件 | 原样迁入 | 2 个版本全部保留 |
 | `prompts/R5_消费者行为/v1.md`～`v2.md` | 客户侧同路径文件 | 原样迁入 | 2 个版本全部保留 |
+| `prompts/R5_消费者行为/v3.md` | 客户 V2.0 bundle 同路径文件 | 原样迁入(去 CRLF) | 2026-11-03 活跃版 |
 | `prompts/节点标注/v7.md` | `topic6/skill/annotation/prompts/节点标注/v7.md` | 原样迁入 | 只打包当前活跃版 |
 | 无 | `prompts/节点标注/v1.md`～`v6.md` | 未迁移 | 历史版本未进入 MA Skill 包 |
 | 无 | `prompts/内容标注/v1.md`～`v9.md` | 未迁移 | 已被 C0 + R1-R5 分层标注方案替代 |
@@ -98,7 +100,7 @@ MA 根目录：`ma-resources/skills/topic6-event-registry/`
 | `CHANGELOG.md` | 同名文件 | 适配迁入 | 记录 Ark OpenAI 协议迁移 |
 | `references/runbook.md` | 同名文件 | 适配迁入 | 更新 MA 环境变量和运行方式 |
 | `references/benchmarks.md`、`calibration.md`、`identity.md`、`open-questions.md`、`pipeline.md`、`prompts.md` | 同名文件 | 原样迁入 | 6 个文件 SHA-256 一致 |
-| `scripts/relay.py` | 同名文件 | 适配迁入 | Anthropic `/v1/messages` 改为 Ark OpenAI `/v1/chat/completions` |
+| `scripts/relay.py` | 同名文件 | 适配迁入 | Anthropic `/v1/messages` 改为 OpenAI 兼容 `/v1/chat/completions`；2026-11-03 起只读 bmc-llm-relay 的 `LLM_RELAY_*`，不回退 `ARK_*` |
 | `scripts/00_clean_titles.py`、`00_seed_from_registry.py`、`01_eventness.py`～`11_score_calibration.py` | 同名文件 | 原样迁入 | 13 个主流水线脚本 SHA-256 一致 |
 | `scripts/x0_merge_platforms.py`～`x4_detail_table.py` | 同名文件 | 原样迁入 | 5 个跨平台脚本 SHA-256 一致 |
 | `scripts/eventlib.py` | 同名文件 | 原样迁入 | SHA-256 一致 |
@@ -109,17 +111,18 @@ MA 根目录：`ma-resources/skills/topic6-event-registry/`
 | MA 文件 | 客户原始文件 | 状态 | 主要变化 |
 |---|---|---|---|
 | `skills/topic6-insight/SKILL.md` | `topic6/skill/insight/SKILL.md` | 适配迁入 | 补 SkillHub frontmatter、MA 路径和 Ark 环境变量 |
-| `scripts/pipeline_e.py` | `topic6/skill/insight/pipeline_e.py` | 适配迁入并移动 | 去除本地目录上溯，改 `/mnt/skills`、`/workspace`、Ark OpenAI 接口 |
+| `scripts/pipeline_e.py` | `topic6/skill/insight/pipeline_e.py` | 适配迁入并移动 | 去除本地目录上溯，改 `/mnt/skills`、`/workspace`、Ark OpenAI 接口；2026-11-03 移植 V2.0 的 E3/E4 分步路由（E4 的仲裁、A/B 分组撰写与校验取自 V2 `pipeline_e4_agent_steps.py`，改为脚本内直连方舟，不用子 Agent） |
 | `scripts/pipeline_f.py` | `topic6/skill/insight/pipeline_f.py` | 适配迁入并移动 | 改项目路径解析和 MA 产物目录 |
-| `01_统计/_common.py`、`e1_industry.py`、`e3_platforms.py` | 客户侧同路径文件 | 原样迁入 | 3 个脚本 SHA-256 一致 |
-| `01_统计/e2_nodes.py` | 客户侧同路径文件 | 适配迁入 | 对齐 C3 节点结果和 MA 日历路径 |
-| `01_统计/e4_marketing.py` | 客户侧同路径文件 | 适配迁入 | 对齐 MA 宽表与 E4 打标链路 |
-| `01_统计/run_stats.py` | 客户侧同路径文件 | 适配迁入 | 对齐 MA 项目路径和统计编排 |
+| `01_统计/_common.py`、`e1_industry.py`、`e3_platforms.py` | 客户 V2.0 bundle 同路径文件 | 原样迁入(去 CRLF，保留 `from __future__`) | 2026-11-03 由 V1 升级到 V2.0 |
+| `01_统计/e2_nodes.py` | 客户侧同路径文件 | 适配迁入 | 对齐 C3 节点结果和 MA 日历路径；合入 V2.0 代表热搜 TOP3、30 天信号上限、锚点未核实、品牌IP候选列；日历解析为 0 行时报错 |
+| `01_统计/e4_marketing.py` | 客户 V2.0 bundle 同路径文件 | 原样迁入(去 CRLF) | 新增营销观察/消费洞察结构化候选 |
+| `01_统计/run_stats.py` | 客户侧同路径文件 | 适配迁入 | 对齐 MA 项目路径和统计编排；新增 E3 两个 JSON 输入，E2 改用全量 df |
 | `02_洞察/_shared/role_style.md` | 客户侧同路径文件 | 原样迁入 | SHA-256 一致 |
 | `02_洞察/E1_行业话题/v1.md` | 客户侧同路径文件 | 原样迁入 | 当前活跃版 |
 | `02_洞察/E2_营销节点/v3.md` | 客户侧同路径文件 | 原样迁入 | 当前活跃版；v1-v2 未打包 |
 | `02_洞察/E3_平台新鲜事/v1.md` | 客户侧同路径文件 | 原样迁入 | 当前活跃版 |
-| `02_洞察/E4_营销发现/v6.md`、`_tagging/v1.md` | 客户侧同路径文件 | 原样迁入 | 当前活跃撰写版与打标版；v1-v5 未打包 |
+| `02_洞察/E4_营销发现/v6.md`、`_tagging/v1.md` | 客户侧同路径文件 | 原样迁入 | 归档保留(回退用) |
+| `02_洞察/E1_行业话题/v3.md`、`E2_营销节点/v7.md`、`E3_平台新鲜事/v6.md` + `_tagging/v3.md` + `_insight_draft/v1.md`、`E4_营销发现/_tagging/v5.md` + `_curation/v3.md` + `_arbitration/v3.md` + `_writing_coop_risk/v4.md` + `_writing_marketing_consumer/v1.md` | 客户 V2.0 bundle 同路径文件 | 原样迁入(去 CRLF) | 2026-11-03 活跃版 |
 | `references/E3_统计口径说明.md`、`综合热度指数算法说明.md` | 客户侧 `01_统计/references/` 下同名文件 | 原样迁入并移动 | 从统计子目录提升到 Skill 的 `references/` |
 
 ## 六、`topic6-web-report` 对应表

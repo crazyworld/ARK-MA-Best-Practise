@@ -2,22 +2,20 @@
 """共用底座：API 客户端、批量并发、断点续跑、成本台账、截断显式报错。
 
 所有阶段脚本都走这里，不要各自造轮子。
-凭据只从环境变量读取。鉴权按以下顺序取第一个非空值：
-  BASE_URL：LLM_RELAY_BASE_URL → ARK_BASE_URL → OPENAI_BASE_URL
-  Key：LLM_RELAY_API_KEY → ARK_API_KEY → OPENAI_API_KEY
-Embedding 另需：EMBEDDING_BASE_URL / EMBEDDING_API_KEY（优先级最高，缺省沿用上面的链路）
+凭据只从环境变量读取，模型统一走 bmc-llm-relay（blueai 模型网关，OpenAI 兼容）：
+  BASE_URL：LLM_RELAY_BASE_URL（如 https://bmc-llm-relay.bluemediagroup.cn/v1）
+  Key：LLM_RELAY_API_KEY
+Embedding 可用 EMBEDDING_BASE_URL / EMBEDDING_API_KEY 单独指定，缺省沿用 LLM_RELAY_*。
 
-接入企业自有模型（BYOK）：务必用 LLM_RELAY_BASE_URL/LLM_RELAY_API_KEY 指向企业网关，
-不要改 ARK_BASE_URL/ARK_API_KEY —— 后两者同时被 update_ma.sh/create_all.sh 用来调
-方舟 Managed Agent 控制面（创建/更新 Agent、Environment），企业网关不支持那些接口，
-改了会直接把部署脚本打挂。本模块代码无需为换模型再改。另有两个可选开关：
+2026-11-03 起不再回退 ARK_* / OPENAI_*：缺 LLM_RELAY_* 直接报错，避免静默改走火山方舟
+计费与配额。ARK_BASE_URL/ARK_API_KEY 只用于 update_ma.sh/create_all.sh 调方舟 Managed
+Agent 控制面（创建/更新 Agent、Environment），与模型调用无关。另有两个可选开关：
   EMBEDDING_IS_MULTIMODAL  true/false，显式指定是否走 /embeddings/multimodal 协议；
                            未设置时按模型名是否以 doubao-embedding-vision 开头猜测。
   PRICING_OVERRIDE_JSON    JSON object，追加企业模型的单价到 PRICING（未知模型默认按 0 计费）。
 
-2026-09-28 从 Anthropic 原生 /v1/messages 切到方舟 OpenAI 兼容
-chat/completions。BASE_URL 应包含版本前缀（如
-https://ark.cn-beijing.volces.com/api/v3 或 https://<企业网关>/v1），本模块只追加资源路径。
+2026-09-28 从 Anthropic 原生 /v1/messages 切到 OpenAI 兼容 chat/completions。
+BASE_URL 应包含版本前缀（如 https://bmc-llm-relay.bluemediagroup.cn/v1），本模块只追加资源路径。
 system 从顶层字段挪到 messages[0]{role=system}，
 usage 字段从 input_tokens/output_tokens 换成 prompt_tokens/completion_tokens，
 停止原因从 stop_reason 换成 finish_reason。prompt caching 暂不支持，缓存
@@ -48,7 +46,6 @@ PRICING = {
     "DeepSeek-V4-Pro": (2.0, 8.0),
     "DeepSeek-V4-Flash": (0.5, 2.0),
     "DeepSeek-V4.1-Flash": (0.5, 2.0),
-    "deepseek-v4-1-flash": (0.5, 2.0),  # 方舟原生 ID（deepseek-v4-1-flash-261017）
     "claude-opus-4-7": (15.0, 75.0),
     "claude-sonnet-4-6": (3.0, 15.0),
     "claude-haiku-4-5-20251001": (1.0, 5.0),
@@ -86,21 +83,16 @@ def price_of(model: str) -> tuple[float, float]:
 
 
 class Relay:
-    """方舟 OpenAI 兼容 chat/completions 客户端，线程安全累计用量。"""
+    """bmc-llm-relay（OpenAI 兼容）chat/completions 客户端，线程安全累计用量。"""
 
     def __init__(self, model: str, max_tokens: int, system: str,
                  temperature: float = 0.0, timeout: int = 600, retries: int = 3):
-        self.base = (os.environ.get("LLM_RELAY_BASE_URL")
-                     or os.environ.get("ARK_BASE_URL")
-                     or os.environ.get("OPENAI_BASE_URL") or "").rstrip("/")
-        self.key = (os.environ.get("LLM_RELAY_API_KEY")
-                    or os.environ.get("ARK_API_KEY")
-                    or os.environ.get("OPENAI_API_KEY") or "")
+        self.base = (os.environ.get("LLM_RELAY_BASE_URL") or "").rstrip("/")
+        self.key = os.environ.get("LLM_RELAY_API_KEY") or ""
         if not self.base or not self.key:
             raise SystemExit(
-                "缺少凭据。需要 LLM_RELAY_BASE_URL / ARK_BASE_URL / OPENAI_BASE_URL 之一，以及 "
-                "LLM_RELAY_API_KEY / ARK_API_KEY / OPENAI_API_KEY 之一。凭据只从环境变量读取，"
-                "不要写进文件。")
+                "缺少 bmc-llm-relay(blueai 模型网关)凭据：需要 LLM_RELAY_BASE_URL 与 "
+                "LLM_RELAY_API_KEY。凭据只从环境变量读取，不要写进文件；不回退 ARK_*。")
         self.model = model
         self.max_tokens = max_tokens
         self.system = system
@@ -238,18 +230,13 @@ class Embedder:
                  cache_path: Path | None = None, timeout: int = 600,
                  retries: int = 4):
         self.base = (os.environ.get("EMBEDDING_BASE_URL")
-                     or os.environ.get("LLM_RELAY_BASE_URL")
-                     or os.environ.get("ARK_BASE_URL")
-                     or os.environ.get("OPENAI_BASE_URL", "")).rstrip("/")
+                     or os.environ.get("LLM_RELAY_BASE_URL") or "").rstrip("/")
         self.key = (os.environ.get("EMBEDDING_API_KEY")
-                    or os.environ.get("LLM_RELAY_API_KEY")
-                    or os.environ.get("ARK_API_KEY")
-                    or os.environ.get("OPENAI_API_KEY", ""))
+                    or os.environ.get("LLM_RELAY_API_KEY") or "")
         if not self.base or not self.key:
-            raise SystemExit("缺少 embedding 凭据。需要 EMBEDDING_BASE_URL / "
-                             "EMBEDDING_API_KEY，或沿用 LLM_RELAY_BASE_URL / "
-                             "LLM_RELAY_API_KEY，或 ARK_BASE_URL / "
-                             "ARK_API_KEY / OPENAI_API_KEY 之一。")
+            raise SystemExit("缺少 embedding 凭据：需要 EMBEDDING_BASE_URL / EMBEDDING_API_KEY，"
+                             "或沿用 bmc-llm-relay 的 LLM_RELAY_BASE_URL / LLM_RELAY_API_KEY；"
+                             "不回退 ARK_*。")
         self.model = model
         self.timeout = timeout
         self.retries = retries

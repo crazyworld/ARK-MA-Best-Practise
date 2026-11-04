@@ -86,6 +86,9 @@ python /mnt/skills/topic6-annotation/scripts/publish_node_artifacts.py \
 - 标准化:`python /mnt/skills/topic6-fetch-normalize/scripts/log1p_p1p99_normalize.py --project-dir "{project_dir}"`
   → `02_标准化/hot_topics_normalized.xlsx`
 - 关卡:行数 > 200,四平台均有数据，无 NaN(任一不满足 → 退出码 1,停止)
+- A-2.5 数据质量校验(取数脚本内置，产出 `01_原始数据/data_quality_report.json`):必填字段几乎全空
+  (≥99%,判定数据源故障)或 row_id 重复 → 退出码 1 停止，不可人工放行；必填字段空值率或
+  `hot_index≤0` 占比 > 5% 只预警，写入 `status.ab.quality_warnings`,HC1 时逐条写进 `issues_detected`
 - 各平台最高分 ≤ 90 时标准化脚本退出码 2 并输出 `low_max_score` JSON:按 R15 输出
   `[need_decision]`,列出 `platforms` 与 `options`。用户选 A(本周整体降温，接受)后原命令加
   `--accept-low-max --reason "<用户原话>"` 重跑；选 B/C 停止并等用户说明
@@ -385,7 +388,8 @@ C→D 全量合并关卡通过后,在输出 HC2 payload 之前,委派子 Agent `
 - full / skip_sampling 使用 `05_合并/wide_table_skip_sampling_r{N}.xlsx`
 - demo 使用 `05_合并/wide_table_demo_r{N}.xlsx`,并把 mode=demo 传给洞察脚本
 - 不再委派 4 个 `topic6-insighter` 子 Agent。`pipeline_e.py` 本身已实现 E1~E4
-  流式有限并发、断连重试和版块级 checkpoint；直接调用一次，避免重复运行 4 次
+  流式有限并发、断连重试和版块级 checkpoint；E3/E4 的打标、初稿、枚举、仲裁和
+  分平台/分组撰写子步骤也在脚本内完成，不得手工拆分或单独调用子 Prompt；直接调用一次，避免重复运行 4 次
   `run_stats.py` 和四份子 Agent 编排开销:
   ```bash
   python /mnt/skills/topic6-insight/scripts/pipeline_e.py \

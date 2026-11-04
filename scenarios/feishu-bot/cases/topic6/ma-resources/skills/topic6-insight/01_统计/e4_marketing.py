@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 01_统计 · E4 营销发现
-统计口径唯一权威。02_洞察/E4_营销发现/v6.md 不重复。
+统计口径唯一权威。02_洞察/E4_营销发现/ 下 _tagging/_curation/_writing_* 子 Prompt 不重复。
 """
 
 from __future__ import annotations
@@ -64,6 +64,25 @@ def _select_risk_events(df_y: pd.DataFrame, n: int = 20) -> list[tuple]:
         reps.append((event, grp_sorted.iloc[0], grp_sorted))
     reps.sort(key=lambda x: x[1]["标准化热度分"], reverse=True)
     return reps[:n]
+
+
+def _select_creative_events(df_y: pd.DataFrame, n: int = 15) -> pd.DataFrame:
+    """营销观察候选池：是否营销发现=是，事件簇去重（保留标准化热度分最高的1行代表），
+    按分降序取TOP N。抽成独立函数（2026-09-20新增，为落地"初稿→终稿"两步方案，
+    见`pipeline_e.py::build_e4_task()`新增的Step B草稿枚举），供`prep_e4_marketing()`
+    的markdown渲染和`prep_e4_candidates()`的JSON导出共用候选口径，跟
+    `_select_cooperation_events()`/`_select_risk_events()`同模式，不重复实现。"""
+    creative = df_y[df_y["是否营销发现"] == "是"].copy()
+    creative = creative[creative["事件簇名"].notna() & (creative["事件簇名"].str.strip() != "")]
+    return creative.sort_values("标准化热度分", ascending=False).drop_duplicates("事件簇名", keep="first").head(n)
+
+
+def _select_consumer_events(df_y: pd.DataFrame, n: int = 20) -> pd.DataFrame:
+    """消费洞察候选池：是否消费者行为=是，事件簇去重（保留标准化热度分最高的1行代表），
+    按分降序取TOP N。抽成独立函数（2026-09-20新增，理由同`_select_creative_events()`）。"""
+    cons = df_y[df_y["是否消费者行为"] == "是"].copy()
+    cons = cons[cons["事件簇名"].notna() & (cons["事件簇名"].str.strip() != "")]
+    return cons.sort_values("标准化热度分", ascending=False).drop_duplicates("事件簇名", keep="first").head(n)
 
 
 def prep_e4_marketing(df_y: pd.DataFrame) -> str:
@@ -156,9 +175,7 @@ def prep_e4_marketing(df_y: pd.DataFrame) -> str:
     # ===== 营销观察（是否营销发现=是）=====
     # 2026-09-18改法：候选池TOP5放宽到TOP15，不在数据层做"三选五"的语义判断——
     # 案例适配度筛选交给LLM在Prompt指导下判断（"遍历全部候选，适配度优先于热度分"）
-    creative = df_y[df_y["是否营销发现"] == "是"].copy()
-    creative = creative[creative["事件簇名"].notna() & (creative["事件簇名"].str.strip() != "")]
-    creative = creative.sort_values("标准化热度分", ascending=False).drop_duplicates("事件簇名", keep="first").head(15)
+    creative = _select_creative_events(df_y, n=15)
 
     if creative.empty:
         parts.append("## 营销观察数据\n\n上周无营销发现热点（是否营销发现=是）。")
@@ -182,9 +199,7 @@ def prep_e4_marketing(df_y: pd.DataFrame) -> str:
     # 挤压到5个代表事件簇，得给LLM更大候选范围自己识别哪些候选属于同一类消费心理/
     # 行为现象。排序仍按热度分降序只是候选呈现顺序，不代表最终成文顺序（Prompt层
     # 要求按"覆盖人群范围"重新排序，那是语义判断，数据层不做）
-    cons = df_y[df_y["是否消费者行为"] == "是"].copy()
-    cons = cons[cons["事件簇名"].notna() & (cons["事件簇名"].str.strip() != "")]
-    cons = cons.sort_values("标准化热度分", ascending=False).drop_duplicates("事件簇名", keep="first").head(20)
+    cons = _select_consumer_events(df_y, n=20)
 
     if cons.empty:
         parts.append("## 消费洞察数据\n\n上周无消费者行为热点（是否消费者行为=是）。")
@@ -206,10 +221,11 @@ def prep_e4_marketing(df_y: pd.DataFrame) -> str:
 
 
 def prep_e4_candidates(df_y: pd.DataFrame) -> dict:
-    """舆情风险/合作动态候选的结构化（JSON友好）版本，供 pipeline_e.py 的"打标"步骤
-    使用（2026-09-19新增）。候选口径跟 prep_e4_marketing() 完全一致（复用同一对
-    `_select_*_events()`辅助函数），只是这里返回python原生dict/list，不渲染成
-    markdown文本。
+    """舆情风险/合作动态/营销观察/消费洞察候选的结构化（JSON友好）版本，供
+    pipeline_e.py 的"打标"步骤（舆情风险/合作动态）和"草稿枚举"步骤（营销观察/
+    消费洞察，2026-09-20新增，见下方说明）使用。候选口径跟 prep_e4_marketing()
+    完全一致（复用同一组 `_select_*_events()`辅助函数），只是这里返回python
+    原生dict/list，不渲染成markdown文本。
 
     为什么不直接解析 prep_e4_marketing() 产出的markdown文本，而要另写一份结构化版本：
     "行业归属"/"商业实体"字段本身用"|"做多值分隔符（如"科技/AI产业|汽车出行"），
@@ -218,14 +234,21 @@ def prep_e4_candidates(df_y: pd.DataFrame) -> dict:
     会把多值字段错误拆成多一列，导致后续按列取值全部错位。结构化数据在python
     对象层面直接传递没有这个歧义。
 
-    营销观察/消费洞察两部分不涉及"乙方可接性/参考价值"打标（候选适配度筛选交给
-    撰写阶段的LLM自己判断，这次改动范围不含这两部分），因此本函数不导出它们。
+    2026-09-20新增"营销观察"/"消费洞察"两个键（此前只导出舆情风险/合作动态，
+    因为这两部分不涉及"乙方可接性/参考价值"打标）——落地"初稿→终稿"两步方案
+    （用户反馈：营销观察"明星同款消费追捧"这类过于常见/信息量低的候选跟撰写阶段
+    LLM一次性完成"遍历+价值判断+写卡片"三件事混在一起，判断质量打折）：
+    `pipeline_e.py::build_e4_task()`新增Step B（草稿枚举，读这两个键，纯枚举
+    候选/组合角度，不做价值判断，产出≤10条草稿/子版块），供Step C+D（撰写，
+    应用价值判断+挑选+写卡片）使用，不再让撰写LLM直接读原始候选markdown。
 
-    返回：{"舆情风险": [...], "合作动态": [...]}
+    返回：{"舆情风险": [...], "合作动态": [...], "营销观察": [...], "消费洞察": [...]}
     - 舆情风险每条：{事件簇名, 行业, 热度分, 具体热搜:[{标题,链接,平台,热度分}...], 风险判断说明}
     - 合作动态每条：{事件簇名, 商业实体, 行业, 热度分, 代表热搜标题, 代表热搜链接, 合作动态说明}
+    - 营销观察每条：{事件簇名, 平台, 行业, 热度分, 代表热搜标题, 代表热搜链接, 营销发现说明}
+    - 消费洞察每条：{事件簇名, 平台, 行业, 热度分, 代表热搜标题, 代表热搜链接, 商业实体, 消费者行为说明}
     """
-    result: dict = {"舆情风险": [], "合作动态": []}
+    result: dict = {"舆情风险": [], "合作动态": [], "营销观察": [], "消费洞察": []}
 
     for event, top, grp_sorted in _select_risk_events(df_y, n=20):
         titles = []
@@ -254,6 +277,31 @@ def prep_e4_candidates(df_y: pd.DataFrame) -> dict:
             "代表热搜标题": safe_field(r, "热点标题", ""),
             "代表热搜链接": safe_field(r, "链接", ""),
             "合作动态说明": str(safe_field(r, "合作动态说明", "")).replace("\n", " ")[:60],
+        })
+
+    creative = _select_creative_events(df_y, n=15)
+    for _, r in creative.iterrows():
+        result["营销观察"].append({
+            "事件簇名": r["事件簇名"],
+            "平台": safe_field(r, "平台"),
+            "行业": safe_field(r, "行业归属"),
+            "热度分": fmt_score(r["标准化热度分"]),
+            "代表热搜标题": safe_field(r, "热点标题", ""),
+            "代表热搜链接": safe_field(r, "链接", ""),
+            "营销发现说明": str(safe_field(r, "营销发现说明", "")).replace("\n", " ")[:80],
+        })
+
+    cons = _select_consumer_events(df_y, n=20)
+    for _, r in cons.iterrows():
+        result["消费洞察"].append({
+            "事件簇名": r["事件簇名"],
+            "平台": safe_field(r, "平台"),
+            "行业": safe_field(r, "行业归属"),
+            "热度分": fmt_score(r["标准化热度分"]),
+            "代表热搜标题": safe_field(r, "热点标题", ""),
+            "代表热搜链接": safe_field(r, "链接", ""),
+            "商业实体": safe_field(r, "商业实体"),
+            "消费者行为说明": str(safe_field(r, "消费者行为说明", "")).replace("\n", " ")[:80],
         })
 
     return result

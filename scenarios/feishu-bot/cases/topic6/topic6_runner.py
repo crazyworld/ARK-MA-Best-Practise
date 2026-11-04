@@ -372,7 +372,8 @@ class Topic6Runner:
         self._config = config
         self._loop = loop
         self._card_sender = card_sender  # 由 topic6_hitl 注入
-        # BYOK Direct 模式：按请求动态附加的模型鉴权 Header；未配置时为 None（原豆包模式）。
+        # BYOK Direct 模式：按请求动态附加的 bmc-llm-relay 鉴权 Header；Agent 走方舟原生模型时为 None。
+        # 只通过 _send_message 使用，不得记日志/写库/拼进消息正文（Header 值即 relay Key）。
         self._extra_headers = extra_headers
         self._notifier = notifier  # 由 gateway 装配时注入
         # 串行化“检查活跃任务 → 创建 Session → 落 Job”，避免两个同时到达的触发
@@ -518,6 +519,16 @@ class Topic6Runner:
         task = self._spawn_stream(job, first_user_message=prompt)
         self._active_streams[session_id] = task
         return job
+
+    async def _send_message(self, session_id: str, text: str) -> None:
+        """向 MA Session 注入 user.message 的唯一入口。
+
+        BYOK 鉴权 Header 是按请求生效的(不写入 Agent/Session 持久配置)：任何一条
+        user.message 漏带，方舟触发的那次模型请求就会以 model_request_failed_error
+        (input=0/output=0)失败。所以首条消息、HC 续跑、idle 催促、provider 重试、
+        重启恢复都必须经过这里，禁止直接调用 self._ark.send_message。
+        """
+        await self._ark.send_message(session_id, text, extra_headers=self._extra_headers)
 
     async def resume_job(self, job: PipelineJob, decision_message: str) -> None:
         """HITL 卡片回调路径:注入 user.message 后重新订阅 SSE。"""
@@ -713,7 +724,7 @@ class Topic6Runner:
         if nudge_msg is not None:
             # Agent 偶发 idle + Gateway 恰好重启 → 注入催促消息并恢复 SSE 订阅。
             try:
-                await self._ark.send_message(job.ma_session_id, nudge_msg)
+                await self._send_message(job.ma_session_id, nudge_msg)
                 log.info(
                     "topic6 recovery nudge sent job=%s session=%s",
                     job.job_id, job.ma_session_id,
@@ -774,9 +785,7 @@ class Topic6Runner:
                 try:
                     async with self._ark._open_event_stream(session_id) as stream:
                         if not sent_initial_message:
-                            await self._ark.send_message(
-                                session_id, first_user_message, extra_headers=self._extra_headers
-                            )
+                            await self._send_message(session_id, first_user_message)
                             sent_initial_message = True
                         terminal = await self._consume_events(
                             job_id, stream, seen_event_ids=seen_event_ids
@@ -910,7 +919,7 @@ class Topic6Runner:
                         )
                         await asyncio.sleep(delay)
                         try:
-                            await self._ark.send_message(
+                            await self._send_message(
                                 _job.ma_session_id,
                                 "[系统] 模型服务已恢复，请继续执行当前阶段。",
                             )
@@ -973,7 +982,7 @@ class Topic6Runner:
                 if not job:
                     return True
                 try:
-                    await self._ark.send_message(job.ma_session_id, nudge_msg)
+                    await self._send_message(job.ma_session_id, nudge_msg)
                 except Exception as err:  # noqa: BLE001
                     log.error(
                         "topic6 idle nudge send_message failed job=%s session=%s: %s",

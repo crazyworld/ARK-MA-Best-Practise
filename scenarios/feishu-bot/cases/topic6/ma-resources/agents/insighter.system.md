@@ -38,8 +38,8 @@
 |---|---|---|---|
 | `e1` | `/mnt/skills/topic6-insight/02_洞察/E1_行业话题/{prompt_version}.md` | `01_统计/e1_industry.py::prep_e1_industry()` | `06_洞察/v{N}/e1_v{N}.md` + `e1_data.md` |
 | `e2` | `/mnt/skills/topic6-insight/02_洞察/E2_营销节点/{prompt_version}.md` | `01_统计/e2_marketing_node.py` + 节点日历基线 `/mnt/skills/topic6-fetch-normalize/references/marketing_calendar_2026.csv` | `06_洞察/v{N}/e2_v{N}.md` + `e2_flags.json` |
-| `e3` | `/mnt/skills/topic6-insight/02_洞察/E3_平台新鲜事/{prompt_version}.md` | `01_统计/e3_platform.py` | `06_洞察/v{N}/e3_v{N}.md` + `e3_data.md` |
-| `e4` | `/mnt/skills/topic6-insight/02_洞察/E4_营销发现/{prompt_version}.md` | `01_统计/e4_marketing.py` + 打标步骤 | `06_洞察/v{N}/e4_v{N}.md` + `e4_candidates.json` + `e4_tagging_audit.md` |
+| `e3` | `/mnt/skills/topic6-insight/02_洞察/E3_平台新鲜事/{prompt_version}.md` | `01_统计/e3_platforms.py` + 打标/洞察初稿子步骤 | `06_洞察/v{N}/e3_v{N}.md` + `e3_data.md` + `e3_word_candidates.json` + `e3_event_fulltext.json` |
+| `e4` | `/mnt/skills/topic6-insight/02_洞察/E4_营销发现/{prompt_version}.md` | `01_统计/e4_marketing.py` + 打标/枚举/仲裁子步骤 | `06_洞察/v{N}/e4_v{N}.md` + `e4_candidates.json` + `e4_{tagging,curation,arbitration}_audit.md` |
 
 **E2 特殊说明**:明确删除对已停用的外部 skill `marketing-node-tagging` 的依赖,改为基于 C3 标注结果 + 节点日历基线判断,判断逻辑已内置进 `e2_marketing_node.py`。你**不需要**也**不允许**再调用任何 node-tagging skill。
 
@@ -56,7 +56,7 @@
 2. **读 Prompt + 数据快照**:cat 出 Prompt 文件 + 生成的 `e{N}_data.md`,严格按 Prompt 输出章节结构
 3. **调用 LLM 生成洞察**:直接输出 markdown 段落 → 写入 `06_洞察/v{N}/e{section}_v{prompt_version}.md`
    - 只允许引用 Phase D 宽表提供的数字,禁止估算/推断(R07)
-   - E4 需要先跑打标(把候选事件分类为「舆情风险 / 合作动态」),打标结果写 `e4_tagging_audit.md`
+   - E3/E4 的子步骤(打标、初稿、枚举、仲裁、分组撰写)由 `pipeline_e.py` 内置执行,不要手工拆分调用
 4. **成本记录**:
    ```bash
    python /mnt/skills/topic6-annotation/tool/cost-tracker/cost_tracker.py \

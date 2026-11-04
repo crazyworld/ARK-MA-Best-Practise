@@ -211,13 +211,35 @@ def test_e_run_stats(tmp_path, full_tree):
          "--mode", "skip_sampling", "--run-id", "1", "--publish-date", PUBLISH_DATE,
          "--out-dir", str(out_dir),
          env={"MARKETING_CALENDAR_PATH": str(FETCH / "references" / "marketing_calendar_2026.csv")})
-    for name in ("e1_data.md", "e2_flags.json", "e3_data.md",
-                 "e3_word_freq_audit.md", "e4_candidates.json"):
-        assert (out_dir / name).read_text("utf-8") == files[f"06_洞察/v1/{name}"].read_text("utf-8"), name
+
+    def read(name: str) -> str:
+        return (out_dir / name).read_text("utf-8")
+
+    def want(name: str) -> str:
+        return files[f"06_洞察/v1/{name}"].read_text("utf-8")
+
+    # 以下差异为参照 CC V2.0 的预期口径变化(Obsidian《Topic6 MA 提效优化清单》),mock 是线上快照不改:
+    # E1 无上期时不再输出「环比数据」块;其余内容与快照一致
+    assert read("e1_data.md").rstrip() == want("e1_data.md").replace(
+        "\n\n**环比数据**：Projects/ 下未找到对应上一自然周日期区间的项目目录，本期是该系列的首次归档"
+        "（或上一期尚未跑到 E 阶段）。无可比上期：省略第三句环比，不允许编造任何变化。", "").rstrip()
+    # E2 上周节点改用全量 df:营销不可用的寒露热搜也纳入回顾,列名为「涉及品牌IP候选」
+    e2 = json.loads(read("e2_flags.json"))
+    assert e2["last_week"]["has_data"] is True
+    assert "| 寒露 | 1 |" in e2["last_week"]["data_md"]
+    assert "涉及品牌IP候选" in e2["last_week"]["data_md"]
+    assert e2["next_week"] == json.loads(want("e2_flags.json"))["next_week"]
+    # E3「平台热点词 TOP3」移到 pipeline_e 打标后拼接;热门事件表保留
+    assert "平台热点词" not in read("e3_data.md")
+    assert read("e3_data.md").count("热门事件") == want("e3_data.md").count("热门事件")
+    for name in ("e3_word_candidates.json", "e3_event_fulltext.json"):
+        assert set(json.loads(read(name))) >= {"微博", "抖音", "B站", "知乎"}, name
+    # E4 候选新增营销观察/消费洞察两个键,原两个键不变
+    e4_got, e4_want = json.loads(read("e4_candidates.json")), json.loads(want("e4_candidates.json"))
+    assert {k: e4_got[k] for k in e4_want} == e4_want
+    assert e4_got["营销观察"] and e4_got["消费洞察"]
     # e4_data 表格中同热度分的行顺序不稳定，按行集合比对
-    got = (out_dir / "e4_data.md").read_text("utf-8").splitlines()
-    want = files["06_洞察/v1/e4_data.md"].read_text("utf-8").splitlines()
-    assert sorted(got) == sorted(want)
+    assert sorted(read("e4_data.md").splitlines()) == sorted(want("e4_data.md").splitlines())
 
 
 def test_f_merge_report(tmp_path, full_tree):

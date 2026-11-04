@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run resumable R1-R5 Ark batch calls for demo mode only."""
+"""Run resumable R1-R5 bmc-llm-relay (blueai model gateway) batch calls for demo mode only."""
 
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ ROUTES = {
     },
     "r2": {
         "subdir": "R2_商业合作",
-        "prompt": "prompts/R2_商业合作/v1.md",
+        "prompt": "prompts/R2_商业合作/v2.md",  # 与 _版本状态.md 活跃版本保持一致
         "label": "是否商业合作",
         "status": "r2_commercial",
     },
@@ -61,7 +61,7 @@ ROUTES = {
     },
     "r5": {
         "subdir": "R5_消费者行为",
-        "prompt": "prompts/R5_消费者行为/v2.md",
+        "prompt": "prompts/R5_消费者行为/v3.md",  # 与 _版本状态.md 活跃版本保持一致
         "label": "是否消费者行为",
         "status": "r5_consumer",
     },
@@ -168,10 +168,10 @@ def _request_route(
                 payload = response.json()
             choices = payload.get("choices") or []
             if not choices:
-                raise ValueError("Ark response has no choices")
+                raise ValueError("LLM response has no choices")
             choice = choices[0]
             if choice.get("finish_reason") == "length":
-                raise ValueError("Ark output was truncated")
+                raise ValueError("LLM output was truncated")
             content = (choice.get("message") or {}).get("content") or ""
             parsed = _parse_json_object(content)
             normalized = _normalize_results(
@@ -189,7 +189,7 @@ def _request_route(
             status_code = error.response.status_code
             if status_code != 429 and not 500 <= status_code < 600:
                 raise RuntimeError(
-                    f"{route_name} Ark HTTP {status_code}: "
+                    f"{route_name} LLM HTTP {status_code}: "
                     f"{error.response.text[:300]}"
                 ) from error
         except (
@@ -413,7 +413,7 @@ def _record_cost(
             "--model-id",
             model,
             "--platform",
-            "Ark",
+            "bmc-llm-relay",
             "--input-tokens",
             str(input_tokens),
             "--output-tokens",
@@ -500,8 +500,8 @@ def _finalize_route(
         "task": route_name,
         "run_id": run_id,
         "model_id": model,
-        "platform": "Ark",
-        "backend": "ark_demo_batch",
+        "platform": "bmc-llm-relay",
+        "backend": "relay_demo_batch",
         "run_signature": signature,
         "status": "pass",
         "total": len(normalized),
@@ -527,7 +527,7 @@ def _finalize_route(
                 "status": "done",
                 "run_id": run_id,
                 "model_id": model,
-                "backend": "ark_demo_batch",
+                "backend": "relay_demo_batch",
                 "row_count": len(normalized),
                 "valid_rate": 1.0,
                 "output_file": str(paths["post"]),
@@ -598,14 +598,11 @@ def run(
         print("[demo-routes] cache hit: R1-R5 already complete", flush=True)
         return summary
 
-    api_key = (os.environ.get("LLM_RELAY_API_KEY")
-               or os.environ.get("ARK_API_KEY")
-               or os.environ.get("OPENAI_API_KEY"))
-    base_url = (os.environ.get("LLM_RELAY_BASE_URL")
-                or os.environ.get("ARK_BASE_URL")
-                or os.environ.get("OPENAI_BASE_URL"))
+    # 模型统一走 bmc-llm-relay(blueai 模型网关),不回退 ARK_*
+    api_key = os.environ.get("LLM_RELAY_API_KEY")
+    base_url = os.environ.get("LLM_RELAY_BASE_URL")
     if not api_key or not base_url:
-        raise EnvironmentError("LLM_RELAY_API_KEY/LLM_RELAY_BASE_URL (or ARK_API_KEY/ARK_BASE_URL) are required")
+        raise EnvironmentError("LLM_RELAY_API_KEY/LLM_RELAY_BASE_URL are required (bmc-llm-relay)")
 
     update_run_config(
         project,
@@ -614,7 +611,7 @@ def run(
                 "status": "running",
                 "run_id": run_id,
                 "model_id": model,
-                "backend": "ark_demo_batch",
+                "backend": "relay_demo_batch",
                 "started_at": started_at,
             }
             for route_name in active_routes
@@ -713,7 +710,7 @@ def run(
                 ROUTES[name]["status"]: {
                     "status": "failed",
                     "run_id": run_id,
-                    "backend": "ark_demo_batch",
+                    "backend": "relay_demo_batch",
                     "error": "; ".join(errors.get(name) or ["incomplete chunks"]),
                     "failed_at": failed_at,
                 }

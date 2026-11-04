@@ -5,6 +5,7 @@ Topic 6 是一个运行在火山方舟 Managed Agents（MA）上的飞书 Bot �
 ## 文档导航
 
 - [快速调试与完整配置](./TOPIC6_DEBUG_QUICKSTART.md)
+- [OpenSpec 规范（capability specs + 代码地图）](./openspec/project.md)：修改前先 `openspec show <capability> --type spec`，变更走 `openspec/changes/`
 - [变更日志](./TOPIC6_CHANGELOG.md)
 - [客户文件迁移映射](./CUSTOMER_TO_MA_FILE_MAPPING.md)
 - [架构说明](./topic6_ma_architecture.html)

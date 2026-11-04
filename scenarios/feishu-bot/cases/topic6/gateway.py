@@ -796,11 +796,11 @@ _COORDINATOR_AGENT_JSON = Path(__file__).resolve().parent / "ma-resources" / "ag
 def _byok_model_headers(config: Topic6Config, agent_json: Path = _COORDINATOR_AGENT_JSON):
     """BYOK 模型鉴权 Header 只在 coordinator 走 BYOK（model.provider 非空）时附加。
 
-    方舟原生模型收到 X-User-Model-Header-* 会直接 400 InvalidModelHeader，所以切换
-    原生 / BYOK 只改 agents/*.json 即可，config.env 里的 BYOK_* 可以保留不动。
+    当前 4 个 Agent 统一走 bmc-llm-relay（blueai 模型网关），必须附加 Header，
+    缺 BYOK_MODEL_AUTH_HEADER_* 时启动即失败（否则每次模型请求都会被 relay 401）。
+    方舟原生模型收到 X-User-Model-Header-* 会直接 400 InvalidModelHeader，所以切回原生
+    只改 agents/*.json 即可，config.env 里的 BYOK_* 可以保留不动。
     """
-    if not (config.model_auth_header_name and config.model_auth_header_value):
-        return None
     try:
         model = json.loads(agent_json.read_text(encoding="utf-8")).get("model") or {}
     except (OSError, ValueError) as error:
@@ -809,6 +809,11 @@ def _byok_model_headers(config: Topic6Config, agent_json: Path = _COORDINATOR_AG
     if not model.get("provider"):
         log.info("topic6 coordinator uses Ark native model %s; BYOK header disabled", model.get("id"))
         return None
+    if not (config.model_auth_header_name and config.model_auth_header_value):
+        raise RuntimeError(
+            f"coordinator 模型走 {model.get('provider')}，但未配置 BYOK_MODEL_AUTH_HEADER_NAME / "
+            "BYOK_MODEL_AUTH_HEADER_VALUE（bmc-llm-relay 的鉴权 Header），Agent 请求会被拒绝"
+        )
     return {f"X-User-Model-Header-{config.model_auth_header_name}": config.model_auth_header_value}
 
 

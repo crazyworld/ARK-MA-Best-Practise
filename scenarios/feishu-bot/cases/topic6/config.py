@@ -33,7 +33,7 @@ class Topic6Config:
     skip_miaoda_oauth: bool
     # BYOK Direct 模式：企业自有模型的鉴权凭证，按请求以
     # X-User-Model-Header-{model_auth_header_name} 动态附加，不写入方舟侧持久配置。
-    # 两者均为空则不附加，等价于走原豆包模式。
+    # coordinator.json 走 bmc-llm-relay 时两者必填（gateway._byok_model_headers 启动校验）。
     model_auth_header_name: str = ""
     model_auth_header_value: str = ""
     # 飞书共享根文件夹 token：HC 产物自动发布到此文件夹下的 job 子文件夹中

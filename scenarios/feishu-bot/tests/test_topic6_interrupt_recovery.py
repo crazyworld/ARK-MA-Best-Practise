@@ -221,6 +221,85 @@ REPORT = (
 )
 
 
+# ---------------------------------------------------------------------------
+# BYOK 鉴权 Header:每一条 user.message 都必须带(sesn-20261026150456-vmpfi 等 4 个
+# relay Session 中,Gateway 自动发出的催促/重试消息漏带 Header,30 条消息里这类全部
+# model_request_failed(input=0),带 Header 的触发/HC/手动 /continue 全部成功)
+# ---------------------------------------------------------------------------
+
+_BYOK = {"X-User-Model-Header-Authorization": "Bearer sk-relay-test-secret"}
+
+
+class _HeaderArk:
+    def __init__(self):
+        self.calls: list[tuple[str, object]] = []
+
+    async def send_message(self, _sid, msg, extra_headers=None):
+        self.calls.append((msg, extra_headers))
+
+
+@pytest.fixture()
+def byok_env(tmp_path, monkeypatch):
+    loop = asyncio.new_event_loop()
+    store = PipelineStore(str(tmp_path / "topic6.db"))
+    ark = _HeaderArk()
+    runner = runner_mod.Topic6Runner(
+        ark, _Sender(), store,
+        runner_mod.Topic6Config(coordinator_agent_id="a", environment_id="e"),
+        loop=loop, extra_headers=_BYOK,
+    )
+
+    async def _noop(*_a, **_k):
+        return None
+
+    async def _no_sleep(_s):
+        return None
+
+    runner._render_and_patch = _noop  # type: ignore[assignment]
+    monkeypatch.setattr(runner_mod.asyncio, "sleep", _no_sleep)
+    job = store.create_job(
+        chat_id="c1", thread_id="", user_open_id="u1",
+        ma_session_id="s1", mode="smoke", project_dir="/workspace/Projects/W43",
+    )
+    store.update_phase(job.job_id, "C2")
+    runner._progress[job.job_id] = runner_mod._ProgressState()
+    try:
+        yield loop, runner, ark, job
+    finally:
+        store.close()
+        loop.close()
+
+
+class TestByokHeaderOnEveryMessage:
+    def test_provider_retry_and_idle_nudge_carry_header(self, byok_env, caplog):
+        loop, runner, ark, job = byok_env
+        events = [
+            _msg("C2 运行中"),
+            *_provider_failure(),
+            {"type": "span.model_request_end", "is_error": False},
+            _msg("继续"),
+            {"type": "session.status_idle", "stop_reason": {"type": "end_turn"}},
+        ]
+        with caplog.at_level("DEBUG"):
+            loop.run_until_complete(runner._consume_events(job.job_id, _Stream(events)))
+        msgs = [m for m, _ in ark.calls]
+        assert "[系统] 模型服务已恢复，请继续执行当前阶段。" in msgs
+        assert any("中途停止" in m for m in msgs)
+        assert all(h == _BYOK for _, h in ark.calls), ark.calls
+        # Header 值即 relay Key:不得出现在日志里
+        assert "sk-relay-test-secret" not in caplog.text
+
+    def test_runner_never_calls_ark_send_message_directly(self):
+        """所有注入都必须走 _send_message,新增调用点漏带 Header 会被这里拦住。"""
+        import inspect
+        src = inspect.getsource(runner_mod.Topic6Runner)
+        body = src.split("async def _send_message", 1)[1]
+        helper, rest = body.split("\n    async def ", 1)
+        assert "self._ark.send_message(" in helper
+        assert "self._ark.send_message(" not in src.split("async def _send_message", 1)[0]
+        assert "self._ark.send_message(" not in rest
+
+
 class TestNeedDecision:
     def test_need_decision_stops_without_nudge(self, env):
         loop, runner, store, _ark, sender, job = env

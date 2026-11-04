@@ -57,6 +57,8 @@ TASK_QUERY_RETRY_BASE_SECONDS = 2
 # 任务级失败原地自愈重提上限(对齐原版 datahub_poll.MAX_TASK_RETRIES);计数落 submit_meta,
 # worker 重启不会无限重提
 MAX_TASK_RESUBMITS = 1
+# 行级失败(解析失败/空主字段)自动重提轮数,对齐 CC V2.0 补标最多 3 轮;每轮只提交剩余失败行
+FAILED_ROW_RETRY_ROUNDS = 3
 # 拿不到逐行 in/out token 时按 3:1 拆 total_tokens(对齐原版 datahub_poll 回退估算)
 FALLBACK_INPUT_TOKEN_RATIO = 0.75
 API_KEY_ENVS = ("DATAHUB_API_KEY_OFFICE", "DATAHUB_API_KEY_HOME", "DATAHUB_API_KEY")
@@ -647,6 +649,7 @@ def _c3_timewindow(df: pd.DataFrame) -> pd.DataFrame:
 
 def _postprocess(df: pd.DataFrame, task: str) -> tuple[pd.DataFrame, dict]:
     total = len(df)
+    empty_primary = 0
     if task == "c3":
         df = _c3_flatten(df)
         df = _c3_timewindow(df)
@@ -654,13 +657,20 @@ def _postprocess(df: pd.DataFrame, task: str) -> tuple[pd.DataFrame, dict]:
     else:
         schema = TASK_SCHEMAS[task]
         parsed = df["llm_result"].apply(_parse_dict)
-        valid_mask = parsed.notna()
+        # 有效 = JSON 可解析且主字段非空(对齐 CC V2 E5:SUCCESS 但内容全空的静默失败)。
+        # 空主字段并入 parse_error,复用失败行重提与有效率熔断
+        primary = schema["primary_field"]
+        empty_mask = parsed.apply(
+            lambda o: o is not None and not str(o.get(primary) or "").strip()
+        )
+        valid_mask = parsed.notna() & ~empty_mask
         valid = int(valid_mask.sum())
         for field in schema["fields"]:
             df[f"{task}_{field}"] = parsed.apply(
                 lambda o, k=field: (o.get(k) if o and o.get(k) is not None else "")
             )
         df[f"{task}_parse_error"] = (~valid_mask).astype(int)
+        empty_primary = int(empty_mask.sum())
 
     invalid = total - valid
     rate = valid / total if total else 0.0
@@ -668,6 +678,7 @@ def _postprocess(df: pd.DataFrame, task: str) -> tuple[pd.DataFrame, dict]:
               else "warn" if rate >= VALID_THRESHOLDS["warn"] else "fail")
     return df, {
         "total": total, "valid": valid, "invalid": invalid,
+        "empty_primary_count": empty_primary,
         "valid_rate": round(rate, 4), "status": status,
     }
 
@@ -682,18 +693,21 @@ def _failed_row_ids(df_post: pd.DataFrame, task: str) -> list:
 def _retry_failed_rows(
     api_key: str, *, task: str, task_dir: Path, run_id: int, upload_path: Path,
     prompt_text: str, model_id: str, failed_ids: list, df_raw: pd.DataFrame,
+    round_no: int = 1,
 ) -> tuple[pd.DataFrame, dict]:
     """解析失败/空返回（如 relay_empty_completion）的行原参数重提交一次，按 row_id 回填。
 
-    只重试一轮；失败行原样保留并计入 invalid。重试 task_id 落盘，进程重启可续上。
+    单轮重试；轮数由 annotate() 控制（FAILED_ROW_RETRY_ROUNDS）。仍失败的行原样保留并计入
+    invalid。重试 task_id 按轮落盘，进程重启可续上。
     """
+    sfx = "" if round_no == 1 else f"_{round_no}"
     info = {"retried_rows": len(failed_ids), "retry_task_id": None,
             "retry_tokens": 0, "retry_consume": 0.0}
     df_in = pd.read_excel(upload_path)
     subset = df_in[df_in["row_id"].isin(failed_ids)]
     if subset.empty:
         return df_raw, info
-    meta_path = task_dir / f"{task}_retry_meta.json"
+    meta_path = task_dir / f"{task}_retry{sfx}_meta.json"
     ids_key = sorted(str(x) for x in failed_ids)
     meta = {}
     if meta_path.exists():
@@ -705,12 +719,12 @@ def _retry_failed_rows(
         retry_task_id = int(meta["task_id"])
         print(f"[annotate] 恢复失败行重试 task_id={retry_task_id}", flush=True)
     else:
-        retry_input = task_dir / f".{task}_retry_input_r{run_id}.xlsx"
+        retry_input = task_dir / f".{task}_retry{sfx}_input_r{run_id}.xlsx"
         subset.to_excel(retry_input, index=False)
         ds_id = _upload_file(api_key, retry_input)
         retry_task_id = _create_task(
             api_key, ds_id, prompt_text, model_id,
-            f"topic6_{task}_retry_r{run_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+            f"topic6_{task}_retry{sfx}_r{run_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
         )
         meta_path.write_text(json.dumps(
             {"run_id": run_id, "row_ids": ids_key, "task_id": retry_task_id},
@@ -719,7 +733,7 @@ def _retry_failed_rows(
     info["retry_task_id"] = retry_task_id
 
     task_data = _poll_until_done(api_key, retry_task_id)
-    retry_raw = task_dir / f"{task}_result_raw_r{run_id}_retry.xlsx"
+    retry_raw = task_dir / f"{task}_result_raw_r{run_id}_retry{sfx}.xlsx"
     if task_data.get("result_url"):
         _download_result(task_data["result_url"], retry_raw)
     else:
@@ -875,21 +889,33 @@ def annotate(
 
     df = pd.read_excel(raw_out)
     df_post, stats = _postprocess(df, task)
-    retry_info = {"retried_rows": 0}
+    # 失败行最多自动重试 FAILED_ROW_RETRY_ROUNDS 轮（对齐 CC V2.0 补标"最多自动 3 轮"），
+    # 每轮只提交上一轮仍失败的行；把补标闭环收在脚本内，避免 5% 熔断后再人工委派一次。
+    retry_info = {"retried_rows": 0, "rounds": 0, "retry_tokens": 0, "retry_consume": 0.0}
     failed_ids = _failed_row_ids(df_post, task)
-    if failed_ids:
+    initial_failed = len(failed_ids)
+    for round_no in range(1, FAILED_ROW_RETRY_ROUNDS + 1):
+        if not failed_ids:
+            break
         try:
-            df, retry_info = _retry_failed_rows(
+            df, info = _retry_failed_rows(
                 api_key, task=task, task_dir=task_dir, run_id=run_id,
                 upload_path=upload_path, prompt_text=prompt_text, model_id=model_id,
-                failed_ids=failed_ids, df_raw=df,
+                failed_ids=failed_ids, df_raw=df, round_no=round_no,
             )
-            df_post, stats = _postprocess(df, task)
-            retry_info["recovered_rows"] = len(failed_ids) - stats["invalid"]
-            print(f"[annotate] 失败行重试完成: {retry_info}", flush=True)
-        except Exception as error:  # noqa: BLE001 - 重试失败不影响首轮结果落盘
-            retry_info = {"retried_rows": len(failed_ids), "retry_error": str(error)[:300]}
-            print(f"[annotate] ⚠️ 失败行重试异常，保留首轮结果: {error}", flush=True)
+        except Exception as error:  # noqa: BLE001 - 重试失败不影响已有结果落盘
+            retry_info["retry_error"] = str(error)[:300]
+            print(f"[annotate] ⚠️ 第 {round_no} 轮失败行重试异常，保留已有结果: {error}", flush=True)
+            break
+        df_post, stats = _postprocess(df, task)
+        retry_info["rounds"] = round_no
+        retry_info["retried_rows"] += info["retried_rows"]
+        retry_info["retry_tokens"] += info.get("retry_tokens", 0)
+        retry_info["retry_consume"] += info.get("retry_consume", 0.0)
+        retry_info.setdefault("retry_task_ids", []).append(info.get("retry_task_id"))
+        failed_ids = _failed_row_ids(df_post, task)
+        retry_info["recovered_rows"] = initial_failed - len(failed_ids)
+        print(f"[annotate] 第 {round_no} 轮失败行重试完成: 剩余失败 {len(failed_ids)} 行", flush=True)
     post_out = task_dir / f"{task}_postprocess_r{run_id}.xlsx"
     tmp = post_out.with_suffix(".tmp.xlsx")
     df_post.to_excel(tmp, index=False)

@@ -7,7 +7,8 @@
 ## 0. 前置
 
 - 已装好 `conda` / `curl` / `jq` / `node`（`arkagent init` 内部会调 Node 子进程完成飞书应用扫码建站）。
-- 方舟账号:已开通 Managed Agents,拿到 `ARK_API_KEY`。
+- 方舟账号:已开通 Managed Agents,拿到 `ARK_API_KEY`(只用于控制面)。
+- bmc-llm-relay(blueai 模型网关)Key:Agent 与沙箱脚本的模型都走它,见 §2.2.1。
 - topic6 数据源 MCP:已部署或本地起好 mock,拿到 `HOT_TOPICS_MCP_URL`。
 
 ### 0.1 Python 环境(首次)
@@ -147,6 +148,23 @@ BLUEAI_API_KEY=<业务对接人给的 Key>
 DATAHUB_ENDPOINT=https://bmc-data-hub.bluemediagroup.cn/...
 DATAHUB_API_KEY=<业务对接人给的 Key>
 ```
+
+### 2.2.1 模型网关 bmc-llm-relay(blueai 模型资源,必填)
+
+4 个 Agent 与沙箱脚本(C2 事件归档、E 洞察、demo 路由)的模型统一走 bmc-llm-relay,
+不再使用火山方舟模型。`ARK_API_KEY` 只用于调方舟 Managed Agent 控制面。
+
+```env
+# 沙箱脚本直连(OpenAI 兼容,base 含 /v1);缺失时脚本直接报错,不回退 ARK_*
+LLM_RELAY_BASE_URL=https://bmc-llm-relay.bluemediagroup.cn/v1
+LLM_RELAY_API_KEY=<relay Key>
+# Agent 走 BYOK Direct:Gateway 每次发消息附加 X-User-Model-Header-Authorization
+# coordinator.json 带 model.provider 时缺这两项 Gateway 启动失败
+BYOK_MODEL_AUTH_HEADER_NAME=Authorization
+BYOK_MODEL_AUTH_HEADER_VALUE=Bearer <relay Key>
+```
+
+自检(不打印 Key):`curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $LLM_RELAY_API_KEY" $LLM_RELAY_BASE_URL/models` 应为 200。
 
 ### 2.3 妙搭用户授权(每位操作人首次使用前)
 
