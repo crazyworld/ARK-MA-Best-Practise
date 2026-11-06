@@ -15,9 +15,9 @@
 | Skill 目录 | skill_id | version | 内含活跃 Prompt/脚本版本 | 上次更新 |
 |---|---|---|---|---|
 | ma-resources/skills/topic6-fetch-normalize/ | (未上传) | - | Phase A+B 归一化脚本 v1(热度基准 2026 内置 JSON) | 2026-09-24 |
-| ma-resources/skills/topic6-annotation/ | (未上传) | - | C0=v5, R1=v2, R2=v2, R3=v1, R4=v2, R5=v3, 节点标注=v7;datahub_annotate.py 为 5 合 1 精简版(主字段为空计入失败行) | 2026-11-03 |
+| ma-resources/skills/topic6-annotation/ | (未上传) | - | C0=v13, R1=v2, R2=v2, R3=v1, R4=v2, R5=v3, 节点标注=v7;datahub_annotate.py 为 5 合 1 精简版(主字段为空计入失败行) | 2026-11-03 |
 | ma-resources/skills/topic6-insight/ | (未上传) | - | 共享 role_style 拼接;E1=v3, E2=v7, E3=v6 + _tagging v3 + _insight_draft v1, E4=_tagging v5 + _curation v3 + _arbitration v3 + _writing_coop_risk v4 + _writing_marketing_consumer v1 | 2026-11-03 |
-| ma-resources/skills/topic6-event-registry/ | (未上传) | - | v2.2.0；跨平台单入口、断点续跑与运行签名 | 2026-09-29 |
+| ma-resources/skills/topic6-event-registry/ | (未上传) | - | v3.0.0-rc.14；run_c2 统一入口 + F1 融合 + 阶段 checkpoint；Chat=DeepSeek-V4.1-Flash | 2026-11-05 |
 | ma-resources/skills/topic6-web-report/ | (未上传) | - | v1.1.0 | 2026-09-24 |
 | ma-resources/skills/miaoda-web-publish/ | (未上传) | - | v1.0.1；用户 OAuth + Git 管理发布 | 2026-09-30 |
 

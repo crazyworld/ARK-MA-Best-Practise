@@ -2,14 +2,14 @@
   "name": "topic6-coordinator",
   "description": "topic6 社媒热点周刊主协调器。承载 Producer 主线 14 步时序 + 子 Agent 委派。",
   "model": {
-    "id": "DeepSeek-V4-Flash-0731",
+    "id": "DeepSeek-V4.1-Flash",
     "provider": "bmc-llm-relay",
     "base_url": "https://bmc-llm-relay.bluemediagroup.cn/v1/chat/completions",
     "protocol": "openai_chat_completions",
     "token_limits": {
-      "context_window": 1000000,
-      "max_input_token_length": 1000000,
-      "max_output_token_length": 384000
+      "context_window": 256000,
+      "max_input_token_length": 200000,
+      "max_output_token_length": 56000
     }
   },
   "system_file": "coordinator.system.md",
@@ -45,7 +45,6 @@
     "agents": [
       {"type": "agent", "id": "${agent_id.topic6-annotator}"},
       {"type": "agent", "id": "${agent_id.topic6-validator}"},
-      {"type": "agent", "id": "${agent_id.topic6-insighter}"},
       {"type": "self"}
     ]
   }

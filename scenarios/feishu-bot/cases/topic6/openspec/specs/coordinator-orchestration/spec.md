@@ -8,7 +8,7 @@
 ## Requirements
 
 ### Requirement: Agent 资源定义
-`coordinator.json` SHALL 声明：名称 `topic6-coordinator`；模型（当前 bmc-llm-relay BYOK：`id=DeepSeek-V4-Flash-0731`、`provider=bmc-llm-relay`、`base_url=https://bmc-llm-relay.bluemediagroup.cn/v1/chat/completions`、`protocol=openai_chat_completions`、`token_limits` 1000000/1000000/384000（按模型原生规格：上下文仅指输入 1M，输出上限 384K 另计））；`system_file=coordinator.system.md`；挂载 6 个自定义 Skill（`topic6-fetch-normalize`、`topic6-annotation`、`topic6-insight`、`topic6-event-registry`、`topic6-web-report`、`miaoda-web-publish`），skill_id/version 以 `${skill_id.<name>}` / `${version.<name>}` 占位由 `create_all.sh` 渲染；工具 `agent_toolset_20260701` + MCP `hot-topics`（`${HOT_TOPICS_MCP_URL}`，`always_allow`）；`multiagent.type=coordinator`，子 Agent 为 `topic6-annotator`、`topic6-validator`、`topic6-insighter` 与 `self`。
+`coordinator.json` SHALL 声明：名称 `topic6-coordinator`；模型（当前 bmc-llm-relay BYOK：`id=DeepSeek-V4.1-Flash`、`provider=bmc-llm-relay`、`base_url=https://bmc-llm-relay.bluemediagroup.cn/v1/chat/completions`、`protocol=openai_chat_completions`、`token_limits` 256000/200000/56000（按模型原生 256K 上下文））；`system_file=coordinator.system.md`；挂载 6 个自定义 Skill（`topic6-fetch-normalize`、`topic6-annotation`、`topic6-insight`、`topic6-event-registry`、`topic6-web-report`、`miaoda-web-publish`），skill_id/version 以 `${skill_id.<name>}` / `${version.<name>}` 占位由 `create_all.sh` 渲染；工具 `agent_toolset_20260701` + MCP `hot-topics`（`${HOT_TOPICS_MCP_URL}`，`always_allow`）；`multiagent.type=coordinator`，子 Agent 为 `topic6-annotator`、`topic6-validator`、`topic6-insighter` 与 `self`。
 
 #### Scenario: 切换模型
 - **WHEN** 修改 `model.id` 或增加 `model.provider`
@@ -146,7 +146,7 @@ python /mnt/skills/topic6-annotation/scripts/run_demo_batch2.py \
 ### Requirement: Phase D 合并与质量判定
 Coordinator SHALL 运行 `merge_annotations.py` 产出 `05_合并/wide_table_{mode}_r{N}.xlsx`（28 列，标识列为 `序号`）。关卡以 stdout `gate_ok` 为准（行数守恒且 `dup_rows=0`），`false` 时停止。综合质量 `quality_status`：
 - `fail`（有效率 <80%、C0 缺失或 ≥2 路整批缺失）且上游未经用户裁决 → `[need_decision]`（A 继续送 HC / B 停止）；
-- `degraded`（恰 1 路整批缺失）或 `warn`（有效率 80%~92%、营销可用率偏离 55%~58% 基线、某平台 <5%、单簇超过营销可用行 10%）→ 不停，`quality_warnings` 逐条写入 HC `issues_detected`。
+- `degraded`（恰 1 路整批缺失）或 `warn`（有效率 80%~92%、营销可用率偏离 37%~41% 基线、某平台 <5%、单簇超过营销可用行 10%）→ 不停，`quality_warnings` 逐条写入 HC `issues_detected`。
 
 关卡通过后 MUST 先发布 `node=merge`，HC1/HC2 的 `wide_table_path` MUST 指向该已发布文件。
 

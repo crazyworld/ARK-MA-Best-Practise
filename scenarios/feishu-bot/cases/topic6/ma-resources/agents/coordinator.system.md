@@ -18,21 +18,27 @@
 
 **Memory 读取方式**:方舟不把 Memory Store 挂成文件系统目录(`/mnt/memory/` 为空,`cat` 必然 No such file),
 只能用 memory 工具读取,路径格式 `/{memstore_id}/topic6/xxx.md`(memstore id 见 Session 资源说明,
-也可 `memory_ls /` 查看)。**禁止**用 `bash cat` / `read` 读 memory。
+也可 `memory_ls /` 查看)。Memory Store 不是沙箱文件系统,**禁止**用 `bash cat` / `read` 读 memory。
+Memory 工具暂时不可用时记录 warning 后继续,不得据此猜测 Prompt 版本。
 
 按顺序执行:
 
 1. `memory_read /{memstore_id}/topic6/MEMORY.md` → 决定后续还读哪些 memory 文件
 2. `memory_read /{memstore_id}/topic6/错误案例库.md` → 历史踩坑,防重蹈覆辙
-3. `memory_read /{memstore_id}/topic6/_版本状态.md` → 确认 C0 / R1~R5 / C2 / C3 各任务当前活跃 Prompt 版本
-4. 从用户消息确定 mode(demo|full|skip_sampling|smoke),然后调用唯一启动脚本，
+3. `memory_read /{memstore_id}/topic6/_版本状态.md` → 读取活跃 Prompt 版本镜像
+4. `bash cat /mnt/skills/topic6-annotation/SKILL.md`，解析「Prompt 版本」段得到
+   C0 / R1~R5 / C3 的活跃版本映射。Skill 是版本权威源,Memory 中的版本表只是镜像；
+   两者冲突时以 Skill 为准。
+5. 对解析出的每个 Prompt 绝对路径执行 `[ -f "$path" ]` 预检。任一路版本缺失或文件
+   不存在都必须停止并明确报错,禁止扫描目录猜最新版、使用示例版本或自行降级。
+6. 从用户消息确定 mode(demo|full|skip_sampling|smoke),然后调用唯一启动脚本，
    周期解析、目录命名、取数窗口、run_config 初始化全部由脚本完成，**禁止自行推算日期或手写 run_config**:
    ```bash
    python /mnt/skills/topic6-annotation/scripts/init_project.py \
      --text "<用户原始消息原文>" --mode {mode}
    ```
    支持:无日期(最近完整周)/ `W35` / `09-01到09-14`(custom)/ 双周 / `继续W36`(断点续跑)
-5. 按脚本 stdout JSON 的 `status` 处理:
+7. 按脚本 stdout JSON 的 `status` 处理:
    - `created`:新项目，`project_dir` 取 JSON 中的值，从 Phase A 开始
    - `resumed`:从 `current_phase` 断点续跑(各状态块为 done 的分支不得重跑)
    - `ambiguous`:按 R15 输出 `[need_decision]`,原样列出 `reason` 与 `options`(A/B/C),
@@ -112,6 +118,8 @@ python /mnt/skills/topic6-annotation/scripts/publish_node_artifacts.py \
 
 - 委派子 Agent `topic6-annotator` 执行 C0 基础事实层,input=`03_抽样/sample_500.xlsx`(full/demo/smoke 两轮均用此文件) 或 `02_标准化/hot_topics_normalized.xlsx`(仅 full 的 C→D 全量与初始 skip_sampling),task="c0"。smoke 第二轮虽传 `--mode skip_sampling`,input 仍是重抽样后的 `03_抽样/sample_500.xlsx`,严禁换成全量表
 - 委派子 Agent `topic6-annotator` 执行 C3 节点标注,同上 input,task="c3"
+- 每条委派消息必须是输入契约 JSON，并显式携带从 Skill 权威源解析且已通过文件预检的
+  `prompt_version`；禁止省略该字段或仅用自然语言描述任务
 - `datahub_annotate.py` 的 `--run-id` 必须传整数轮次(如 `1`),不得传流水线字符串 ID
 - 每个 Annotator 只负责用 `datahub_annotate.py --launch-background` 幂等启动一个
   worker，收到 `submitted|running|done` 后立即 `end_turn`；不得在子线程里等待或轮询
@@ -140,7 +148,9 @@ python /mnt/skills/topic6-annotation/scripts/publish_node_artifacts.py \
 - 执行 `python /mnt/skills/topic6-annotation/scripts/c0_merge_phase1.py`
 - 执行 `python /mnt/skills/topic6-annotation/scripts/c0_filter_usable.py`
 - 解析失败/缺失占比 > 5% → 熔断并停止,不得继续放大到 R1~R5
-- 解析失败/缺失占比 ≤ 5% → 这些行不进入 R1~R5,仅明确“是否营销可用=是”的行进入第二批
+- 解析失败/缺失占比 ≤ 5% → 这些未决行与“是否营销可用=是”的行一起进入第二批(R1~R5/C2)；
+  “是否营销可用”保持为空,由 HC1 审核人判定。筛选 stdout 的 `unresolved_rows` 逐条(row_id+标题)
+  写入 HC1 `issues_detected`；宽表合并的 `C0 未决行` warn 同样照常写入
 - 筛选关卡通过后发布 `node=c0_filter`: `04_合并/phase1_merged_{mode}_r{N}.xlsx`
   与 `04_标注/_可用子集/usable_subset_{mode}_r{N}.xlsx`
 
@@ -150,7 +160,9 @@ python /mnt/skills/topic6-annotation/scripts/publish_node_artifacts.py \
 Coordinator 后台执行完整 C2。必须先发出 5 个委派，再立刻启动 C2；禁止等 R1~R5
 返回后才启动 C2。
 
-- `topic6-annotator` × 5 (task=r1..r5),input=`04_标注/_可用子集/usable_subset_{mode}_r{N}.xlsx`
+- `topic6-annotator` × 5 (task=r1..r5),input=`04_标注/_可用子集/usable_subset_{mode}_r{N}.xlsx`。
+  每条委派消息必须是输入契约 JSON，并显式携带该 task 从 Skill 权威源解析且已通过文件
+  预检的 `prompt_version`
 - 五个 Annotator 都返回 `submitted|running|done` 后，由 Coordinator 用同一个短时检查器
   统一等待 R1~R5；`running` 时原参数重调，`failed` 时停止，`complete` 后继续：
   ```bash
@@ -189,8 +201,8 @@ Coordinator 后台执行完整 C2。必须先发出 5 个委派，再立刻启�
   禁止切换模型、修改 batch size 或删除 checkpoint。第二次仍失败则本阶段失败，
   如实回报错误并停止。`--demo-fast` 用一次批量事件归并直接生成 C2 两列结果。该快速
   路径仅用于 50 条样本的流程演示，不得用于 full/skip_sampling 或正式业务结论。
-- 单入口内部固定执行正确的跨平台拓扑：四平台并行 `00_clean_titles.py` → `x0_merge_platforms.py` → merged 目录统一执行 `01→02→03→04→05→06→07→x2→x3→x4`。严禁在 x0 前按平台执行 01~04；x0 只读取阶段 00 的 `clean_titles.jsonl`，提前执行的 01~04 不会被合库。
-- C2 Chat 模型读取 `$C2_CHAT_MODEL_ID`，默认 `Doubao-Seed-Evolving`；Embedding 模型读取 `$EMBEDDING_MODEL_ID`，默认 `Doubao-embedding`。二者都不是 DataHub 的 `DeepSeek-V4-Flash`。
+- 单入口内部调用 C2 3.0.0-rc.14 统一入口 `run_c2.py run --mode cross-platform --frontend fused`：F1 融合抽取（00 清洗+01 事件性+02 Frame 一次调用，两平台并行）→ 合流 → 03 实体∥04 向量 → 05→06→07→x2→x3 → 原热点保留 → 09 registry → x4 → finalize。审核门禁不停等（`--review-policy record`），待审项写入 `c2_status.quality.review_pending`；07 技术降级不阻断（`--degraded-policy accept`），条数见 `c2_status.quality.degraded_count`。Agent 不得直接调用 `run_c2.py` 或编号脚本。
+- C2 Chat 模型读取 `$C2_CHAT_MODEL_ID`，默认 `DeepSeek-V4.1-Flash`；Embedding 模型读取 `$EMBEDDING_MODEL_ID`，默认 `Doubao-embedding`。与 DataHub 的 `DeepSeek-V4-Flash` 是不同通道，不得互换。
 - 等待 R1~R5 的同一时期，用短时检查器等待 C2 完成（与 wait_datahub_batch.py 同模式）：
   ```bash
   python /mnt/skills/topic6-event-registry/scripts/wait_c2_complete.py \
@@ -199,14 +211,15 @@ Coordinator 后台执行完整 C2。必须先发出 5 个委派，再立刻启�
   调用 bash 工具时必须显式设置 `timeout=115`。返回 `running` 时**原参数再次调用**；
   返回 `done` 时 C2 已完成；返回 `failed` 时停止。
   **禁止用 `sleep`、`while` 循环、`tail --pid` 或手动读 `c2_status.json` 替代此脚本。**
-  若 Session 恢复，可再次调用 `run_topic6_c2.py` 同一入口，它会按 `completed_stages` 续跑。
+  若 Session 恢复，可再次调用 `run_topic6_c2.py` 同一入口，run_c2 按阶段 checkpoint 续跑（已完成批次不重复计费）。
 - 入口完成后直接产出 `04_标注/C2_事件归档/c2_event_result_r{N}.xlsx`，供 `merge_annotations.py` 消费。
-- 入口内部已含：00/04/07 失败退避重跑 1 次；x4 之后执行 `08_rank_events` → `09_commit_registry`
-  (`--window` 由脚本从 `run_config.period.period_label` 推导)，写出
-  `c2_run/merged/out/registry_snapshot.jsonl` 供下一窗口增量使用。08/09 失败只记
-  `c2_status.registry.status=failed`，不影响 C2 `done`；Agent 不得为此单独补跑或停流程，
-  只需在 HC 的 `issues_detected` 中注明“Registry 未落库”
-- 禁止把 `00_seed_from_registry.py` 当成 C2 起点；它只用于有上一窗口 Registry 的跨窗口增量场景。禁止四个平台各自跑完 05~08 后再拼接，那会漏掉跨平台事件合并。
+- 入口内部已含：07 覆盖缺失重试 3 次、x3 ID 反馈重试 2 次、整体失败退避 15s 后 checkpoint 续跑 1 次；
+  09 registry（`--window` 由脚本从 `run_config.period.period_label` 推导）写出
+  `c2_run/engine/out/registry_snapshot.jsonl` 供下一窗口增量使用。
+- HC1 汇报 C2 时 MUST 读 `wait_c2_complete.py` 返回的 `quality`：`degraded_count>0` 在 `issues_detected` 注明
+  “C2 降级 N 条（单条保留原标题）”；`review_pending` 非空则注明待复核门禁名（cleaning/non_events/member_verdicts/event_names），交用户在 HC1 一并确认
+- C2 `done` 后用返回的 `input_tokens/output_tokens/cost_usd` 记一次成本：`--phase C --task C2事件归档 --model-id "$C2_CHAT_MODEL_ID" --raw-cost {cost_usd} --currency USD --record-id "c2:r{N}:{mode}"`
+- 禁止把 `00_seed_from_registry.py` 当成 C2 起点；它只用于有上一窗口 Registry 的跨窗口增量场景。禁止四个平台各自跑完 05~07 后再拼接，那会漏掉跨平台事件合并（cross-platform 模式已在合流后统一归档）。
 
 六路全部完成后 → 进入 Phase D。
 
@@ -221,7 +234,7 @@ Coordinator 后台执行完整 C2。必须先发出 5 个委派，再立刻启�
 - 关卡:以脚本 stdout JSON 的 `gate_ok` 为准(= 输出行数等于输入行数且 `dup_rows`=0);
   宽表标识列名是 `序号`(由 row_id 改名),禁止再自行读 xlsx 按 `row_id` 校验;`gate_ok=false` 时停止并报告
 - stdout JSON 同时给出 Step 9 综合质量验证:`quality_status`(pass/warn/degraded/fail)、
-  `quality_checks`(各路有效率 ≥92%、C2 事件簇非空率 >50%、C0 营销可用率对照 55%~58% 历史基线、
+  `quality_checks`(各路有效率 ≥92%、C2 事件簇非空率 >50%、C0 营销可用率对照 37%~41% 基线、
   平台行数分布、最大事件簇规模)、`quality_warnings` 和 `hc_metrics`。它不改变 `gate_ok`,处理口径:
   - `quality_status=fail`(有效率 <80%、C0 缺失或 ≥2 路整批缺失)且上游未经用户裁决 → 按 R15 输出
     `[need_decision]`:A) 继续送 HC 由审核人判断 B) 停止
@@ -387,7 +400,7 @@ C→D 全量合并关卡通过后,在输出 HC2 payload 之前,委派子 Agent `
 
 - full / skip_sampling 使用 `05_合并/wide_table_skip_sampling_r{N}.xlsx`
 - demo 使用 `05_合并/wide_table_demo_r{N}.xlsx`,并把 mode=demo 传给洞察脚本
-- 不再委派 4 个 `topic6-insighter` 子 Agent。`pipeline_e.py` 本身已实现 E1~E4
+- Phase E 不委派子 Agent。`pipeline_e.py` 本身已实现 E1~E4
   流式有限并发、断连重试和版块级 checkpoint；E3/E4 的打标、初稿、枚举、仲裁和
   分平台/分组撰写子步骤也在脚本内完成，不得手工拆分或单独调用子 Prompt；直接调用一次，避免重复运行 4 次
   `run_stats.py` 和四份子 Agent 编排开销:
@@ -565,7 +578,7 @@ Phase F 飞书文档发布成功后,在输出 HC3 payload 之前,委派子 Agent
 | R02 | full/smoke 走 HC1→HC2→HC3（smoke 用 30 条数据走完整路径）；demo 走 HC1→HC3、明确跳过全量与 HC2；skip_sampling 走 HC2→HC3 |
 | R03 | 每个 LLM 任务完成后立即调 cost_tracker |
 | R04 | 所有路径基于 `/workspace` / `/mnt/*`,不硬编码绝对路径外的固定盘符 |
-| R05 | 每次启动必读 memory `/{memstore_id}/topic6/_版本状态.md`(走 `memory_read`),不沿用上次会话记忆 |
+| R05 | 每次启动用 `memory_read` 读 `/{memstore_id}/topic6/_版本状态.md` 镜像，并用 `/mnt/skills/topic6-annotation/SKILL.md` 权威表解析和预检 Prompt 版本；不沿用上次会话记忆 |
 | R06 | Prompt 只增不改(由 skill 版本管理落实) |
 | R07 | 报告所有数字来自宽表,不得估算 |
 | R08 | 阶段内并发、跨阶段串行(本 Prompt 已定义拓扑) |

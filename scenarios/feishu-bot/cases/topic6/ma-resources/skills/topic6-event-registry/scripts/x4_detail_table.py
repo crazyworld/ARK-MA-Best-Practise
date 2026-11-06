@@ -29,6 +29,8 @@ import csv
 import collections
 import sys
 from pathlib import Path
+from c2_runtime import atomic_json, file_hash
+from c2_quality import inspect_ownership
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from relay import log_run, read_jsonl, write_csv
@@ -53,9 +55,13 @@ def main() -> int:
                     help="进入阶段 00 的那份 CSV（必须含 record_id 列）")
     ap.add_argument("--id-col", default="record_id")
     ap.add_argument("--out", default="热点明细_含事件归属.csv")
+    ap.add_argument("--strict-quality", action="store_true",
+                    help="实验门禁：技术缺失或降级返回 2；默认保留旧版完成导出后退出 0")
     args = ap.parse_args()
 
     rd = args.run_dir
+    quality_path = rd / "out" / "c2_quality.json"
+    atomic_json(quality_path, {"coverage_status": "INCOMPLETE", "reason": "validation in progress"})
     ev_p = rd / "work" / "block_events.jsonl"
     if not ev_p.exists():
         raise SystemExit(f"缺少 {ev_p}，先跑 07_block_archive.py")
@@ -71,7 +77,17 @@ def main() -> int:
     en = {}
     p = rd / "work" / "eventness.jsonl"
     if p.exists():
-        en = {r["record_id"]: r for r in read_jsonl(p)}
+        en_rows = list(read_jsonl(p))
+    else:
+        en_rows = []
+    quality_path = rd / "out" / "c2_quality.json"
+    try:
+        quality = inspect_ownership(src, events, en_rows, args.id_col)
+    except (ValueError, TypeError, KeyError) as exc:
+        atomic_json(quality_path, {"coverage_status": "FAILED", "error": str(exc),
+                                  "source_sha256": file_hash(args.source)})
+        raise SystemExit(str(exc))
+    en = {r["record_id"]: r for r in en_rows}
 
     owner, angle = {}, {}
     for e in events:
@@ -87,8 +103,8 @@ def main() -> int:
         e = owner.get(rid)
         if e is None:
             code = (en.get(rid) or {}).get("reason_code", "")
-            note = WHY_NOT.get(code) or ("判定为不成事件"
-                                        if rid in en else "上游未产出该条")
+            is_non_event = (en.get(rid) or {}).get("eventness") == "NON_EVENT"
+            note = (WHY_NOT.get(code) or "判定为不成事件") if is_non_event else "上游未产出事件归属，需排查"
             add = {"事件ID": "", "一级事件名": "", "二级角度": "", "事件成员数": "",
                    "归属置信度": "", "状态": "未进入聚类", "说明": note}
         else:
@@ -138,7 +154,13 @@ def main() -> int:
              "cols": len(base_cols) + len(ADD_COLS),
              "events": len(events), "multi_events": len(multi),
              "status": dict(stat)})
-    return 0
+    quality.update(source_sha256=file_hash(args.source), events_sha256=file_hash(ev_p),
+                   output_sha256=file_hash(out_p), output=str(out_p))
+    atomic_json(quality_path, quality)
+    partial = bool(quality["technical_missing_ids"] or quality["degraded_ids"])
+    if partial:
+        print("质量提示：存在技术缺失或降级，详见 out/c2_quality.json", file=sys.stderr)
+    return 2 if args.strict_quality and partial else 0
 
 
 if __name__ == "__main__":

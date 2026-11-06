@@ -265,14 +265,8 @@ C2_SCRIPT = MA / "skills/topic6-event-registry/scripts/run_topic6_c2.py"
 @pytest.fixture(scope="module")
 def c2():
     module = _load("parity_run_topic6_c2", C2_SCRIPT)
-    module.STAGE_RETRY_BACKOFF_SECONDS = 0
+    module.C2_RETRY_BACKOFF_SECONDS = 0
     return module
-
-
-def test_c2_plan_includes_rank_and_registry_with_window(c2, tmp_path):
-    plan = dict(c2.build_stage_plan(tmp_path, tmp_path / "i.csv", "c", "e", window="2026W43"))
-    assert "08_rank" in plan and "09_registry" in plan
-    assert plan["09_registry"][0][-2:] == ["--window", "2026W43"]
 
 
 @pytest.mark.parametrize("label, expected", [
@@ -285,76 +279,6 @@ def test_c2_window_from_run_config(c2, tmp_path, label, expected):
     assert c2.resolve_window(tmp_path) == expected
 
 
-def test_c2_stage_retry_once_for_04_and_07(c2, tmp_path, monkeypatch):
-    import subprocess
-    calls = []
-
-    def flaky(command, log_path):
-        calls.append(command[0])
-        if len(calls) == 1:
-            raise subprocess.CalledProcessError(1, command)
-
-    monkeypatch.setattr(c2, "_run_command", flaky)
-    c2._run_stage("07_archive", [["x"]], tmp_path)
-    assert calls == ["x", "x"]
-
-    calls.clear()
-    monkeypatch.setattr(c2, "_run_command", lambda cmd, _p: (calls.append(1), (_ for _ in ()).throw(
-        subprocess.CalledProcessError(1, cmd))))
-    with pytest.raises(subprocess.CalledProcessError):
-        c2._run_stage("05_recall", [["y"]], tmp_path)
-    assert calls == [1]  # 无重试配置的阶段不重试
-
-
-def _c2_project(tmp_path, c2, monkeypatch, failing_stage):
-    import subprocess
-    project = tmp_path / "proj"
-    source = project / "src.xlsx"
-    project.mkdir()
-    (project / "run_config.yaml").write_text("period:\n  period_label: 2026-W43\n", "utf-8")
-
-    def prepare(_s, dest):
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text("x", "utf-8")
-        return 1
-
-    executed = []
-
-    def run_stage(stage, _cmds, _log):
-        executed.append(stage)
-        if stage == failing_stage:
-            raise subprocess.CalledProcessError(1, [stage])
-
-    monkeypatch.setattr(c2, "_prepare_input", prepare)
-    monkeypatch.setattr(c2, "_input_platforms", lambda _p: ("weibo",))
-    monkeypatch.setattr(c2, "_run_stage", run_stage)
-    monkeypatch.setattr(c2, "_write_result", lambda _r, dest, _n: dest.write_text("r", "utf-8"))
-    args = c2.argparse.Namespace(
-        project_dir=str(project), mode="full", run_id=1, input=str(source),
-        chat_model="c", embedding_model="e", x2_verdict="off", demo_fast=False)
-    return project, args, executed
-
-
-def test_c2_registry_failure_does_not_fail_c2(c2, tmp_path, monkeypatch):
-    project, args, executed = _c2_project(tmp_path, c2, monkeypatch, "09_registry")
-    result = c2.run(args)
-    assert result.exists()
-    status = json.loads((project / "04_标注/C2_事件归档/c2_run/c2_status.json").read_text("utf-8"))
-    assert status["status"] == "done"
-    assert status["registry"]["status"] == "failed"
-    assert status["registry"]["window"] == "2026W43"
-    assert "09_registry" in status["registry"]["errors"]
-
-
-def test_c2_core_stage_failure_still_fails(c2, tmp_path, monkeypatch):
-    import subprocess
-    project, args, _ = _c2_project(tmp_path, c2, monkeypatch, "07_archive")
-    with pytest.raises(subprocess.CalledProcessError):
-        c2.run(args)
-    status = json.loads((project / "04_标注/C2_事件归档/c2_run/c2_status.json").read_text("utf-8"))
-    assert status["status"] == "failed"
-
-
 # ---------------------------------------------------------------- D 综合质量验证 / HC 展示
 
 @pytest.fixture(scope="module")
@@ -362,7 +286,7 @@ def merge():
     return _load("parity_merge_annotations", ANN_SCRIPTS / "merge_annotations.py")
 
 
-def _wide(rows: int = 100, usable: int = 56, clustered: int = 40, big: int = 5,
+def _wide(rows: int = 100, usable: int = 39, clustered: int = 30, big: int = 3,
           platforms=("微博", "抖音", "B站", "知乎")):
     plat = [platforms[i % len(platforms)] for i in range(rows)]
     usable_col = ["是"] * usable + ["否"] * (rows - usable)
@@ -381,16 +305,16 @@ def test_quality_report_pass_and_metrics(merge):
     q = merge.quality_report(_wide(), missing={}, valid_rates=_rates(), unusable_reasons={"纯八卦": 30})
     assert q["status"] == "pass", q["checks"]
     m = q["metrics"]
-    assert m["r_subset_rows"] == 56
-    assert m["c2_coverage"] == round(40 / 56, 4)
+    assert m["r_subset_rows"] == 39
+    assert m["c2_coverage"] == round(30 / 39, 4)
     assert m["c3_coverage"] == 0.1
-    assert m["max_cluster_rows"] == 5 and m["max_cluster_name"] == "大事件"
+    assert m["max_cluster_rows"] == 3 and m["max_cluster_name"] == "大事件"
     assert set(m["platform_distribution"]) == {"微博", "抖音", "B站", "知乎"}
     assert m["unusable_reasons"] == {"纯八卦": 30}
 
 
 def test_quality_report_warning_tier(merge):
-    df = _wide(usable=40, clustered=25, big=12, platforms=("微博", "抖音", "知乎"))
+    df = _wide(usable=60, clustered=25, big=12, platforms=("微博", "抖音", "知乎"))
     rates = _rates()
     rates["r3"] = 0.85
     q = merge.quality_report(df, missing={}, valid_rates=rates, unusable_reasons={})
@@ -403,7 +327,7 @@ def test_quality_report_warning_tier(merge):
 
 
 def test_quality_report_c2_low_coverage_and_missing_route(merge):
-    q = merge.quality_report(_wide(clustered=20), missing={"r2": True}, valid_rates={**_rates(), "r2": None},
+    q = merge.quality_report(_wide(clustered=15), missing={"r2": True}, valid_rates={**_rates(), "r2": None},
                              unusable_reasons={})
     # 恰 1 路整批缺失 = degraded,与 wait_datahub_batch 同口径(按缺失继续),不是 fail
     assert q["status"] == "degraded"
@@ -775,3 +699,52 @@ def test_coordinator_phase5_contract():
                    "report_self_check.py", "--skip-data-prep --sections", "HC3 打回",
                    "hc2_passed"):
         assert needle in text, needle
+
+
+# ---------------------------------------------------------------------------
+# C0 未决行:≤5% 时保留进 R1~R5/C2 并交 HC1 判定;>5% 熔断
+# ---------------------------------------------------------------------------
+@pytest.fixture(scope="module")
+def c0_filter():
+    return _load("parity_c0_filter_usable", ANN_SCRIPTS / "c0_filter_usable.py")
+
+
+def _phase1(tmp_path, usable_col, parse_error):
+    proj = tmp_path / "W43"
+    (proj / "04_合并").mkdir(parents=True)
+    (proj / "run_config.yaml").write_text("mode: full\nstatus: {}\n", encoding="utf-8")
+    n = len(usable_col)
+    pd.DataFrame({
+        "row_id": [f"T{i}" for i in range(n)], "platform": ["微博"] * n,
+        "title": [f"标题{i}" for i in range(n)], "是否营销可用": usable_col,
+        "c0_parse_error": parse_error,
+    }).to_excel(proj / "04_合并/phase1_merged_full_r1.xlsx", index=False)
+    return proj
+
+
+def test_c0_filter_keeps_unresolved_rows_for_hc1(tmp_path, c0_filter):
+    usable = ["是"] * 40 + ["否"] * 58 + [None, None]
+    proj = _phase1(tmp_path, usable, [0] * 98 + [1, 0])
+    result = c0_filter.run(str(proj), "full", 1)
+    subset = pd.read_excel(proj / "04_标注/_可用子集/usable_subset_full_r1.xlsx")
+    assert len(subset) == 42 and result["kept_count"] == 42
+    assert result["parse_error_included"] == 1 and result["missing_included"] == 1
+    assert [r["row_id"] for r in result["unresolved_rows"]] == ["T98", "T99"]
+    assert result["unresolved_rows"][0]["title"] == "标题98"
+    assert "否" not in set(subset["是否营销可用"].dropna())
+
+
+def test_c0_filter_trips_above_threshold(tmp_path, c0_filter):
+    usable = ["是"] * 90 + [None] * 10
+    proj = _phase1(tmp_path, usable, [0] * 90 + [1] * 10)
+    with pytest.raises(RuntimeError, match="超过 5% 阈值"):
+        c0_filter.run(str(proj), "full", 1)
+
+
+def test_quality_report_flags_c0_unresolved_rows(merge):
+    df = _wide()
+    df.loc[[98, 99], "是否营销可用"] = None
+    q = merge.quality_report(df, missing={}, valid_rates=_rates(), unusable_reasons={})
+    items = {c["item"]: c["status"] for c in q["checks"]}
+    assert items["C0 未决行"] == "warn"
+    assert any("C0 未决 2 行" in w for w in q["warnings"])

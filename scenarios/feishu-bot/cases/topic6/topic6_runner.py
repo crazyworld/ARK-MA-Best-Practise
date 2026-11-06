@@ -28,23 +28,44 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
-from typing import Optional
+from typing import Callable, Optional
 from urllib.parse import unquote, urlsplit
 
 from arkagent.ark import ArkClient, event_error, event_progress, event_requires_action, event_text
 from arkagent.feishu import FeishuSender
-from job_notifier import JobNotifier
-from pipeline_store import (
-    HC_KINDS,
-    STATUS_DONE,
-    STATUS_FAILED,
-    STATUS_RUNNING,
-    STATUS_STOPPED,
-    STATUS_WAIT_HC,
-    PipelineJob,
-    PipelineStore,
-)
-from topic6_progress_card import MAX_TOOL_LINES, build_progress_card
+from arkagent.session_state import is_session_resumable, session_status_from_payload
+try:
+    from .job_notifier import JobNotifier
+    from .pipeline_store import (
+        FAILURE_SCOPE_SESSION,
+        FAILURE_SCOPE_TASK,
+        HC_KINDS,
+        STATUS_DONE,
+        STATUS_FAILED,
+        STATUS_RUNNING,
+        STATUS_STOPPING,
+        STATUS_STOPPED,
+        STATUS_WAIT_HC,
+        PipelineJob,
+        PipelineStore,
+    )
+    from .topic6_progress_card import MAX_TOOL_LINES, build_progress_card
+except ImportError:  # pragma: no cover - standalone compatibility
+    from job_notifier import JobNotifier
+    from pipeline_store import (
+        FAILURE_SCOPE_SESSION,
+        FAILURE_SCOPE_TASK,
+        HC_KINDS,
+        STATUS_DONE,
+        STATUS_FAILED,
+        STATUS_RUNNING,
+        STATUS_STOPPING,
+        STATUS_STOPPED,
+        STATUS_WAIT_HC,
+        PipelineJob,
+        PipelineStore,
+    )
+    from topic6_progress_card import MAX_TOOL_LINES, build_progress_card
 
 log = logging.getLogger("arkagent.topic6.runner")
 
@@ -127,25 +148,6 @@ def parse_trigger(text: str) -> Optional[str]:
 # ---- 事件解析 --------------------------------------------------------------
 
 
-# 兜底"文本意图检测"用:如果 Agent 违约(说要输出 HC JSON 但没真输出),
-# 只要正文出现 HC 关键词 + 明确的"等确认"意图,就伪造一个占位 payload,
-# 免得 pipeline 被吞掉。关键词覆盖 coordinator.system.md 里禁止的元描述表达。
-_HC_INTENT_KEYWORDS = (
-    "等用户",
-    "等你审",
-    "请审核",
-    "请点击卡片",
-    "等待用户",
-    "等待确认",
-    "点击卡片确认",
-    "确认后继续",
-    "现在输出",
-    "接下来输出",
-    "输出结构化 JSON",
-    "输出 HC",
-)
-
-
 def extract_hc_payload(text: str) -> Optional[dict]:
     """从 agent.message 正文里抠出 HC 结构化 JSON;抠不到返回 None。
 
@@ -191,107 +193,11 @@ def extract_project_dir(text: str) -> Optional[str]:
     return normalize_project_dir(match.group(1)) if match else None
 
 
-def detect_hc_intent(text: str) -> Optional[str]:
-    """兜底:Agent 违约时,从文本里嗅出它**想**触发的 HC 类型。
-
-    coordinator.system.md 严禁"现在输出 HC1..." 之类的元描述——但方舟 doubao 模型
-    在长上下文/多工具后偶发违约,只在文本里"讲"要输出 JSON、却没真输出。gateway
-    如果只认严格 JSON,就会把这一轮当普通 idle 收工,导致 HITL 卡片不发、用户
-    看不到审批入口、pipeline 静默停滞在 A phase(见 job_1f05e24cccdc 场景)。
-
-    检测规则:文本同时包含 HC1/HC2/HC3 之一 **和** 至少一个意图关键词(等用户 /
-    等你审 / 请审核 / 点击卡片 等),就认为 Agent 在**表达**要触发 HC 但未落 JSON,
-    返回它想触发的 HC 类型;调用方用一个空 payload 兜住,照走 mark_wait_hc + 发卡片。
-    没匹配到返回 None,保留原有"当普通完成"路径。
-    """
-    if not text:
-        return None
-    hc_kind: Optional[str] = None
-    for kind in HC_KINDS:
-        if kind in text:
-            hc_kind = kind
-            break
-    if hc_kind is None:
-        return None
-    if not any(kw in text for kw in _HC_INTENT_KEYWORDS):
-        return None
-    return hc_kind
-
-
 def _idle_stop_reason(event: dict) -> str:
     reason = event.get("stop_reason")
     if isinstance(reason, dict):
         reason = reason.get("type")
     return str(reason or "")
-
-
-def build_hc_fallback_payload(
-    job: PipelineJob, hc_kind: str, collected_messages: list[str]
-) -> dict:
-    """从 Agent 已输出的核验摘要恢复 HC1/HC2 卡片字段。
-
-    这里只恢复文本中有明确证据的指标；不猜测缺失值。路径按既定产物契约生成，
-    并保留 ``__fallback__``，让卡片明确提示结构化载荷来自 Gateway 兜底。
-    """
-    transcript = "\n".join(collected_messages[-12:])
-    project_name = (
-        PurePosixPath(job.project_dir.rstrip("/")).name if job.project_dir else ""
-    )
-    payload: dict = {
-        "hc": hc_kind,
-        "mode": job.mode,
-        "project_dir": job.project_dir,
-        "__fallback__": True,
-        "agent_message_tail": (collected_messages[-1] if collected_messages else "")[-400:],
-    }
-    if hc_kind not in {"HC1", "HC2"}:
-        return payload
-
-    if project_name:
-        artifact_mode = job.mode if hc_kind == "HC1" else "skip_sampling"
-        # smoke 在 Agent 内部等价于 full，脚本侧不识别 smoke
-        if artifact_mode == "smoke":
-            artifact_mode = "full"
-        payload["wide_table_path"] = (
-            f"/mnt/session/outputs/{project_name}/05_合并/"
-            f"wide_table_{artifact_mode}_r1.xlsx"
-        )
-
-    summary: dict = {}
-    shape_match = re.search(r"(\d[\d,]*)\s*行\s*[×xX*]\s*(\d+)\s*列", transcript)
-    if shape_match:
-        summary["rows"] = int(shape_match.group(1).replace(",", ""))
-        summary["cols"] = int(shape_match.group(2))
-
-    c0_match = re.search(
-        r"C0.{0,24}?有效率\s*(?:为|=|:|：)?\s*(\d+(?:\.\d+)?)\s*%",
-        transcript,
-        re.IGNORECASE,
-    )
-    if c0_match:
-        summary["c0_valid_rate"] = float(c0_match.group(1)) / 100
-
-    routes_match = re.search(
-        r"R1\s*[~～\-—至到]+\s*R5.{0,48}?有效率.{0,16}?(\d+(?:\.\d+)?)\s*%",
-        transcript,
-        re.IGNORECASE,
-    )
-    if routes_match:
-        route_rate = float(routes_match.group(1)) / 100
-        summary["r1_r5_valid_rates"] = [route_rate] * 5
-
-    marketing_match = re.search(
-        r"营销(?:命中|可用)(?:率)?\s*(?:为|=|:|：)?\s*(\d+(?:\.\d+)?)\s*%",
-        transcript,
-    )
-    if hc_kind == "HC2" and marketing_match:
-        summary["marketing_hit_rate"] = float(marketing_match.group(1)) / 100
-
-    if summary:
-        payload["distribution_summary"] = summary
-    if any(marker in transcript for marker in ("所有 HC", "检查项通过", "无缺失")):
-        payload["issues_detected"] = []
-    return payload
 
 
 def validate_hc_payload(payload: dict) -> Optional[str]:
@@ -300,9 +206,7 @@ def validate_hc_payload(payload: dict) -> Optional[str]:
     P1-4 扩展：
     - HC3: 保留 feishu_doc_url 必填。Validator BLOCK 不在此处 reject（已有
       build_hc_card 红色警示 + "忽略阻断并通过"按钮处理）。
-    - HC1/HC2: 对非 fallback payload 检查 wide_table_path。
-      fallback payload（__fallback__=True）跳过——build_hc_fallback_payload 在
-      project_dir 未解析时不填充此字段，强制校验会打断原有兜底机制。
+    - HC1/HC2: 检查 wide_table_path。
     """
     hc = payload.get("hc")
 
@@ -311,10 +215,9 @@ def validate_hc_payload(payload: dict) -> Optional[str]:
             return "HC3 缺少 feishu_doc_url：Phase F 飞书发布未完成"
 
     if hc in ("HC1", "HC2"):
-        if not payload.get("__fallback__"):
-            wide_table = str(payload.get("wide_table_path") or "").strip()
-            if not wide_table:
-                return f"{hc} 缺少 wide_table_path"
+        wide_table = str(payload.get("wide_table_path") or "").strip()
+        if not wide_table:
+            return f"{hc} 缺少 wide_table_path"
 
     return None
 
@@ -378,6 +281,8 @@ class Topic6Runner:
         card_sender: Optional["Topic6CardSenderProtocol"] = None,
         extra_headers: Optional[dict] = None,
         notifier: Optional["JobNotifier"] = None,
+        lease_validator: Optional[Callable[[str, str], bool]] = None,
+        lease_activator: Optional[Callable[[str, str, str, str], bool]] = None,
     ):
         self._ark = ark
         self._feishu = feishu
@@ -389,6 +294,8 @@ class Topic6Runner:
         # 只通过 _send_message 使用，不得记日志/写库/拼进消息正文（Header 值即 relay Key）。
         self._extra_headers = extra_headers
         self._notifier = notifier  # 由 gateway 装配时注入
+        self._lease_validator = lease_validator
+        self._lease_activator = lease_activator
         # 串行化“检查活跃任务 → 创建 Session → 落 Job”，避免两个同时到达的触发
         # 都在落库前通过检查并各自创建一条长任务。
         self._start_lock = asyncio.Lock()
@@ -432,6 +339,45 @@ class Topic6Runner:
                 user_vault_id=user_vault_id,
             )
 
+    async def start_routed_job(
+        self,
+        *,
+        task_id: str,
+        lease_token: str,
+        chat_id: str,
+        thread_id: str,
+        user_open_id: str,
+        mode: str,
+        user_message: str,
+        root_message_id: str,
+        user_vault_id: str = "",
+        existing_session_id: str = "",
+        on_session_created: Optional[Callable[[str], None]] = None,
+        on_job_created: Optional[Callable[[PipelineJob], None]] = None,
+    ) -> PipelineJob:
+        if mode not in ("demo", "full", "skip_sampling"):
+            raise Topic6RunnerError(f"不支持的 Topic6 mode: {mode}")
+        if self._lease_validator is None or not self._lease_validator(
+            task_id, lease_token
+        ):
+            raise Topic6RunnerError("Topic6 lease token 无效或 task 不是当前 owner")
+        async with self._start_lock:
+            return await self._start_job_locked(
+                chat_id=chat_id,
+                thread_id=thread_id,
+                user_open_id=user_open_id,
+                mode=mode,
+                user_message=user_message,
+                user_vault_id=user_vault_id,
+                task_id=task_id,
+                root_message_id=root_message_id,
+                existing_session_id=existing_session_id,
+                skip_global_guard=True,
+                lease_token=lease_token,
+                on_session_created=on_session_created,
+                on_job_created=on_job_created,
+            )
+
     async def _start_job_locked(
         self,
         *,
@@ -441,6 +387,13 @@ class Topic6Runner:
         mode: str,
         user_message: str,
         user_vault_id: str = "",
+        task_id: str = "",
+        root_message_id: str = "",
+        existing_session_id: str = "",
+        skip_global_guard: bool = False,
+        lease_token: str = "",
+        on_session_created: Optional[Callable[[str], None]] = None,
+        on_job_created: Optional[Callable[[PipelineJob], None]] = None,
     ) -> PipelineJob:
         """创建 MA Session、落库并启动 SSE 消费任务。
 
@@ -449,8 +402,12 @@ class Topic6Runner:
         - 首个 user.message 拼「触发词 + 模式 + 用户原始消息」,由 coordinator 解析并按
           system prompt 的 14 步执行。
         """
+        if task_id:
+            task_job = self._store.get_job_by_task(task_id)
+            if task_job:
+                return task_job
         existing = self._store.get_active_job()
-        if existing:
+        if existing and not skip_global_guard:
             state = "等待审核" if existing.status == STATUS_WAIT_HC else "运行中"
             raise Topic6RunnerError(
                 f"当前已有热点周报任务{state}"
@@ -472,6 +429,8 @@ class Topic6Runner:
             # 方舟不把 memstore 挂成目录,Agent 用 memory_read /{memstore_id}/topic6/xxx.md 读取;
             # 注入 ID 便于 Agent 拼出 memory 路径(非密钥)。
             env_overrides["TOPIC6_MEMORY_STORE_ID"] = self._config.memory_store_id
+        if task_id:
+            env_overrides["TOPICX_TASK_ID"] = task_id
         vault_ids = list(
             dict.fromkeys(
                 vault_id
@@ -479,13 +438,20 @@ class Topic6Runner:
                 if vault_id
             )
         )
-        session_id = await self._ark.create_session(
+        create_kwargs = {
+            "vault_ids": vault_ids,
+            "env_overrides": env_overrides,
+            "resources": resources,
+        }
+        if task_id:
+            create_kwargs["title"] = f"topicx/{task_id}/topic6"
+        session_id = existing_session_id or await self._ark.create_session(
             self._config.coordinator_agent_id,
             self._config.environment_id,
-            vault_ids=vault_ids,
-            env_overrides=env_overrides,
-            resources=resources,
+            **create_kwargs,
         )
+        if on_session_created is not None:
+            on_session_created(session_id)
         # 业务目录名依赖 Coordinator 解析出的周期。创建 Job 时保持未知，Coordinator
         # 创建目录后必须输出 [project_dir] 标记，SSE 消费器会立即回写真值。
         project_dir = ""
@@ -496,7 +462,18 @@ class Topic6Runner:
             ma_session_id=session_id,
             mode=mode,
             project_dir=project_dir,
+            root_message_id=root_message_id,
+            task_id=task_id,
         )
+        if on_job_created is not None:
+            on_job_created(job)
+        if task_id and (
+            self._lease_activator is None
+            or not self._lease_activator(
+                task_id, lease_token, session_id, job.job_id
+            )
+        ):
+            raise Topic6RunnerError("Topic6 lease 激活失败")
         log.info(
             "topic6 start_job job=%s session=%s mode=%s chat=%s user=%s",
             job.job_id, session_id, mode, chat_id, user_open_id,
@@ -519,9 +496,19 @@ class Topic6Runner:
             overflow=0,
         )
         try:
-            message_id = await self._loop_run(
-                lambda: self._feishu.send_interactive_card(chat_id, card)
-            )
+            if root_message_id:
+                message_id, topic_thread_id = await self._loop_run(
+                    lambda: self._feishu.send_interactive_card_in_thread(
+                        root_message_id, card
+                    )
+                )
+                if topic_thread_id:
+                    self._store.set_topic_thread_id(job.job_id, topic_thread_id)
+                    job.topic_thread_id = topic_thread_id
+            else:
+                message_id = await self._loop_run(
+                    lambda: self._feishu.send_interactive_card(chat_id, card)
+                )
         except Exception as error:  # noqa: BLE001
             log.warning("topic6 progress card init failed job=%s: %s", job.job_id, error)
             message_id = None
@@ -594,12 +581,12 @@ class Topic6Runner:
         """/continue 续跑:把一条 user.message 注入最近一个可续跑的 Session,重订 SSE。
 
         - 无可续跑 job → 返回 None(调用方给“没有可续跑任务”的提示)。
-        - 命中(running/wait_hc/failed/stopped)→ 复用 resume_job 注入 message 并重新
+        - 命中(running/wait_hc/failed)→ 复用 resume_job 注入 message 并重新
           订阅 SSE,返回该 job。
+        - stopped 是用户确认的不可逆停止，不允许通过 /continue 恢复。
 
-        主场景:卡片已显示“失败”,但 MA Session 其实还 idle(SSE 断线/HC 契约错/
-        reject/cancel 等本地收口),用它把误判为死的任务捞回来继续跑。若 Session 已真
-        terminated,send_message 会在 _drive_session 里报错并兜底回落为失败卡片。
+        主场景:卡片已显示“执行失败，可重试”,但 MA Session 仍是 idle/running。
+        真正 failed/terminated 的 Session 不允许继续。
         """
         job = self._store.get_resumable_job_by_session_key(
             chat_id, thread_id, user_open_id
@@ -624,9 +611,28 @@ class Topic6Runner:
                 )
                 self._progress.pop(job.job_id, None)
                 return self._store.get_job(job.job_id) or job
+        if job.failure_scope not in ("", "recoverable"):
+            raise Topic6RunnerError("当前任务已终止，不能继续")
+        session = await self._ark.get_session(job.ma_session_id)
+        session_status = session_status_from_payload(session)
+        if not is_session_resumable(session_status):
+            self._store.mark_failed(
+                job.job_id,
+                f"session_not_resumable:{session_status or 'unknown'}",
+                failure_scope=FAILURE_SCOPE_SESSION,
+                retry_strategy="",
+            )
+            raise Topic6RunnerError(
+                f"业务 Session 状态为 {session_status or 'unknown'}，不能继续当前任务"
+            )
         log.info(
-            "topic6 /continue resume job=%s session=%s prev_status=%s phase=%s",
-            job.job_id, job.ma_session_id, job.status, job.current_phase,
+            "topic6 /continue resume job=%s session=%s session_status=%s "
+            "prev_status=%s phase=%s",
+            job.job_id,
+            job.ma_session_id,
+            session_status,
+            job.status,
+            job.current_phase,
         )
         # 用户手动续跑 = 人已介入：给后续阶段全新的自动续跑 / provider 重试额度
         state = self._progress.get(job.job_id)
@@ -753,7 +759,9 @@ class Topic6Runner:
             task.cancel()
 
         reason = "cancelled_by_user"
-        self._store.mark_failed(job.job_id, reason)
+        self._store.mark_failed(
+            job.job_id, reason, failure_scope=FAILURE_SCOPE_TASK
+        )
         await self._render_and_patch(
             job.job_id, status=STATUS_FAILED, error=reason, force=True
         )
@@ -782,6 +790,8 @@ class Topic6Runner:
     async def recover_job(self, job: PipelineJob) -> str:
         """根据历史事件恢复一个本地活跃任务，返回已采取的恢复动作。"""
         events = await self._ark.list_session_events(job.ma_session_id)
+        if job.status == STATUS_STOPPING:
+            return "stopping"
         messages = [
             body
             for event in events
@@ -833,7 +843,11 @@ class Topic6Runner:
                 if terminal_type == "session.status_terminated"
                 else "session_failed"
             )
-            self._store.mark_failed(job.job_id, error[:400])
+            self._store.mark_failed(
+                job.job_id,
+                error[:400],
+                failure_scope=FAILURE_SCOPE_SESSION,
+            )
             await self._render_and_patch(
                 job.job_id, status=STATUS_FAILED, error=error[:400], force=True
             )
@@ -998,6 +1012,9 @@ class Topic6Runner:
                     _ok_state.provider_retry_count = 0
 
             if etype == "user.interrupt":
+                current = self._store.get_job(job_id)
+                if current and current.status == STATUS_STOPPING:
+                    continue
                 reason = "用户在方舟后台手动停止了 Session"
                 self._store.mark_stopped(job_id, reason)
                 await self._render_and_patch(
@@ -1068,7 +1085,11 @@ class Topic6Runner:
                     "topic6 session terminal job=%s etype=%s error=%s",
                     job_id, etype, error[:400],
                 )
-                self._store.mark_failed(job_id, error[:400])
+                self._store.mark_failed(
+                    job_id,
+                    error[:400],
+                    failure_scope=FAILURE_SCOPE_SESSION,
+                )
                 await self._render_and_patch(
                     job_id, status=STATUS_FAILED, error=error[:400], force=True
                 )
@@ -1076,6 +1097,9 @@ class Topic6Runner:
 
             # 空闲终态:HC 或最终完成——也可能是 Agent 偶发提前 idle。
             if etype == "session.status_idle" and not event_requires_action(event):
+                current = self._store.get_job(job_id)
+                if current and current.status == STATUS_STOPPING:
+                    return True
                 _idle_state = self._progress.get(job_id)
                 if (
                     _idle_state is not None
@@ -1132,30 +1156,6 @@ class Topic6Runner:
             return None
         last = collected[-1] if collected else ""
         payload = extract_hc_payload(last)
-        if payload is None:
-            # 兜底:Agent 违约(只在文本里说"要输出 HC JSON"但没真输出),嗅出意图后
-            # 伪造一个占位 payload,防止流程被吞。占位标记 __fallback__=True 让 HC 卡片
-            # 渲染层能提示用户"AI 未输出结构化载荷,请照常审阅原始输出"。
-            # 只在 HC 相关阶段触发——Phase E/F/G/H 阶段不应误判。
-            phase = (job.current_phase or "").lower()
-            is_hc_eligible = (
-                not phase
-                or phase.startswith(("c", "d", "hc", "post-hc"))
-                or phase in ("a", "b")
-            )
-            # 裁决报告常提到"不产出 HC2"之类字样，不能被意图兜底误判成 HC 卡
-            intent_hc = (
-                detect_hc_intent(last)
-                if is_hc_eligible and NEED_DECISION_MARKER not in last
-                else None
-            )
-            if intent_hc is not None:
-                log.warning(
-                    "topic6 HC fallback triggered job=%s hc=%s (agent did not emit JSON, using intent detection)",
-                    job_id,
-                    intent_hc,
-                )
-                payload = build_hc_fallback_payload(job, intent_hc, collected)
         if payload:
             hc_kind = str(payload["hc"])
             # HC 正常识别说明之前的 nudge（如有）是成功的——Agent 已恢复并推进到
@@ -1289,13 +1289,14 @@ class Topic6Runner:
             return None
 
         # Agent 主动请求用户裁决（[need_decision]）：不是中断，不催促。
-        # 标记 stopped 并把报告原文发群里，用户用 `/continue <选择>` 续跑。
+        # 标记可恢复 failed 并把报告原文发群里，用户用 `/continue <选择>` 续跑。
+        # stopped 专指用户确认的不可逆停止，/continue 不会恢复。
         if NEED_DECISION_MARKER in last:
             reason = f"Phase {phase} 等待用户裁决（Agent 已停下给出选项）"
             log.warning("topic6 need_decision job=%s phase=%s", job_id, phase)
-            self._store.mark_stopped(job_id, reason)
+            self._store.mark_failed(job_id, reason)
             await self._render_and_patch(
-                job_id, status=STATUS_STOPPED, error=reason, force=True
+                job_id, status=STATUS_FAILED, error=reason, force=True
             )
             report = last.replace(NEED_DECISION_MARKER, "").strip()
             if len(report) > NEED_DECISION_REPLY_LIMIT:
@@ -1317,9 +1318,9 @@ class Topic6Runner:
                 "topic6 diagnosis requires_human job=%s phase=%s: %s",
                 job_id, phase, reason,
             )
-            self._store.mark_stopped(job_id, reason)
+            self._store.mark_failed(job_id, reason)
             await self._render_and_patch(
-                job_id, status=STATUS_STOPPED, error=reason, force=True
+                job_id, status=STATUS_FAILED, error=reason, force=True
             )
             await self._reply_async_by_job(job_id, f"⚠️ {reason}")
             return None
@@ -1364,9 +1365,9 @@ class Topic6Runner:
             "topic6 pipeline stalled job=%s phase=%s nudges=%d last=%s",
             job_id, phase, nudge_count, last_summary,
         )
-        self._store.mark_stopped(job_id, reason)
+        self._store.mark_failed(job_id, reason)
         await self._render_and_patch(
-            job_id, status=STATUS_STOPPED, error=reason, force=True
+            job_id, status=STATUS_FAILED, error=reason, force=True
         )
         return None
 
@@ -1415,7 +1416,7 @@ class Topic6Runner:
     ) -> tuple[bool, str]:
         """P0-1 结构化诊断：分析 idle 中断原因，返回 (requires_human, summary)。
 
-        requires_human=True 时调用方应标记 stopped 而非 nudge。
+        requires_human=True 时调用方应标记可恢复 failed 而非 nudge。
         插入位置：HC 和 Phase H 检测之后、nudge 之前（第三优先级）。
         """
         state = self._progress.get(job_id)
@@ -1485,6 +1486,9 @@ class Topic6Runner:
         job = self._store.get_job(job_id)
         if state is None or job is None or not job.progress_card_message_id:
             return
+        if job.status in (STATUS_STOPPING, STATUS_STOPPED):
+            status = job.status
+            error = job.last_error or error
         now = time.monotonic()
         if not force and now - state.last_patch_at < PROGRESS_MIN_INTERVAL_SEC:
             return
@@ -1555,14 +1559,24 @@ class Topic6Runner:
     async def _reply_async_by_job(self, job_id: str, text: str) -> None:
         job = self._store.get_job(job_id)
         if job:
-            await self._reply_async(job.chat_id, text)
+            await self._reply_async(
+                job.chat_id, text, root_message_id=job.root_message_id
+            )
 
-    async def _reply_async(self, chat_id: str, text: str) -> None:
+    async def _reply_async(
+        self, chat_id: str, text: str, root_message_id: str = ""
+    ) -> None:
         loop = self._loop or asyncio.get_event_loop()
         try:
-            await loop.run_in_executor(
-                None, lambda: self._feishu.send_to_chat(chat_id, text)
-            )
+            if root_message_id:
+                await loop.run_in_executor(
+                    None,
+                    lambda: self._feishu.reply_in_thread(root_message_id, text),
+                )
+            else:
+                await loop.run_in_executor(
+                    None, lambda: self._feishu.send_to_chat(chat_id, text)
+                )
         except Exception as error:  # noqa: BLE001 - 回帖失败不该拖垮 SSE 消费
             log.warning("topic6 reply failed chat=%s: %s", chat_id, error)
 

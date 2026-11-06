@@ -5,7 +5,9 @@ c0_filter_usable.py — 从 phase1_merged 筛选"营销可用"子集供 R1~R5 �
 MA 精简版:
   1. 去掉 --force-accept-unresolved / --reason 越权分支
      unresolved_ratio > 5% 直接 raise, 由 MA 协调器决定是否重新委派子 Agent 补标注
-  2. R1~R5 只处理明确判定为"是"的行；解析失败/缺失行不再放大为五路无效调用
+  2. 送入 R1~R5/C2 的行 = 明确判定"是" + C0 未决行(解析失败/缺失,已经过脚本内 3 轮重提仍未解决)。
+     未决行"是否营销可用"保持为空, E 阶段统计只取"是", 不污染报告; 保留它们是为了让 HC1
+     审核人改判为"是"时 R1~R5/C2 结果已就绪, 而不是静默丢弃。明细写入 unresolved_rows 供 HC1。
   3. 输出保留 phase1_merged 全部列 (供 R1~R5 上传时占位符匹配)
 
 CLI:
@@ -59,7 +61,8 @@ def run(project_dir: str, mode: str, run_id: int) -> dict:
     is_usable = df["是否营销可用"] == "是"
     parse_error = df.get("c0_parse_error", pd.Series(0, index=df.index)).fillna(0).astype(int) == 1
     missing_c0 = df["是否营销可用"].isna()
-    keep_mask = is_usable
+    unresolved_mask = (parse_error | missing_c0) & ~is_usable
+    keep_mask = is_usable | unresolved_mask
 
     usable_count = int(is_usable.sum())
     parse_error_count = int((parse_error & ~is_usable).sum())
@@ -68,8 +71,8 @@ def run(project_dir: str, mode: str, run_id: int) -> dict:
     kept_count = int(keep_mask.sum())
 
     print(f"[filter] 明确可用: {usable_count}")
-    print(f"[filter] C0 解析失败并排除: {parse_error_count}")
-    print(f"[filter] C0 缺失并排除: {missing_count}")
+    print(f"[filter] C0 解析失败但保留(待 HC1 判定): {parse_error_count}")
+    print(f"[filter] C0 缺失但保留(待 HC1 判定): {missing_count}")
     print(f"[filter] 明确不可用 (排除): {excluded_count}")
     print(f"[filter] 保留合计: {kept_count}/{total} ({kept_count/total:.1%})")
 
@@ -84,6 +87,12 @@ def run(project_dir: str, mode: str, run_id: int) -> dict:
         )
 
     df_out = df.loc[keep_mask].copy()
+    unresolved_cols = [c for c in ("row_id", "platform", "title") if c in df.columns]
+    unresolved_rows = (
+        df.loc[unresolved_mask, unresolved_cols]
+        .astype(object).where(lambda x: x.notna(), None)
+        .to_dict(orient="records")
+    )
 
     out_dir = proj / "04_标注" / "_可用子集"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -97,17 +106,18 @@ def run(project_dir: str, mode: str, run_id: int) -> dict:
         raise
 
     print(f"\n[filter] ✅ 可用子集: {out_file}")
-    print(f"[filter] R1~R5 将只处理 {kept_count} 行, 而不是全部 {total} 行")
+    print(f"[filter] R1~R5/C2 将处理 {kept_count} 行(含 C0 未决 {len(unresolved_rows)} 行), 而不是全部 {total} 行")
 
     result = {
         "mode": mode, "run_id": run_id, "total_rows": total,
         "usable_count": usable_count,
-        "parse_error_excluded": parse_error_count,
-        "missing_excluded": missing_count,
+        "parse_error_included": parse_error_count,
+        "missing_included": missing_count,
         "excluded_count": excluded_count,
         "kept_count": kept_count,
         "kept_ratio": round(kept_count / total, 4),
         "unresolved_ratio": round(unresolved_ratio, 4),
+        "unresolved_rows": unresolved_rows,
         "merged_source": str(merged_file),
         "out_file": str(out_file),
     }
@@ -118,9 +128,10 @@ def run(project_dir: str, mode: str, run_id: int) -> dict:
             "run_id": run_id,
             "total_rows": total,
             "usable_count": usable_count,
-            "parse_error_excluded": parse_error_count,
-            "missing_excluded": missing_count,
+            "parse_error_included": parse_error_count,
+            "missing_included": missing_count,
             "unresolved_ratio": round(unresolved_ratio, 4),
+            "unresolved_row_ids": [r.get("row_id") for r in unresolved_rows],
             "subset_file": str(out_file),
         }},
     )

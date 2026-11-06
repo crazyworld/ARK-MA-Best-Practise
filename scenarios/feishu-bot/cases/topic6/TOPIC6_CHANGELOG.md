@@ -11,6 +11,72 @@
 
 ---
 
+## 2026-11-05
+
+### 对话模型统一 DeepSeek-V4.1-Flash（DataHub、向量除外）
+
+- **变更**：3 个 Agent（coordinator/annotator/validator）`DeepSeek-V4-Flash-0731` → `DeepSeek-V4.1-Flash`，
+  `token_limits` 按其原生 256K：256000/200000/56000（与 11-03 首次接入该模型时一致）；Phase E `pipeline_e.py
+  --model` 默认、demo R1~R5 `run_demo_routes.py` 默认（`DEMO_CHAT_MODEL_ID` → `C2_CHAT_MODEL_ID` → V4.1-Flash）
+  由 `Doubao-Seed-Evolving` 改为 `DeepSeek-V4.1-Flash`；demo 计价补 V4.1-Flash（¥3.5/¥14 per M）；
+  Phase E/F/G cost_tracker `--model` 同步。
+- **不变**：DataHub `DeepSeek-V4-Flash`（DataHub 侧不支持 V4.1）；Embedding `Doubao-embedding`（换维度需重置 registry）。
+  价格表中保留的 `doubao-seed-evolving` 仅用于历史成本核算。
+- **风险**：Agent 上下文由 1M 降到 256K，长流程会更早触发方舟历史压缩；Phase E Prompt 与 max_tokens 按豆包调校，
+  文风/长度可能变化。均需 212 smoke 验证。
+- **影响文件**：`ma-resources/agents/{coordinator,annotator,validator}.json`、`topic6-insight/{scripts/pipeline_e.py,SKILL.md}`、
+  `topic6-annotation/{scripts/run_demo_routes.py,prompts/0{6,7,8}_*.md}`、`openspec/{project.md,specs/{coordinator-orchestration,
+  sub-agents,skill-insight,ma-resource-deployment}}`、`tests/test_topic6_{ma_resources,c2_rc14}.py`
+
+### C2 升级到 blueai-canonical-event-registry 3.0.0-rc.14 + Chat 模型切 DeepSeek-V4.1-Flash（提速）
+
+- **触发现象**：MA C2 实测 W41 skip_sampling 1484 行约 3h20m、full 197 行约 1h；V2 W43 四平台 1436 行约 32 分钟、
+  B站 116 行约 6 分钟。同量级数据相差约 10 倍。
+- **根因**：① Chat 模型 `Doubao-Seed-Evolving` 为推理模型，每次调用含长推理，C2 每阶段都按批调用，延迟被整条链放大；
+  ② 前端 00/01/02 三轮独立调用（01/02 并发仅 4），03 实体在合库后单条串行链覆盖全量；③ 2.2.0 无阶段 checkpoint，
+  中断后重跑粒度粗。
+- **做法**：整包迁入 rc.14（统一入口 `run_c2.py`、F1 融合一次调用、E/V 并行、07 覆盖重试 3 次、x3 ID 反馈重试、
+  阶段 checkpoint + 内容寻址缓存、c2_quality/provenance）；`run_topic6_c2.py` 改为调用 `run_c2.py run --mode
+  cross-platform --frontend fused --max-requests 8 --front-workers 2`（总并发 16），保留跨平台合并（MA 优于 V2 生产按平台独立跑）；
+  `C2_CHAT_MODEL_ID` 改 `DeepSeek-V4.1-Flash`（非推理，relay 已开通）。MA 无人值守：`--review-policy record`
+  （门禁不停，待审项进 `c2_status.quality.review_pending` 交 HC1）、`--degraded-policy accept`。按需补证不启用。
+  `relay.py` 保留 MA 传输层。结果契约（`c2_event_result_r{N}.xlsx` 两列）不变。
+- **验证**：新增 `tests/test_topic6_c2_rc14.py`（mock relay 端到端：四平台 44 行，F1 4 次调用覆盖 00/01/02，跨平台
+  同组 8 条归一事件，同签名重跑零调用）。真实耗时与归档质量待 212 小样本对照（付费，等指令）。
+- **影响文件**：`skills/topic6-event-registry/`（整包）、`environment.json`、`agents/coordinator.system.md`、`DEPLOY_v2.1.md`、
+  `CUSTOMER_TO_MA_FILE_MAPPING.md`、`openspec/specs/skill-event-registry/spec.md`、`openspec/project.md`、
+  `tests/test_topic6_{c2_rc14,pipeline_optimizations,ma_resources}.py`、`tests/fixtures/c2_mock_relay.py`
+
+### C0 解析失败/缺失行：补全 → 重提 → 保留交 HC1
+
+- **触发现象**：V2 W43 全量 C0 3771 行有 21 行无结果（0.56%）：12 行模型只返回推理、正文为空
+  （relay_empty_completion），9 行答案完整但 JSON 结尾残缺（缺 `}` 或多 `"]`）。MA `_parse_dict` 只能救回 2/9；
+  MA 筛选把未决行直接排除，HC1 审核人看不到这些行。
+- **根因**：结尾残缺是格式问题，重提解决不了还要再付费；排除口径与 V2「默认保留 + HC 抽查」不一致，属静默丢数据。
+- **做法**：① `datahub_annotate._parse_dict` 增加受控结尾补全，仅在主字段为「是/否」时采纳；② 空返回继续走已有
+  3 轮行级重提；③ `c0_filter_usable` 保留剩余未决行进入 R1~R5/C2（「是否营销可用」留空，E 阶段只取「是」，报告不受
+  影响），stdout 输出 `unresolved_rows`；`merge_annotations` 新增 `C0 未决行` warn 写入 HC1 issues。>5% 熔断不变。
+- **验证**：W43 真实 raw 结果离线重放，未决 21→12（剩余全部为空返回，由重提覆盖）；新增解析与筛选回归测试。
+- **影响文件**：`skills/topic6-annotation/scripts/{datahub_annotate,c0_filter_usable,merge_annotations}.py`、`SKILL.md`、
+  `prompts/run_config契约.md`、`agents/coordinator.system.md`、`openspec/specs/skill-annotation/spec.md`、
+  `tests/test_topic6_{annotate_parse_retry,parity_gaps}.py`
+
+### C0 活跃版本 v5 → v13（客户 V2 锁定版原样迁入）
+
+- **触发现象**：MA C0 v5 为自研压缩版，从未做真实 HC1 对比；客户 V2（bundle_20261030）已在 DeepSeek-V4-Flash
+  下按 W43 人工 ground truth 迭代到 v13 并锁定。MA 标注模型已是 DeepSeek-V4-Flash，但质量检查仍用 v4+豆包时代的
+  55%~58% 基线，v13 真实占比（37%~41%）会每次误报 warn。
+- **做法**：`prompts/C0_基础事实/v13.md` 原样迁入（SHA-256 a7573188…，9 字段输出契约与 `{{platform}}/{{title}}/{{desc}}`
+  占位符不变，`datahub_annotate.py` 无需改动）；v5 保留归档。`USABLE_BASELINE` 改为 (0.37, 0.41)，coordinator / openspec
+  / ks/02 基线描述同步。顺带修正 SKILL.md「Prompt 版本」段遗留的 R2 v1 / R5 v2（实际活跃 R2 v2 / R5 v3）。
+- **目录只留 v13**：删除 v1~v5（v5 与客户 `_archive/v5.md` 同号不同内容，多版本并存易被误取），历史以 git 为准；
+  openspec 对 C0 改为「目录只保留活跃版本」。
+- **影响文件**：`skills/topic6-annotation/{SKILL.md,prompts/C0_基础事实/v13.md,ks/02_营销可用判定.md,scripts/merge_annotations.py}`、
+  `memory/topic6/{_版本状态.md,MEMORY.md}`、`version_mapping.md`、`agents/coordinator.system.md`、
+  `openspec/specs/{skill-annotation,coordinator-orchestration}/spec.md`、`CUSTOMER_TO_MA_FILE_MAPPING.md`、
+  `tests/test_topic6_{parity_gaps,pipeline_optimizations}.py`
+- **待办**：上传新 SkillHub version + 同步 Memory Store 镜像；212 小样本真实 DataHub 验证（付费，待指令）。
+
 ## 2026-11-04
 
 ### 新增 /republish：HC3 后补营销观察配图，只重跑网页与妙搭发布
@@ -146,6 +212,51 @@
   `tests/test_topic6_v2_efficiency.py`、`tests/test_topic6_mock_nodes.py`、`tests/test_topic6_pipeline_optimizations.py`
 
 ---
+
+## 2026-10-29
+
+### 停止任务改为不可逆删除 Topic6 Session
+
+- `user.interrupt` 只中断当前执行轮并让 Session 回到 `idle`，语义是暂停，不是终止。
+- Topic6 停止按钮现在执行 `interrupt → 等待新 idle → DELETE Session`；删除成功或确认
+  Session 已不存在后，才把任务记为 `stopped` 并释放 Topic6 lease。
+- 删除失败或超时保持 `stopping`，禁止显示“已停止”；`stopped` 不再允许 `/continue`。
+- Topic5 仍只使用 interrupt，不删除 Session。
+
+### C2 流式 Chat 请求增加整体截止时间
+
+- **触发现象**：C2 批次使用 SSE 读取模型响应时，socket `timeout` 只约束单次阻塞读取；
+  对端持续发送零碎数据或半开连接时，单次调用可能超过配置时限且长期占住并发槽。
+- **根因**：`urllib` 的 socket 超时不是请求整体时限，原实现没有独立 watchdog 主动关闭
+  响应流。
+- **修复**：每次流式请求启动整体时限 watchdog；到期后主动 shutdown/close 底层
+  SSL socket 与响应对象，把阻塞读取转换为 `TimeoutError` 并进入既有有限重试。
+- **协调器等待**：C2 运行期间只允许 90 秒内的同步等待并直接读取 `c2_status.json`；
+  禁止超过沙箱后台阈值的 sleep 和 `task_get`/`.bash_bg` 轮询，避免产生无业务价值的
+  后台等待任务。
+
+### 标注 Prompt 版本契约改为显式且 fail-closed
+
+- **触发现象**：`job_fe89f760ce50` 的 R1 子 Agent 未收到 `prompt_version`，误把 System
+  Prompt 示例中的 `v4` 当作实际版本；挂载 Skill 只有 R1 v1/v2，worker 首次启动失败。
+- **根因**：Coordinator 把 Memory Store 当作 `/mnt/memory/$STORE_ID/...` 文件系统读取，
+  未取得版本镜像后仍继续；Annotator 输入契约也没有对缺失版本和文件存在性 fail-closed。
+- **修复**：Memory 改为使用 Session Memory 工具按 path 读取；版本始终从已挂载
+  `topic6-annotation/SKILL.md` 权威表解析并预检文件。所有 Annotator 委派必须携带显式
+  `prompt_version`，缺失、格式非法或文件不存在时禁止猜测和启动 worker。
+
+## 2026-10-28
+
+### 清理临时恢复与旧客户端兼容
+
+- 删除根据 Agent 自由文本推断 HC 类型并伪造审核载荷的 Gateway 兜底；Coordinator 未输出
+  合法 HC JSON 时按契约 fail-closed，不再以正则推断业务状态。
+- 删除整库清空本地任务/HC 的 `reset_pipeline_state.py`。正常中断统一由 Gateway 启动
+  恢复、SSE 重连、`/continue` 和 `/new` 处理，不再留下远端 Session 与本地状态脱节的入口。
+- `TOPIC6_SKIP_MIAODA_OAUTH` 保留为显式测试开关且默认关闭；开启后跳过扫码与用户 Vault
+  注入，允许前序流程测试，Phase H 缺凭据失败视为预期结果。
+- 删除废弃的 `test/小样本/试跑` 显式模式别名和历史备注卡片回调，仅保留当前
+  `demo/full/skip_sampling` 与 `pass/reject` 契约。
 
 ## 2026-10-27
 

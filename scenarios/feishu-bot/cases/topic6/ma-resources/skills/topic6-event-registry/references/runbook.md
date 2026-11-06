@@ -29,35 +29,32 @@
 | ⑦ 报「有 N 个块失败」 | 三类 JSON 失败之一 | 先原样重跑一次（②③ 会自动恢复）；仍失败再跑 `x1_presplit_blocks.py` + 重跑 ⑦ |
 | ⑦ 报「覆盖不一致：期望 X 实得 Y」 | 有块没产出 | 与上一条同源，是失败块的连带现象，不是独立问题 |
 | 阶段 00 报「校验不通过已回退原标题 N 条」 | 清洗时新增了汉字、数字或顿号 | **这是正常的保护动作**，不是故障。抽查一下被回退的行即可 |
-| `InvalidEndpointOrModel.NotFound` / `model not found` | 模型名不在当前网关目录 | 默认走 bmc-llm-relay 用 `Doubao-embedding`（标准 `/embeddings`）；只有改用方舟多模态 `doubao-embedding-vision-251215` 时才需 `EMBEDDING_IS_MULTIMODAL=true` |
-| 向量化极慢（每秒个位数） | 模型端点吞吐或并发不足 | 确认用的是批量协议的 `Doubao-embedding`（多模态模型逐条请求会慢很多）；适度调整 `--concurrency`，遇到 429 则调低 |
+| 向量化极慢（每秒个位数） | 用了要出海的 OpenAI 模型 | 确认 `--model` 是 `Doubao-embedding`，模型吞吐对比见 [benchmarks.md](benchmarks.md) |
 | 成本台账数字明显偏低 | 失败轮次没记进台账 | 见「成本台账的已知缺陷」，按每块单价补估 |
 
 **唯一需要删东西重来的情况**是「想换一套分块策略」——那时新建运行目录，
 不要在原目录上改参数。
 
 
-## 授权：直接用 agent 本地环境里的模型配置，不要另外找 Key
+## 授权：模型统一走 bmc-llm-relay（MA 适配）
 
-**开跑前不需要向用户索要任何凭据。** 脚本从环境变量读，按顺序取第一个非空值：
+**开跑前不需要向用户索要任何凭据。** 脚本只从环境变量读：
 
-| 用途 | 环境变量（按优先级） | 说明 |
+| 用途 | 环境变量 | 说明 |
 |---|---|---|
-| API 根地址 | `LLM_RELAY_BASE_URL` | bmc-llm-relay（blueai 模型网关），必须包含版本前缀，如 `https://bmc-llm-relay.bluemediagroup.cn/v1`；不回退 `ARK_*` |
-| 鉴权 Key | `LLM_RELAY_API_KEY` | 使用 Bearer 鉴权 |
-| 向量化（可选） | `EMBEDDING_BASE_URL` / `EMBEDDING_API_KEY` | 不设则沿用上面两个 |
-| 向量模型（可选） | `EMBEDDING_MODEL_ID` | 默认 `Doubao-embedding`（2560 维，标准 `/embeddings`）；也可用 `--model` 覆盖 |
+| API 根地址 | `LLM_RELAY_BASE_URL` | bmc-llm-relay（blueai 模型网关），必须含版本前缀，如 `https://bmc-llm-relay.bluemediagroup.cn/v1`；不回退 `ARK_*` |
+| 鉴权 Key | `LLM_RELAY_API_KEY` | Bearer 鉴权 |
+| Chat 模型 | `C2_CHAT_MODEL_ID` | 默认 `DeepSeek-V4.1-Flash` |
+| 向量模型 | `EMBEDDING_MODEL_ID` | 默认 `Doubao-embedding`（2560 维，标准 `/embeddings`） |
+| 向量化（可选） | `EMBEDDING_BASE_URL` / `EMBEDDING_API_KEY` | 不设则沿用 `LLM_RELAY_*` |
 
-`relay.py` 将 Base URL 视为已经定位到版本根路径，只追加
-`/chat/completions`、`/embeddings` 或 `/embeddings/multimodal`，不会额外插入 `/v1`。
+`relay.py` 使用 OpenAI 兼容 `chat/completions` 流式请求（含整体时限 watchdog），把 Base URL 视为
+已定位到版本根路径，只追加 `/chat/completions`、`/embeddings` 或 `/embeddings/multimodal`。
+上游 rc.14 的 `ANTHROPIC_*` / `x-api-key` 说明不适用于 MA。
 
-开跑前自检一句（不打印 Key 本身）：
+开跑前自检（不打印 Key 本身）：`python3 scripts/check_environment.py`
 
-```bash
-python3 -c "import os;print('BASE', bool(os.environ.get('LLM_RELAY_BASE_URL')),'KEY', bool(os.environ.get('LLM_RELAY_API_KEY')))"
-```
-
-两个都是 True 就能跑。**不要把 Key 写进脚本、日志、run_manifest 或任何产出文件。**
+**不要把 Key 写进脚本、日志、run_manifest 或任何产出文件。**
 
 ## 超时与中断：所有阶段都能原地续跑
 
@@ -118,22 +115,21 @@ python3 -c "import os;print('BASE', bool(os.environ.get('LLM_RELAY_BASE_URL')),'
 
 三类 JSON 失败的判别方法见 [pipeline.md](pipeline.md) 的「三类长得一样的 JSON 失败」。
 
-## Topic6 跨平台执行：只并行阶段 00
+## 并行执行：四平台同阶段并行，不要顺序跑
 
-Topic6 的跨平台口径使用统一入口：
+阶段 03 的串行只在平台内部（Entity 注册表逐批累积），**四个平台之间要并行**——
+每个平台有独立注册表，互不依赖：
 
 ```bash
-python3 /mnt/skills/topic6-event-registry/scripts/run_topic6_c2.py \
-  --project-dir <项目目录> --mode demo --run-id 1
+S=/mnt/skills/topic6-event-registry/scripts
+for p in 微博 抖音 知乎 B站; do
+  (cd $p && python3 $S/02_extract_frames.py --run-dir . --batch-size 40 --concurrency 8) &
+done
+wait
 ```
 
-入口只把四个平台的阶段 00 并行执行，随后立即 x0 合库，并在 merged 目录统一执行
-01→02→03→04→05→06→07→x2→x3→x4。不要在 x0 前按平台执行 01~04：x0 只合并
-`work/clean_titles.jsonl`，这些提前生成的结果不会进入合库产物。
-
-`c2_status.json` 记录已完成阶段。输入、Chat 模型、Embedding 模型和 x2 策略共同构成
-运行签名：签名不变时原地续跑；任一项变化时自动清理旧阶段产物并从 00 重跑。进程锁会
-拒绝同一项目下的第二个 C2 runner，避免重复计费和并发写坏缓存。
+墙上时间从「四平台之和」变成「最慢那个平台」，数据语义零变化。实测 3762 条四平台的
+阶段 03：顺序跑 25 分钟，改成两两并行 17 分钟。
 
 messages 端点确实能并行——实测 8 个并发请求同时发，单个耗时 38 秒、8 个总共 46 秒，
 接近线性。**但 embeddings 端点不是这样**，加并发不涨吞吐，四组对照见 [benchmarks.md](benchmarks.md)。

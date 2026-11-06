@@ -66,6 +66,11 @@ def inspect_c2(project: Path, run_id: int) -> dict:
             "current_stage": status.get("current_stage", "done"),
             "completed_stages": status.get("completed_stages", []),
             "output_file": status.get("output_file", ""),
+            "quality": status.get("quality", {}),
+            "node_seconds": status.get("node_seconds", {}),
+            "input_tokens": status.get("input_tokens", 0),
+            "output_tokens": status.get("output_tokens", 0),
+            "cost_usd": status.get("cost_usd", 0.0),
             "run_id": c2_run_id,
         }
 
@@ -80,6 +85,20 @@ def inspect_c2(project: Path, run_id: int) -> dict:
     # running or pending — include progress info
     current_stage = status.get("current_stage", "")
     completed = status.get("completed_stages", [])
+
+    # rc.14 引擎：从 engine/stages/*/*/receipt.json 取当前运行节点
+    engine_node = ""
+    stages_dir = c2_dir / "engine" / "stages"
+    if stages_dir.is_dir():
+        latest = 0.0
+        for receipt in stages_dir.glob("*/*/receipt.json"):
+            try:
+                data = json.loads(receipt.read_text(encoding="utf-8"))
+                mtime = receipt.stat().st_mtime
+            except (OSError, json.JSONDecodeError):
+                continue
+            if data.get("status") == "RUNNING" and mtime >= latest:
+                engine_node, latest = str(data.get("node") or receipt.parent.parent.name), mtime
 
     # Try to read the latest log line for progress indication
     progress_hint = ""
@@ -97,6 +116,7 @@ def inspect_c2(project: Path, run_id: int) -> dict:
         "status": "running",
         "current_stage": current_stage,
         "completed_stages": completed,
+        "engine_node": engine_node,
         "progress": progress_hint,
         "run_id": c2_run_id,
     }

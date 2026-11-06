@@ -78,7 +78,7 @@ TOPIC6_DOCS_FOLDER_TOKEN=fldcnXXXXXXXXX
 | `LLM_RELAY_API_KEY` | `sk-xxxx` | **无改动** | bmc-llm-relay API Key，沙箱内的 C2 relay 脚本使用 |
 | `LLM_RELAY_BASE_URL` | `https://bmc-llm-relay.bluemediagroup.cn/v1` | **无改动** | bmc-llm-relay 端点 |
 | `DATAHUB_MODEL_ID` | ~~`Doubao-Seed-1.6-lite`~~ → `DeepSeek-V4-Flash` | **本次改动** | DataHub 标注任务的模型 ID |
-| `C2_CHAT_MODEL_ID` | `Doubao-Seed-Evolving` | 无改动 | C2 事件归并的 Chat 模型 |
+| `C2_CHAT_MODEL_ID` | `DeepSeek-V4.1-Flash` | 2026-11-05 由 Doubao-Seed-Evolving 切换（C2 rc.14 升级） | C2 事件归并的 Chat 模型 |
 | `EMBEDDING_MODEL_ID` | `Doubao-embedding` | 无改动 | 向量嵌入模型 |
 
 > `DATAHUB_MODEL_ID` 已在 environment.json 中硬编码为 `DeepSeek-V4-Flash`，
@@ -87,14 +87,13 @@ TOPIC6_DOCS_FOLDER_TOKEN=fldcnXXXXXXXXX
 
 ### 2.3 方舟 Agent 模型配置（agent JSON → create_all.sh 创建）
 
-4 个 Agent 全部走 bmc-llm-relay：
+3 个 Agent 全部走 bmc-llm-relay（insighter 已下线）：
 
 | Agent | 模型 | provider | 本次改动 |
 |-------|------|----------|----------|
-| coordinator | DeepSeek-V4.1-Flash | bmc-llm-relay | 从 claude-sonnet-5-5 切换 |
-| annotator | DeepSeek-V4.1-Flash | bmc-llm-relay | 从 claude-sonnet-5-5 切换 |
-| insighter | DeepSeek-V4.1-Flash | bmc-llm-relay | 从 claude-sonnet-5-5 切换 |
-| validator | DeepSeek-V4.1-Flash | bmc-llm-relay | 从 claude-sonnet-5-5 切换 |
+| coordinator | DeepSeek-V4.1-Flash（256K） | bmc-llm-relay | 2026-11-05 由 DeepSeek-V4-Flash-0731 切换 |
+| annotator | DeepSeek-V4.1-Flash（256K） | bmc-llm-relay | 同上 |
+| validator | DeepSeek-V4.1-Flash（256K） | bmc-llm-relay | 同上 |
 
 > Agent JSON 中的 `base_url` 和 `provider` 是方舟 MA 侧的配置，在 `create_all.sh` 时写入。
 > Gateway 本地不需要配这些——但 Gateway 需要 `BYOK_MODEL_AUTH_HEADER_*` 来在每次

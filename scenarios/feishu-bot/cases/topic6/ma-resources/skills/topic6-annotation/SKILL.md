@@ -13,7 +13,7 @@ description: 社媒热点周刊 Phase C 标注：调用 DataHub 完成 C0 基础
 ```
 /mnt/skills/topic6-annotation/
 ├── prompts/          # C0/R1~R5/C3 各任务活跃版本 (版本历史见 ma-resources/memory/topic6/_版本状态.md)
-│   ├── C0_基础事实/v5.md      # 活跃版 v5 (v1~v4 归档保留)
+│   ├── C0_基础事实/v13.md     # 唯一版本 v13 (客户 V2 2026-10-29 锁定; v1~v5 已移除, 历史见 git)
 │   ├── R1_平台借势/v2.md      # 活跃版 v2 (v1 归档保留)
 │   ├── R2_商业合作/v2.md      # 活跃版 v2 (v1 归档保留)
 │   ├── R3_风险预警/v1.md
@@ -79,7 +79,7 @@ description: 社媒热点周刊 Phase C 标注：调用 DataHub 完成 C0 基础
 
 ## Prompt 版本
 
-各任务活跃版本: C0 v5, R1 v2, R2 v1, R3 v1, R4 v2, R5 v2, 节点标注 v7。
+各任务活跃版本: C0 v13, R1 v2, R2 v2, R3 v1, R4 v2, R5 v3, 节点标注 v7。
 未来迭代按各任务当前编号继续递增。
 
 ## 环境变量
@@ -90,7 +90,7 @@ description: 社媒热点周刊 Phase C 标注：调用 DataHub 完成 C0 基础
 
 - 所有 prompt / 脚本内的路径全部走 `/mnt/skills/topic6-annotation/` 或 `/workspace/Projects/`。
 - Prompt 上传给 DataHub 时通过 `--prompt-file` 显式传绝对路径, 不再靠脚本自动扫描 prompts 目录。
-- `c0_filter_usable.py` 只把 C0 明确判定为“是”的记录送入 R1~R5；解析失败/缺失记录不进入五路下游。失败占比超过 5% 时熔断。
+- C0 解析失败/缺失分三层处理:① `datahub_annotate.py` 对残缺结尾(缺 `}`、多 `"`/`]`)做受控补全,补全后主字段须为“是/否”才采纳;② 仍失败的行自动重提最多 3 轮;③ `c0_filter_usable.py` 把剩余未决行与“是”一起送入 R1~R5/C2(“是否营销可用”留空,E 阶段只取“是”不受影响),stdout `unresolved_rows` 交 HC1 人工判定。未决占比超过 5% 时熔断。
 - DataHub 成功态没有 `result_url` 时,`datahub_annotate.py` 自动分页读取 `result_list`,不需要子 Agent 手工下载。
 - 方舟 bash 长命令约 120 秒会自动转后台；不得用长时间前台调用规避。正式模式只允许
   `--launch-background` 启动唯一 worker，批次检查器单次最长 105 秒，返回 `running`

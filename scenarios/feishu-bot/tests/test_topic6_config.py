@@ -45,7 +45,7 @@ def test_artifact_sync_settings_are_configurable():
     assert config.artifact_poll_interval_sec == 2.5
 
 
-def test_miaoda_oauth_bypass_defaults_off_and_requires_explicit_opt_in():
+def test_miaoda_oauth_skip_is_explicit_and_defaults_off():
     assert config_module.load_case_config(_env()).skip_miaoda_oauth is False
     assert config_module.load_case_config(
         _env(TOPIC6_SKIP_MIAODA_OAUTH="true")

@@ -219,6 +219,14 @@ def main() -> int:
               ["event_a", "event_a_title", "event_b", "event_b_title",
                "relation_type", "confidence", "source", "note"])
     (out / "口径与执行说明.md").write_text(NOTES, encoding="utf-8")
+    if (out / 'original_retained.json').exists():
+        with (out / '口径与执行说明.md').open('a', encoding='utf-8') as handle:
+            handle.write('\n\n## 原热点保留\n\n'
+                '完整归档复核后仍未决的内容按原标题独立保留；original_retained.json记录原因及连带拆分。'
+                '这些条目未确认事件身份，不等于错误或技术失败，也不计作已识别准确。'
+                '快照中的ORIGINAL_RETAINED条目暂不参与跨窗口身份匹配。\n\n'
+                '07/x2/x3输出是中间阶段诊断记录；最终业务归属以event_registry.csv、record_to_event.csv、'
+                '热点明细_含事件归属.csv及registry_snapshot.jsonl为准。\n')
 
     # Registry 快照：下一窗口用 00_seed_from_registry.py 读它做增量归档
     vec_path = rd / "work" / "embeddings.json"
@@ -228,7 +236,7 @@ def main() -> int:
     no_vec = 0
     for event in events:
         anchor = event["canonical_anchor_record_id"]
-        vector = vectors.get(anchor)
+        vector = None if event.get('retention_status') == 'ORIGINAL_RETAINED' else vectors.get(anchor)
         if vector is None:
             no_vec += 1
         touched = bool(event["member_record_ids"])
@@ -247,6 +255,8 @@ def main() -> int:
                                     else int(event.get("windows_since_update") or 0) + 1,
             "window": args.window or "",
         })
+        if event.get('retention_status') == 'ORIGINAL_RETAINED':
+            snapshot[-1]['retention_status'] = 'ORIGINAL_RETAINED'
     write_jsonl(out / "registry_snapshot.jsonl", snapshot)
     if no_vec:
         print(f"  {no_vec} 个事件缺锚点向量，下窗口召回不到它们", file=sys.stderr)

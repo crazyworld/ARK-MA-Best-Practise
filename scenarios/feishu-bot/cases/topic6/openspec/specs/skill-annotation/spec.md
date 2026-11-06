@@ -81,11 +81,19 @@ C3 时效窗口：节点定义来自 `references/marketing_calendar/nodes_defini
 - **THEN** 返回 `degraded`，`missing_tasks=["r3"]`
 
 ### Requirement: C0 合并与可用子集筛选
-`c0_merge_phase1.py --project-dir --mode --run-id` SHALL 把 C0 + C3 结果 LEFT JOIN 到基础表输出 `04_合并/phase1_merged_{mode}_r{N}.xlsx`。`c0_filter_usable.py --project-dir --mode --run-id` SHALL 只把 C0"是否营销可用=是"的行输出到 `04_标注/_可用子集/usable_subset_{mode}_r{N}.xlsx`（保留 phase1_merged 全部列）；解析失败/缺失占比 > `UNRESOLVED_THRESHOLD=0.05` MUST 抛错退出，MUST NOT 提供强制放行参数。
+`c0_merge_phase1.py --project-dir --mode --run-id` SHALL 把 C0 + C3 结果 LEFT JOIN 到基础表输出 `04_合并/phase1_merged_{mode}_r{N}.xlsx`。`c0_filter_usable.py --project-dir --mode --run-id` SHALL 把 C0"是否营销可用=是"的行与 C0 未决行（解析失败/缺失）输出到 `04_标注/_可用子集/usable_subset_{mode}_r{N}.xlsx`（保留 phase1_merged 全部列），明确"否"的行排除；未决行的"是否营销可用"保持为空，stdout MUST 含 `unresolved_rows`（row_id/platform/title）供 HC1 判定。解析失败/缺失占比 > `UNRESOLVED_THRESHOLD=0.05` MUST 抛错退出，MUST NOT 提供强制放行参数。`datahub_annotate.py` 解析 C0/R1~R5 结果时 SHALL 对残缺结尾（缺 `}`、多余 `"`/`]`）做受控补全，补全结果的主字段 MUST 为"是/否"才计为有效。
 
 #### Scenario: 未解析 6%
 - **WHEN** C0 有 6% 行解析失败
 - **THEN** 筛选脚本报错退出
+
+#### Scenario: 未决 2%
+- **WHEN** C0 有 2% 行解析失败或缺失
+- **THEN** 这些行与"是"行一起进入可用子集，`unresolved_rows` 列出明细，合并宽表 `C0 未决行` 为 warn 并写入 HC1 issues
+
+#### Scenario: JSON 结尾残缺
+- **WHEN** C0 返回 `{...,"是否营销可用":"是","判断说明":"..."` 缺结尾 `}`
+- **THEN** 补全后计为有效行，不进入失败重提
 
 ### Requirement: demo 第二批快速路径
 `run_demo_batch2.py --project-dir --input --run-id` SHALL 并行启动 `run_demo_routes.py`（R1~R5）与 `run_topic6_c2.py --demo-fast`，等待两者并输出结构化 JSON，任一失败退出 1。`run_demo_routes.py` SHALL 复用 R1~R5 正式 Prompt 与输出列，默认 5 个 route worker、每批 5 行、最多 5 次尝试，经 Ark 调用；每个成功批次原子写 `{route}_demo_checkpoint_r{N}.json`，输入/模型/Prompt/run_id/batch size 不匹配时 checkpoint 失效；重跑只补缺失批次。该路径 MUST 仅用于 demo。
@@ -95,7 +103,7 @@ C3 时效窗口：节点定义来自 `references/marketing_calendar/nodes_defini
 - **THEN** 只重新调用缺失批次
 
 ### Requirement: 七路合并宽表
-`merge_annotations.py --project-dir --mode --run-id` SHALL 输出 28 列 `05_合并/wide_table_{mode}_r{N}.xlsx`（基础 9 列 + C0 7 列〔商业实体、热点驱动词、行业归属、营销触发方式、营销维度、是否营销可用、判断说明〕+ 提取节点、事件簇名 + R1~R5 各 2 列〔是否平台玩法/平台玩法说明、是否商业合作/合作动态说明、是否风险预警/风险判断说明、是否营销发现/营销发现说明、是否消费者行为/消费者行为说明〕），`row_id` 改名为 `序号`；单路缺失补空列只告警不中断，并写 `health_summary_{mode}_r{N}.md`。stdout JSON MUST 含 `gate_ok`（行数守恒且 `dup_rows=0`）、`quality_status`、`quality_checks`、`quality_warnings`、`hc_metrics`。质量判定：任一路有效率 <0.80 或 ≥2 路整批缺失或 C0 缺失 → `fail`；恰 1 路缺失 → `degraded`；有效率 0.80~0.92、C2 营销可用行事件簇非空率 ≤0.50、C0 营销可用率偏离 55%~58% 超过 5pp、某平台占比 <5%、最大事件簇 >营销可用行 10% → `warn`；否则 `pass`。`quality_status` MUST NOT 改变 `gate_ok`。
+`merge_annotations.py --project-dir --mode --run-id` SHALL 输出 28 列 `05_合并/wide_table_{mode}_r{N}.xlsx`（基础 9 列 + C0 7 列〔商业实体、热点驱动词、行业归属、营销触发方式、营销维度、是否营销可用、判断说明〕+ 提取节点、事件簇名 + R1~R5 各 2 列〔是否平台玩法/平台玩法说明、是否商业合作/合作动态说明、是否风险预警/风险判断说明、是否营销发现/营销发现说明、是否消费者行为/消费者行为说明〕），`row_id` 改名为 `序号`；单路缺失补空列只告警不中断，并写 `health_summary_{mode}_r{N}.md`。stdout JSON MUST 含 `gate_ok`（行数守恒且 `dup_rows=0`）、`quality_status`、`quality_checks`、`quality_warnings`、`hc_metrics`。质量判定：任一路有效率 <0.80 或 ≥2 路整批缺失或 C0 缺失 → `fail`；恰 1 路缺失 → `degraded`；有效率 0.80~0.92、C2 营销可用行事件簇非空率 ≤0.50、C0 未决行 >0、C0 营销可用率偏离 37%~41% 超过 5pp、某平台占比 <5%、最大事件簇 >营销可用行 10% → `warn`；否则 `pass`。`quality_status` MUST NOT 改变 `gate_ok`。
 
 #### Scenario: 行数守恒
 - **WHEN** 基础表 500 行，合并后 500 行且无重复序号
@@ -113,8 +121,8 @@ C3 时效窗口：节点定义来自 `references/marketing_calendar/nodes_defini
 - **THEN** 打印"已存在，跳过重复记录"，jsonl 不变
 
 ### Requirement: Prompt 版本管理
-活跃版本 SHALL 为 C0 v5、R1 v2、R2 v2、R3 v1、R4 v2、R5 v3、节点标注 v7（SKILL.md 为权威源，memory `_版本状态.md` 为镜像）。Prompt 文件 MUST 只增不改：调整时新建 `v{N+1}.md`，旧版保留，重新打包上传生成新 SkillHub version，并同步 `SKILL.md`、`_版本状态.md`、`version_mapping.md`。`ks/`（9 篇判定口径）与 `prompts/00~09`、`run_config契约.md`、`运行前置.md` 为客户原样迁入文件，修改属于业务口径变更。
+活跃版本 SHALL 为 C0 v13、R1 v2、R2 v2、R3 v1、R4 v2、R5 v3、节点标注 v7（SKILL.md 为权威源，memory `_版本状态.md` 为镜像）。Prompt 文件 MUST 只增不改：调整时新建 `v{N+1}.md`，旧版保留（C0 例外：`C0_基础事实/` 目录只保留活跃版本，升版后旧版移除、历史以 git 为准，避免多版本并存造成误取），重新打包上传生成新 SkillHub version，并同步 `SKILL.md`、`_版本状态.md`、`version_mapping.md`。`ks/`（9 篇判定口径）与 `prompts/00~09`、`run_config契约.md`、`运行前置.md` 为客户原样迁入文件，修改属于业务口径变更。
 
 #### Scenario: 升级 C0
 - **WHEN** 需要调整 C0 判定
-- **THEN** 新增 `C0_基础事实/v6.md`，不修改 v5，更新三处版本记录并重新上传 Skill
+- **THEN** 新增 `C0_基础事实/v14.md` 并移除 v13（目录内只留 v14），更新三处版本记录并重新上传 Skill

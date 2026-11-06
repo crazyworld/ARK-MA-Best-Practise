@@ -28,6 +28,8 @@ SKILL_DIR = Path(__file__).resolve().parents[1]
 COST_TRACKER = SKILL_DIR / "tool" / "cost-tracker" / "cost_tracker.py"
 MODEL_PRICING_CNY = {
     "doubao-seed-evolving": (6.0, 30.0),
+    # 与 relay.py / pipeline_e.py 的 USD 单价 (0.5, 2.0) 一致，按 7 汇率折算
+    "deepseek-v4.1-flash": (3.5, 14.0),
 }
 CHECKPOINT_VERSION = 1
 DEFAULT_BATCH_SIZE = 5
@@ -735,7 +737,7 @@ def main() -> int:
         "--model",
         default=os.environ.get("DEMO_CHAT_MODEL_ID")
         or os.environ.get("C2_CHAT_MODEL_ID")
-        or "Doubao-Seed-Evolving",
+        or "DeepSeek-V4.1-Flash",
     )
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
     parser.add_argument("--max-workers", type=int, default=DEFAULT_MAX_WORKERS)

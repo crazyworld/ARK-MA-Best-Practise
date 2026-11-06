@@ -28,9 +28,9 @@
 | `topic6/skill/insight/` | `ma-resources/skills/topic6-insight/` | 适配迁入 | Phase E+F；保留活跃 Prompt，脚本改为 MA 沙箱路径和 Ark API |
 | `artifact-template-bluefocus-hotspot-web-report/` | `ma-resources/skills/topic6-web-report/` | 适配迁入 | Phase G；模板和素材原样保留，Skill 名称改为 `topic6-web-report` |
 | `miaoda-web-publish/` | `ma-resources/skills/miaoda-web-publish/` | 原样迁入 | Phase H；保留用户 OAuth、Git 发布和恢复契约 |
-| `topic6/CLAUDE.md` + `topic6/prompt/*.md` + `其他相关引用/Agent.Producer_CLAUDE.md` | `ma-resources/agents/coordinator.system.md` | 重新编排 | 原单 Agent 主流程改成 Coordinator + 子 Agent + 结构化 HC |
+| `topic6/CLAUDE.md` + `topic6/prompt/*.md` + `其他相关引用/Agent.Producer_CLAUDE.md` | `ma-resources/agents/coordinator.system.md` | 重新编排 | 原单 Agent 主流程改成 Coordinator + 标注子 Agent + 结构化 HC |
 | `topic6/skill/annotation/SKILL.md` + 标注阶段契约 | `ma-resources/agents/annotator.system.md` | MA 新增 | 抽出单路 C0/C3/R1-R5 标注子 Agent |
-| `topic6/skill/insight/SKILL.md` + Phase E 契约 | `ma-resources/agents/insighter.system.md` | MA 新增 | 抽出单版块 E1-E4 洞察子 Agent |
+| `topic6/skill/insight/SKILL.md` + Phase E 契约 | `ma-resources/skills/topic6-insight/` | 适配迁入 | E1-E4 由 `pipeline_e.py` 单入口在脚本内有界并发，不注册洞察子 Agent |
 | `topic6/lm/` | `ma-resources/memory/topic6/` | 适配迁入 | 改造成 MA Memory Store 的只读业务记忆 |
 | `Validator/`(KS/LM/prompts + Topic6 检查清单) | `ma-resources/agents/validator.system.md` + `ma-resources/skills/validator/` | 适配迁入 | 子 Agent `topic6-validator`(可选，HC1/HC2/HC3 前质检，失败/超时填 SKIP)；新增 `xlsx_checker.py` 确定性检查；Topic1/2/4/5 清单、metaso/tavily 外部搜索、IM 推送未迁移 |
 
@@ -60,8 +60,7 @@
 
 | MA 文件 | 客户原始文件 | 状态 | 说明 |
 |---|---|---|---|
-| `prompts/C0_基础事实/v1.md`～`v4.md` | `topic6/skill/annotation/prompts/C0_基础事实/` 下同名文件 | 原样迁入 | 4 个客户版本全部保留 |
-| `prompts/C0_基础事实/v5.md` | 基于客户 `v4.md` 精简 | MA 优化新增 | 保留 9 字段契约和关键边界，待真实 HC1 对比 |
+| `prompts/C0_基础事实/v13.md` | `agent/skill/topic6-annotation-skill/prompts/C0_基础事实/v13.md`（bundle_20261030） | 原样迁入 | SHA-256 一致；目录内唯一版本。v1~v4（客户原样）与 v5（MA 精简版）已于 2026-11-05 移除，历史见 git |
 | `prompts/R1_平台借势/v1.md`～`v2.md` | 客户侧同路径文件 | 原样迁入 | 2 个版本全部保留 |
 | `prompts/R2_商业合作/v1.md` | 客户侧同路径文件 | 原样迁入 | SHA-256 一致 |
 | `prompts/R2_商业合作/v2.md` | 客户 V2.0 bundle(20261030)同路径文件 | 原样迁入(去 CRLF) | 2026-11-03 活跃版 |
@@ -86,24 +85,26 @@
 | `references/marketing_calendar/nodes_definition_supplement.csv` | 客户侧同路径文件 | 原样迁入 | SHA-256 一致 |
 | `tool/cost-tracker/cost_tracker.py` | `topic6/tool/cost-tracker/cost_tracker.py` | 适配迁入 | 精简为 MA 共用成本台账，路径改为 `/workspace` |
 | 无 | `annotation/scripts/c0_retry_missing.py`、`retry_missing.py` | 未迁移 | 重试决策上移 Coordinator；当前 MA 包无同名重试脚本 |
-| 无 | `annotation/scripts/c2_run_all_platforms.py` | 未迁移 | Coordinator 直接编排 `topic6-event-registry` 各阶段脚本 |
+| 无 | `annotation/scripts/c2_run_all_platforms.py` | 未迁移 | V2 生产按平台独立跑 00~09（不跨平台合并）；MA 用 `run_topic6_c2.py` → rc.14 `run_c2.py --mode cross-platform` |
 | 无 | `annotation/scripts/c3_postprocess.py` | 未迁移 | 能力并入 `datahub_annotate.py` |
 
 ## 四、`topic6-event-registry` 对应表
 
-客户根目录：`assets_from_customer/blueai-canonical-event-registry/`  
+客户根目录：V2 bundle_20261030 `Topic6 热点报告/agent/skill/_vendor/blueai-canonical-event-registry/`（3.0.0-rc.14，2026-11-05 由 2.2.0 升级）
 MA 根目录：`ma-resources/skills/topic6-event-registry/`
 
 | MA 文件 | 客户原始文件 | 状态 | 说明 |
 |---|---|---|---|
-| `SKILL.md` | 同名文件 | 适配迁入 | 增加 MA/Ark 运行约束 |
-| `CHANGELOG.md` | 同名文件 | 适配迁入 | 记录 Ark OpenAI 协议迁移 |
-| `references/runbook.md` | 同名文件 | 适配迁入 | 更新 MA 环境变量和运行方式 |
-| `references/benchmarks.md`、`calibration.md`、`identity.md`、`open-questions.md`、`pipeline.md`、`prompts.md` | 同名文件 | 原样迁入 | 6 个文件 SHA-256 一致 |
-| `scripts/relay.py` | 同名文件 | 适配迁入 | Anthropic `/v1/messages` 改为 OpenAI 兼容 `/v1/chat/completions`；2026-11-03 起只读 bmc-llm-relay 的 `LLM_RELAY_*`，不回退 `ARK_*` |
-| `scripts/00_clean_titles.py`、`00_seed_from_registry.py`、`01_eventness.py`～`11_score_calibration.py` | 同名文件 | 原样迁入 | 13 个主流水线脚本 SHA-256 一致 |
-| `scripts/x0_merge_platforms.py`～`x4_detail_table.py` | 同名文件 | 原样迁入 | 5 个跨平台脚本 SHA-256 一致 |
-| `scripts/eventlib.py` | 同名文件 | 原样迁入 | SHA-256 一致 |
+| `SKILL.md` | 同名文件 | 适配迁入 | frontmatter name 保持 `topic6-event-registry`；新增「Topic6 / MA 用法」节 |
+| `CHANGELOG.md` | 同名文件 | 适配迁入 | 顶部追加 MA 适配说明 |
+| `references/runbook.md` | 同名文件 | 适配迁入 | 授权节改为 `LLM_RELAY_*`，路径改 `/mnt/skills` |
+| `references/*.md`（其余 8 个）、`MANIFEST.json`、`examples/synthetic.csv` | 同名文件 | 原样迁入(去 CRLF) | MANIFEST 记录上游哈希，适配文件不匹配属预期 |
+| `scripts/relay.py` | 同名文件 | 适配迁入 | 传输层保留 MA（bmc-llm-relay 流式 + watchdog + 多模态 embedding）；run_batches 版本缓存、Embedder 校验/原子落盘对齐 rc.14 |
+| `scripts/run_c2.py` | 同名文件 | 适配迁入 | 新增 `--review-policy`/`--degraded-policy`/`--front-workers`（默认上游语义）；x2 透传 `--model`；端点读 `LLM_RELAY_BASE_URL` |
+| `scripts/retain_original.py`、`x2_confidence_filter.py` | 同名文件 | 适配迁入 | `allow_degraded` 参数；恢复 `--model` 覆盖 |
+| `scripts/run_ev.py`、`04_build_embeddings.py`、`check_environment.py` | 同名文件 | 适配迁入 | `ANTHROPIC_*` → `LLM_RELAY_*` |
+| `scripts/f1_extract.py`、`c2_runtime.py`、`c2_quality.py`、`front_evidence.py`、`link_registry.py`、`review_revision.py`、`verify_package.py`、`00~11_*.py`、`x0~x4_*.py`、`eventlib.py` | 同名文件 | 原样迁入(去 CRLF) | rc.14 主体 |
+| `scripts/run_topic6_c2.py`、`launch_c2_background.py`、`wait_c2_complete.py` | 无 | MA 新增 | Topic6 封装：调用 `run_c2.py run --mode cross-platform --frontend fused` |
 | `scripts/__pycache__/` | 客户侧缓存 | 未迁移 | Python 缓存，不属于源码 |
 
 ## 五、`topic6-insight` 对应表
@@ -162,14 +163,13 @@ Prompt 仅把客户侧 `Agent.Producer/.claude/skills/...` 引用适配为 MA �
 |---|---|---|---|
 | `agents/coordinator.system.md` | `topic6/CLAUDE.md`、`topic6/prompt/*.md`、`其他相关引用/Agent.Producer_CLAUDE.md` | MA 新增 | 汇总主流程并加入 Multi Agent、HC1-HC3、MA 挂载路径 |
 | `agents/annotator.system.md` | 标注 Skill 与 Phase C 契约 | MA 新增 | 定义单路标注子 Agent 输入输出 |
-| `agents/insighter.system.md` | 洞察 Skill 与 Phase E 契约 | MA 新增 | 定义单版块洞察子 Agent 输入输出 |
-| `agents/coordinator.json`、`annotator.json`、`insighter.json` | 无直接客户文件 | MA 新增 | MA Agent 资源、模型、Skill、工具和子 Agent 关系 |
+| `agents/coordinator.json`、`annotator.json` | 无直接客户文件 | MA 新增 | MA Agent 资源、模型、Skill、工具和标注子 Agent 关系 |
 | `memory/topic6/MEMORY.md` | `topic6/lm/MEMORY.md` | 适配迁入 | 改为 MA 资源索引、挂载路径和执行职责 |
 | `memory/topic6/_版本状态.md` | `topic6/lm/_版本状态.md` | 适配迁入 | 改为 MA 当前活跃 Prompt/Skill 版本 |
 | `memory/topic6/错误案例库.md` | `topic6/lm/错误案例库.md` | 适配迁入 | 保留业务经验并改写 MA 相关规避规则 |
 | `memory-store.json` | `topic6/lm/` | MA 新增 | 声明 3 个 Memory 文件及挂载路径 |
 | `environment.json` | `其他相关引用/Topic6_环境变量依赖清单.md` + 各工具契约 | MA 新增 | 声明依赖、网络和环境变量占位符 |
-| `create_all.sh` | 无 | MA 新增 | 创建/更新 Environment、Memory Store 和 3 个 Agent |
+| `create_all.sh` | 无 | MA 新增 | 创建/更新 Environment、Memory Store 和 2 个 Agent，并按旧 ID 精确清理已下线的 Insighter |
 | `skill_ids.json.example` | 无 | MA 新增 | Skill 上传结果模板 |
 | `skill_ids.json`、`created_ids.json` | 无 | 运行产物 | 上传/创建后生成的实际资源 ID，不是客户源码 |
 | `version_mapping.md` | 无 | MA 新增 | 维护 SkillHub 版本、源码哈希和上传记录 |
@@ -223,5 +223,3 @@ Prompt 仅把客户侧 `Agent.Producer/.claude/skills/...` 引用适配为 MA �
 | 引用位置 | 当前引用 | 实际文件 | 结论 |
 |---|---|---|---|
 | `agents/coordinator.system.md` 的筛选失败处理 | `retry_missing.py --task c0` | MA Skill 中无 `retry_missing.py` 或 `c0_retry_missing.py` | Prompt 残留客户版命令，需要改成现有重试方案或补回脚本 |
-| `agents/insighter.system.md` 的 E2 统计表 | `01_统计/e2_marketing_node.py` | `01_统计/e2_nodes.py` | 文件名引用错误 |
-| `agents/insighter.system.md` 的 E3 统计表 | `01_统计/e3_platform.py` | `01_统计/e3_platforms.py` | 文件名引用错误 |

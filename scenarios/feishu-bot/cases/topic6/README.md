@@ -50,18 +50,20 @@ python cases/topic6/authorize_miaoda_user.py
 脚本会打开飞书授权页，并在扫码成功后自动读取扫码者的 `open_id`；无需手工传
 `open_id`。需要防止扫错账号时，可额外传 `--expected-open-id ou_xxx` 做校验。
 
-临时演示可在 `config.env` 设置 `TOPIC6_SKIP_MIAODA_OAUTH=true` 跳过扫码并启动
-主流程；此时 Phase H 妙搭发布会因缺少用户凭据失败，完成演示后应删除该配置。
+测试前序流程时可临时设置 `TOPIC6_SKIP_MIAODA_OAUTH=true`。该开关默认关闭；开启后
+不扫码、不挂载用户 Vault，Phase H 因缺少妙搭用户凭据失败属于预期结果。
 
 ## 系统组成
 
-Topic 6 使用 `1 Coordinator + 2 类子 Agent`：
+Topic 6 使用 `1 Coordinator + 1 类子 Agent`：
 
 | 组件        | 职责                               |
 | ----------- | ---------------------------------- |
 | Coordinator | 编排阶段、并发委派、人工审核和发布 |
 | Annotator   | 执行 C0、C3、R1-R5 DataHub 标注    |
-| Insighter   | 并发生成 E1-E4 四个洞察版块        |
+
+E1-E4 不再拆分洞察子 Agent，由 Coordinator 单次调用 `pipeline_e.py`，在脚本内部做
+有界并发、断连重试和版块级 checkpoint。
 
 主要 Skill：
 

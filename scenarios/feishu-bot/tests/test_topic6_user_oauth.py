@@ -2,47 +2,26 @@
 from __future__ import annotations
 
 import asyncio
-import importlib.util
-import sys
 import time
 from dataclasses import replace
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from arkagent.feishu import IncomingMessage
-
-CASE_DIR = Path(__file__).resolve().parents[1] / "cases" / "topic6"
-
-
-def _load(module_name: str, file_name: str):
-    if str(CASE_DIR) not in sys.path:
-        sys.path.insert(0, str(CASE_DIR))
-    if module_name in sys.modules:
-        return sys.modules[module_name]
-    spec = importlib.util.spec_from_file_location(module_name, CASE_DIR / file_name)
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-pipeline_store = _load("pipeline_store", "pipeline_store.py")
-oauth_module = _load("topic6_user_oauth", "topic6_user_oauth.py")
-gateway_module = _load("topic6_gateway_for_oauth_test", "gateway.py")
-runner_module = sys.modules["topic6_runner"]
-
-APPS_USER_SCOPES = oauth_module.APPS_USER_SCOPES
-DeviceAuthorization = oauth_module.DeviceAuthorization
-OAuthTokens = oauth_module.OAuthTokens
-Topic6UserAuthorization = oauth_module.Topic6UserAuthorization
-UserAuthorizationRequired = oauth_module.UserAuthorizationRequired
-PipelineStore = pipeline_store.PipelineStore
-Topic6Gateway = gateway_module.Topic6Gateway
-Topic6Runner = runner_module.Topic6Runner
-RunnerConfig = runner_module.Topic6Config
+from cases.topic6 import gateway as gateway_module
+from cases.topic6 import topic6_user_oauth as oauth_module
+from cases.topic6.gateway import Topic6Gateway
+from cases.topic6.pipeline_store import PipelineStore
+from cases.topic6.topic6_runner import Topic6Config as RunnerConfig
+from cases.topic6.topic6_runner import Topic6Runner
+from cases.topic6.topic6_user_oauth import (
+    APPS_USER_SCOPES,
+    DeviceAuthorization,
+    OAuthTokens,
+    Topic6UserAuthorization,
+    UserAuthorizationRequired,
+)
 
 
 class FakeArk:
@@ -500,7 +479,11 @@ async def test_gateway_passes_scanned_users_vault_to_runner():
     assert forced == [True]
 
 
-async def test_gateway_bypasses_user_oauth_when_explicitly_configured():
+async def _no_remark(**_kwargs):
+    return False
+
+
+async def test_gateway_skip_oauth_starts_without_user_vault():
     calls = []
     keepalive_calls = []
     job = SimpleNamespace(job_id="job-1")
@@ -514,22 +497,21 @@ async def test_gateway_bypasses_user_oauth_when_explicitly_configured():
             calls.append(kwargs)
             return job
 
-    class Hitl:
-        async def handle_remark_message(self, **_kwargs):
-            return False
-
     class UserAuth:
         async def vault_id(self, _open_id, *, force_refresh=False):
-            raise AssertionError("bypass mode must not request user authorization")
+            raise AssertionError("skip 模式不应读取用户 Vault")
 
     async def reply(_chat_id, _text):
         pass
 
     gateway = Topic6Gateway(
-        SimpleNamespace(authorized_open_ids=(), skip_miaoda_oauth=True),
+        SimpleNamespace(
+            authorized_open_ids=(),
+            skip_miaoda_oauth=True,
+        ),
         Store(),
         Runner(),
-        Hitl(),
+        SimpleNamespace(handle_remark_message=_no_remark),
         UserAuth(),
         reply,
         None,
@@ -542,6 +524,8 @@ async def test_gateway_bypasses_user_oauth_when_explicitly_configured():
 async def test_continue_command_passes_trailing_text_to_runner():
     calls = []
     replies = []
+    keepalive_calls = []
+    sync_calls = []
 
     class Store:
         def complete_event(self, *_args):
@@ -550,7 +534,18 @@ async def test_continue_command_passes_trailing_text_to_runner():
     class Runner:
         async def continue_job(self, **kwargs):
             calls.append(kwargs)
-            return SimpleNamespace(job_id="job-1")
+            return SimpleNamespace(
+                job_id="job-1", user_open_id="ou-scanned"
+            )
+
+    class UserAuth:
+        async def vault_id(self, open_id, *, force_refresh=False):
+            assert open_id == "ou-scanned"
+            return "vault-1"
+
+    class ArtifactSync:
+        def start(self, job, loop):
+            sync_calls.append((job.job_id, loop))
 
     async def reply(_chat_id, text):
         replies.append(text)
@@ -560,9 +555,13 @@ async def test_continue_command_passes_trailing_text_to_runner():
         Store(),
         Runner(),
         SimpleNamespace(),
-        SimpleNamespace(),
+        UserAuth(),
         reply,
         None,
+        artifact_sync=ArtifactSync(),
+    )
+    gateway._start_token_keepalive = (  # type: ignore[method-assign]
+        lambda job, vault_id: keepalive_calls.append((job.job_id, vault_id))
     )
 
     await gateway._process(
@@ -575,6 +574,8 @@ async def test_continue_command_passes_trailing_text_to_runner():
         "user_open_id": "ou-scanned",
         "message": "请优先检查异常热点",
     }]
+    assert keepalive_calls == [("job-1", "vault-1")]
+    assert sync_calls == [("job-1", None)]
     assert "补充消息已注入" in replies[0]
 
 

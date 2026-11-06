@@ -189,9 +189,14 @@ def test_filter_and_merge(tmp_path, mock_round):
     _run(ANNOTATION / "c0_filter_usable.py", *args)
     _run(ANNOTATION / "merge_annotations.py", *args)
     for rel in (f"04_合并/phase1_merged_{mode}_r1.xlsx",
-                f"04_标注/_可用子集/usable_subset_{mode}_r1.xlsx",
                 f"05_合并/wide_table_{mode}_r1.xlsx"):
         _assert_same_xlsx(proj / rel, files[rel])
+    # 可用子集:mock 金标准为旧口径(仅"是");新口径额外保留 C0 未决行(是否营销可用为空)交 HC1 判定
+    rel = f"04_标注/_可用子集/usable_subset_{mode}_r1.xlsx"
+    got, want = _frame(proj / rel), _frame(files[rel])
+    usable = got["是否营销可用"] == "是"
+    pd.testing.assert_frame_equal(got[usable].reset_index(drop=True), want, check_dtype=False)
+    assert got.loc[~usable, "是否营销可用"].isna().all()
 
 
 # ---------------------------------------------------------------------------

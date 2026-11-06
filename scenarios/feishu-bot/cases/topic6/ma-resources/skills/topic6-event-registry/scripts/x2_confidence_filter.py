@@ -39,11 +39,13 @@
 from __future__ import annotations
 
 import argparse
+import os
 import collections
 import csv
 import json
 import sys
 from pathlib import Path
+from c2_runtime import atomic_json
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from relay import Relay, log_run, make_batches, read_jsonl, run_batches, write_csv, write_jsonl
@@ -215,12 +217,12 @@ def main() -> int:
                     help="不低于此分直接保留。实测 75 以上样本 40 条全对")
     ap.add_argument("--verdict", choices=["off", "opus", "sonnet"], default="off",
                     help="边界带交谁裁定。off = 只出待裁定表给人工")
-    ap.add_argument("--model", default=None,
-                    help="覆盖 --verdict 对应的默认模型。MA 环境应显式传入 "
-                         "C2_CHAT_MODEL_ID，避免使用未开通的 Claude 模型")
     ap.add_argument("--apply-verdict", action="store_true",
                     help="读回已填好人工裁定的表并落地")
     ap.add_argument("--concurrency", type=int, default=4)
+    ap.add_argument("--model", default=None,
+                    help="MA 适配：覆盖 --verdict 对应的默认 Claude 模型。MA 环境应显式传入 "
+                         "C2_CHAT_MODEL_ID，避免使用 relay 未开通的 Claude 模型")
     args = ap.parse_args()
     if args.cut >= args.keep:
         raise SystemExit(f"--cut({args.cut}) 必须小于 --keep({args.keep})")
@@ -232,11 +234,9 @@ def main() -> int:
     events, frames = load(rd)
     sc = scores(events)
     if not sc:
-        # 没有多成员事件（全部是 singletons）→ 无需置信度过滤，安全退出
-        multi = [e for e in events if not e.get("singleton")]
-        if not multi:
-            print("全部为独立话题（singletons），无跨平台事件需要置信度过滤，跳过 x2。")
-            raise SystemExit(0)
+        if all(e.get("singleton") for e in events):
+            atomic_json(rd / "out/x2_status.json", {"status": "COMPLETE", "pending_ids": [], "reason": "all singletons or empty"})
+            return 0
         raise SystemExit(
             "事件里没有 member_confidence。这个字段由 07 产出，"
             "说明 07 用的是旧提示词——请确认 07 的 SCHEMA 已含置信度刻度后重跑 07。")
@@ -269,8 +269,7 @@ def main() -> int:
     # 边界带交强模型裁定
     if args.verdict != "off" and band_rows:
         model = args.model or (
-            "claude-opus-4-7" if args.verdict == "opus" else "claude-sonnet-4-6"
-        )
+            "claude-opus-4-7" if args.verdict == "opus" else "claude-sonnet-4-6")
         v = ask_verdict(band_rows, events, model, rd, args.concurrency)
         for row in band_rows:
             row["你的判断（属于/不属于）"] = v.get(row["record_id"], {}).get("verdict", "")
@@ -284,6 +283,11 @@ def main() -> int:
         if not p.exists():
             raise SystemExit(f"缺少 {p}")
         filled = list(csv.DictReader(p.open(encoding="utf-8-sig")))
+        if os.environ.get("C2_STRICT_REVIEW") == "1":
+            supplied = [r.get("record_id") for r in filled]
+            expected = {r["record_id"] for r in band_rows}
+            if len(supplied) != len(set(supplied)) or set(supplied) != expected:
+                raise ValueError("Member verdict IDs do not match the current review request")
         col = "你的判断（属于/不属于）"
         got = [r for r in filled if (r.get(col) or "").strip()]
         print(f"读回 {len(got)}/{len(filled)} 条已填裁定")
@@ -326,7 +330,9 @@ def main() -> int:
             {"stage": "x2_confidence_filter", "cut": args.cut, "keep": args.keep,
              "verdict": args.verdict, "kicked": len(kick), "band": len(band),
              "demoted": demoted, "events": len(events)})
-    return 0
+    pending = [r["record_id"] for r in band_rows if (r.get("你的判断（属于/不属于）") or "").strip() not in {"属于", "不属于"}]
+    atomic_json(rd / "out/x2_status.json", {"status": "WAITING_REVIEW" if pending else "COMPLETE", "pending_ids": pending})
+    return 3 if pending and os.environ.get("C2_STRICT_REVIEW") == "1" else 0
 
 
 if __name__ == "__main__":

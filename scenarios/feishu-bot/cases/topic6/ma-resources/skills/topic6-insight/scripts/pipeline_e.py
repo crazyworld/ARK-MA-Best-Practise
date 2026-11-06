@@ -1759,7 +1759,7 @@ def main():
         default="skip_sampling",
     )
     parser.add_argument("--publish-date", default=None)
-    parser.add_argument("--model", default="Doubao-Seed-Evolving",
+    parser.add_argument("--model", default="DeepSeek-V4.1-Flash",
                         help="bmc-llm-relay 模型 ID(大小写需与网关 /v1/models 完全一致)")
     parser.add_argument("--version", type=int, default=None)
     parser.add_argument("--skip-data-prep", action="store_true")

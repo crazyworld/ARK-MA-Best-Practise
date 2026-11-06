@@ -67,7 +67,7 @@ flowchart LR
 - Gateway：Python 3.11（conda env `topic6`）、asyncio、SQLite(WAL)、httpx、lark_oapi（经 `arkagent.feishu`）、方舟 MA API（经 `arkagent.ark`）。
 - 沙箱：Python + pandas/openpyxl/numpy/openai/httpx/pyyaml、Node（网页构建 `.mjs`）、lark-cli v1.0.95。
 - 外部服务：方舟 MA / Files / Vault / Memory Store、hot-topics MCP、DataHub、飞书 Open API、妙搭。
-- 模型：统一走 bmc-llm-relay（blueai 模型网关）。Agent `DeepSeek-V4-Flash-0731`（BYOK，Gateway 附加 `X-User-Model-Header-*`）；C2/E/demo `Doubao-Seed-Evolving`；Embedding `Doubao-embedding`（沙箱脚本只读 `LLM_RELAY_*`）；DataHub `DeepSeek-V4-Flash`（DataHub 侧调度，不经方舟）。`ARK_*` 只用于 Managed Agent 控制面。
+- 模型：统一走 bmc-llm-relay（blueai 模型网关）。Agent / C2 / Phase E / demo 统一 `DeepSeek-V4.1-Flash`（Agent 为 BYOK，Gateway 附加 `X-User-Model-Header-*`）；Embedding `Doubao-embedding`（沙箱脚本只读 `LLM_RELAY_*`）；DataHub `DeepSeek-V4-Flash`（DataHub 侧调度，不经方舟）。`ARK_*` 只用于 Managed Agent 控制面。
 
 ## Conventions
 - `ma-resources/` 是唯一部署源码目录；`tools/out/`、`skill_ids.json`、`created_ids.json` 是生成物。

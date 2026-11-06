@@ -20,7 +20,7 @@ CLI:
   python datahub_annotate.py \\
     --task c0 --project-dir /workspace/Projects/W35 \\
     --input 03_抽样/sample_500.xlsx --model-id gpt-4o-mini \\
-    --prompt-file /mnt/skills/topic6-annotation/prompts/C0_基础事实/v1.md
+    --prompt-file /mnt/skills/topic6-annotation/prompts/C0_基础事实/v13.md
 
 Env:
   DATAHUB_API_KEY  (必填,由平台注入)
@@ -524,7 +524,33 @@ def _load_any(cand: str):
         return None
 
 
-def _parse_dict(val):
+# 结尾补全只救「答案已写完、仅收尾符号残缺」的单层 JSON(W43 C0 实测:缺 `}`、多出 `"`/`"]`)。
+# 补全结果必须带合法主判断值才采纳,避免把半截输出当成有效标注。
+_TAIL_JUNK = '"]} \t\r\n'
+_TAIL_CLOSERS = ('"}', "}")
+_PRIMARY_VALUES = {"是", "否"}
+
+
+def _repair_tail(text: str, primary: str | None) -> dict | None:
+    if not primary:
+        return None
+    body = _THINK_RE.sub("", text).strip()
+    start = body.find("{")
+    if start < 0:
+        return None
+    stem = body[start:].rstrip(_TAIL_JUNK)
+    for closer in _TAIL_CLOSERS:
+        try:
+            obj = json.loads(stem + closer)
+        except Exception:
+            continue
+        if isinstance(obj, dict) and str(obj.get(primary) or "").strip() in _PRIMARY_VALUES:
+            return obj
+    return None
+
+
+def _parse_dict(val, primary: str | None = None):
+    """解析单行 LLM 结果为 dict；传入 primary 时允许对残缺结尾做受控补全。"""
     if pd.isna(val):
         return None
     text = str(val).strip()
@@ -534,7 +560,7 @@ def _parse_dict(val):
         obj = _load_any(cand)
         if isinstance(obj, dict):
             return obj
-    return None
+    return _repair_tail(text, primary)
 
 
 def _parse_c3(val):
@@ -656,10 +682,10 @@ def _postprocess(df: pd.DataFrame, task: str) -> tuple[pd.DataFrame, dict]:
         valid = int((df["c3_parse_error"] == 0).sum())
     else:
         schema = TASK_SCHEMAS[task]
-        parsed = df["llm_result"].apply(_parse_dict)
+        primary = schema["primary_field"]
+        parsed = df["llm_result"].apply(lambda v: _parse_dict(v, primary))
         # 有效 = JSON 可解析且主字段非空(对齐 CC V2 E5:SUCCESS 但内容全空的静默失败)。
         # 空主字段并入 parse_error,复用失败行重提与有效率熔断
-        primary = schema["primary_field"]
         empty_mask = parsed.apply(
             lambda o: o is not None and not str(o.get(primary) or "").strip()
         )

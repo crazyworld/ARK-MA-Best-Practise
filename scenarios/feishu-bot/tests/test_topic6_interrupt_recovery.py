@@ -3,7 +3,7 @@
 1. C2 输入缺某平台时只为有数据的平台跑 00 阶段（原：00_clean_titles.py SystemExit）
 2. provider 失败 → 紧随的 retries_exhausted idle 不再消耗 nudge 额度
 3. 模型请求成功后 provider 重试额度重置
-4. Agent 输出 [need_decision] 时不催促、stopped 并把报告发群里
+4. Agent 输出 [need_decision] 时不催促、标记可恢复 failed 并把报告发群里
 5. 用户授权：触发时强制刷新；常驻刷新连续失败后停止重试
 """
 from __future__ import annotations
@@ -63,38 +63,6 @@ class TestC2PlatformSubset:
         """vmpfi 第二轮：微博8/知乎5/抖音4/B站0。"""
         csv = _write_input(tmp_path / "input.csv", ["微博"] * 8 + ["知乎"] * 5 + ["抖音"] * 4)
         assert c2._input_platforms(csv) == ("weibo", "douyin", "zhihu")
-
-    def test_plan_only_runs_present_platforms(self, tmp_path):
-        plan = c2.build_stage_plan(
-            tmp_path / "run", tmp_path / "input.csv", "chat", "emb",
-            platforms=("weibo", "douyin", "zhihu"),
-        )
-        stage00 = dict(plan)["00_platforms"]
-        assert len(stage00) == 3
-        assert all("B站" not in cmd for cmd in stage00)
-        x0 = dict(plan)["x0_merge"][0]
-        assert not any(arg.endswith("/bilibili") for arg in x0)
-        assert sum(arg.endswith(("/weibo", "/douyin", "/zhihu")) for arg in x0) == 3
-
-    def test_log_names_follow_platform_not_position(self, tmp_path, monkeypatch):
-        """跳过 douyin 后，zhihu 的日志不能被错标成 douyin。"""
-        calls = []
-        monkeypatch.setattr(c2, "_run_command", lambda cmd, log: calls.append(log.name))
-        plan = c2.build_stage_plan(
-            tmp_path / "run", tmp_path / "input.csv", "chat", "emb",
-            platforms=("weibo", "zhihu"),
-        )
-        c2._run_stage("00_platforms", dict(plan)["00_platforms"], tmp_path)
-        assert sorted(calls) == ["00_platforms_weibo.log", "00_platforms_zhihu.log"]
-
-    def test_no_platform_raises(self, tmp_path):
-        with pytest.raises(ValueError, match="没有任何已知平台"):
-            c2.build_stage_plan(tmp_path, tmp_path / "i.csv", "c", "e", platforms=())
-
-    # ---- 干净特性 ----
-    def test_default_plan_still_runs_four_platforms(self, tmp_path):
-        plan = c2.build_stage_plan(tmp_path / "run", tmp_path / "input.csv", "chat", "emb")
-        assert len(dict(plan)["00_platforms"]) == 4
 
     def test_all_platforms_present(self, tmp_path):
         csv = _write_input(tmp_path / "input.csv", ["微博", "抖音", "B站", "知乎"])
@@ -309,7 +277,12 @@ class TestNeedDecision:
         result = loop.run_until_complete(runner._handle_idle(job.job_id, [REPORT]))
         assert result is None
         reloaded = store.get_job(job.job_id)
-        assert reloaded.status == pipeline_store.STATUS_STOPPED
+        assert reloaded.status == pipeline_store.STATUS_FAILED
+        assert reloaded.failure_scope == "recoverable"
+        # 提示用户 /continue <选择>，所以该任务必须仍可被 /continue 命中
+        assert store.get_resumable_job_by_session_key(
+            job.chat_id, job.thread_id, job.user_open_id
+        ).job_id == job.job_id
         assert runner._progress[job.job_id].idle_nudge_count == 0
         assert sender.messages and "/continue" in sender.messages[-1]
         assert "[need_decision]" not in sender.messages[-1]

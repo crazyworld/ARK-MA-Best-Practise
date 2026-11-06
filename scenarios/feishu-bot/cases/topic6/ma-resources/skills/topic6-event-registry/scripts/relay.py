@@ -20,14 +20,20 @@ system 从顶层字段挪到 messages[0]{role=system}，
 usage 字段从 input_tokens/output_tokens 换成 prompt_tokens/completion_tokens，
 停止原因从 stop_reason 换成 finish_reason。prompt caching 暂不支持，缓存
 相关 usage 字段保留为 0，避免上层聚合逻辑报错。
+
+2026-11-05 升级到 blueai-canonical-event-registry 3.0.0-rc.14：传输层（bmc-llm-relay
+流式 + 整体时限 watchdog + 多模态 embedding）保持 MA 实现；run_batches 版本绑定缓存
+（C2_CACHE_CONTEXT）、Embedder 向量校验与原子落盘、report 等其余逻辑与 rc.14 对齐。
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
+import socket
 import sys
 import threading
 import time
@@ -36,6 +42,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable, Iterable, Iterator, Sequence
+from c2_runtime import atomic_json, digest, file_hash
 
 # 每百万 token 单价(USD 估算,仅用于成本台账。换模型时在这里补)。
 # doubao-seed-evolving 方舟原价 6/30 RMB per M token,按 7 汇率换算成 USD。
@@ -82,6 +89,30 @@ def price_of(model: str) -> tuple[float, float]:
     return (0.0, 0.0)
 
 
+def _interrupt_response(response: object) -> None:
+    """Interrupt a blocking urllib SSL/SSE read from a watchdog thread."""
+    candidates = [response]
+    current = response
+    for attr in ("fp", "raw", "_sock"):
+        current = getattr(current, attr, None)
+        if current is None:
+            break
+        candidates.append(current)
+    for candidate in reversed(candidates):
+        shutdown = getattr(candidate, "shutdown", None)
+        if callable(shutdown):
+            try:
+                shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        close = getattr(candidate, "close", None)
+        if callable(close):
+            try:
+                close()
+            except OSError:
+                pass
+
+
 class Relay:
     """bmc-llm-relay（OpenAI 兼容）chat/completions 客户端，线程安全累计用量。"""
 
@@ -124,6 +155,7 @@ class Relay:
         finish_reason = ""
         for attempt in range(self.retries):
             try:
+                request_started = time.monotonic()
                 req = urllib.request.Request(
                     api_url(self.base, "chat/completions"),
                     data=body,
@@ -137,33 +169,65 @@ class Relay:
                 usage = {}
                 finish_reason = ""
                 with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                    for raw_line in resp:
-                        line = raw_line.decode("utf-8").strip()
-                        if not line or line.startswith(":"):
-                            continue
-                        if not line.startswith("data:"):
-                            continue
-                        data = line[5:].strip()
-                        if data == "[DONE]":
-                            break
-                        chunk = json.loads(data)
-                        if chunk.get("error"):
-                            raise RuntimeError(
-                                f"方舟流式响应错误: {chunk['error']!r}"
+                    deadline_expired = threading.Event()
+                    remaining = self.timeout - (time.monotonic() - request_started)
+
+                    def abort_at_deadline() -> None:
+                        deadline_expired.set()
+                        _interrupt_response(resp)
+
+                    if remaining <= 0:
+                        abort_at_deadline()
+                        raise TimeoutError(
+                            f"方舟流式响应超过整体时限 {self.timeout}s"
+                        )
+                    watchdog = threading.Timer(remaining, abort_at_deadline)
+                    watchdog.daemon = True
+                    watchdog.start()
+                    try:
+                        for raw_line in resp:
+                            if deadline_expired.is_set():
+                                raise TimeoutError(
+                                    f"方舟流式响应超过整体时限 {self.timeout}s"
+                                )
+                            line = raw_line.decode("utf-8").strip()
+                            if not line or line.startswith(":"):
+                                continue
+                            if not line.startswith("data:"):
+                                continue
+                            data = line[5:].strip()
+                            if data == "[DONE]":
+                                break
+                            chunk = json.loads(data)
+                            if chunk.get("error"):
+                                raise RuntimeError(
+                                    f"方舟流式响应错误: {chunk['error']!r}"
+                                )
+                            chunk_usage = chunk.get("usage")
+                            if isinstance(chunk_usage, dict):
+                                usage = chunk_usage
+                            choices = chunk.get("choices") or []
+                            if not choices:
+                                continue
+                            choice = choices[0]
+                            if choice.get("finish_reason"):
+                                finish_reason = str(choice["finish_reason"])
+                            delta = choice.get("delta") or {}
+                            content = delta.get("content")
+                            if isinstance(content, str):
+                                content_parts.append(content)
+                        if deadline_expired.is_set():
+                            raise TimeoutError(
+                                f"方舟流式响应超过整体时限 {self.timeout}s"
                             )
-                        chunk_usage = chunk.get("usage")
-                        if isinstance(chunk_usage, dict):
-                            usage = chunk_usage
-                        choices = chunk.get("choices") or []
-                        if not choices:
-                            continue
-                        choice = choices[0]
-                        if choice.get("finish_reason"):
-                            finish_reason = str(choice["finish_reason"])
-                        delta = choice.get("delta") or {}
-                        content = delta.get("content")
-                        if isinstance(content, str):
-                            content_parts.append(content)
+                    except (OSError, ValueError):
+                        if deadline_expired.is_set():
+                            raise TimeoutError(
+                                f"方舟流式响应超过整体时限 {self.timeout}s"
+                            )
+                        raise
+                    finally:
+                        watchdog.cancel()
                 break
             except (
                 urllib.error.URLError,
@@ -246,9 +310,19 @@ class Embedder:
         self.misses = 0
         self.usage = {"input_tokens": 0}
         if cache_path and cache_path.exists():
-            blob = json.loads(cache_path.read_text(encoding="utf-8"))
-            if blob.get("model") == model:
-                self.cache = blob.get("vectors", {})
+            try:
+                blob = json.loads(cache_path.read_text(encoding="utf-8"))
+                if blob.get("model") == model:
+                    self.cache = {k: v for k, v in blob.get("vectors", {}).items()
+                                  if self.valid_vector(v)}
+            except (ValueError, AttributeError):
+                self.cache = {}
+
+    @staticmethod
+    def valid_vector(vector):
+        return (isinstance(vector, list) and bool(vector) and any(vector)
+                and all(not isinstance(x, bool) and isinstance(x, (int, float))
+                        and math.isfinite(x) for x in vector))
 
     @staticmethod
     def _key(text: str) -> str:
@@ -318,6 +392,20 @@ class Embedder:
             if len(items) != len(chunk):
                 raise ValueError(
                     f"embedding 返回 {len(items)} 个向量，期望 {len(chunk)} 个")
+            # rc.14: 协议按 index 对应结果，返回顺序不等于输入顺序。MA 兼容：relay 部分路由
+            # 不回 index，全部缺省时按位置对应；只要有一条带 index 就要求全部合法且覆盖。
+            if any("index" in i for i in items):
+                if any(type(i.get("index")) is not int for i in items):
+                    raise ValueError("Embedding response has missing or invalid indices")
+                indexed = {i["index"]: i.get("embedding") for i in items}
+                if set(indexed) != set(range(len(chunk))):
+                    raise ValueError("Embedding response failed coverage validation")
+                vectors = [indexed[n] for n in range(len(chunk))]
+            else:
+                vectors = [i.get("embedding") for i in items]
+            if (any(not self.valid_vector(vec) for vec in vectors)
+                    or len({len(vec) for vec in vectors}) != 1):
+                raise ValueError("Embedding response failed coverage/vector validation")
             with lock:
                 usage = payload.get("usage") or {}
                 self.usage["input_tokens"] += (
@@ -326,8 +414,8 @@ class Embedder:
                     or usage.get("total_tokens")
                     or 0
                 )
-                for text, item in zip(chunk, items):
-                    self.cache[self._key(text)] = item["embedding"]
+                for text, vec in zip(chunk, vectors):
+                    self.cache[self._key(text)] = vec
                 self.misses += len(chunk)
                 done[0] += 1
                 if done[0] % 20 == 0:
@@ -363,9 +451,8 @@ class Embedder:
         if not self.cache_path:
             return
         self.cache_path.parent.mkdir(parents=True, exist_ok=True)
-        self.cache_path.write_text(json.dumps(
-            {"model": self.model, "count": len(self.cache), "vectors": self.cache},
-            ensure_ascii=False), encoding="utf-8")
+        atomic_json(self.cache_path,
+                    {"model": self.model, "count": len(self.cache), "vectors": self.cache})
 
     def cost(self) -> float:
         pin, _ = price_of(self.model)
@@ -441,107 +528,53 @@ def make_batches(items: Sequence[dict], size: int, id_field: str = "record_id",
     return out
 
 
-def _batch_input_hash(batch: dict) -> str:
-    """Ada接入补丁 2026-09-21 (Bug-1): 批次「输入内容」哈希,用于缓存命中判定。
-
-    排除 batch_id(它是缓存文件名/键本身,不是输入内容),其余字段做确定性序列化。
-    这是 ids_hash() 的等价强化版——ids_hash 只认 ids 字段,而各调用方批次结构不一
-    (make_batches 用 ids/items、07 归档用 record_ids、07 重命名用 event),
-    故改用「整批去 batch_id 后的内容哈希」统一覆盖所有调用方,语义上包含 ids_hash。
-    应同步上游。
-    """
-    payload = {k: v for k, v in batch.items() if k != "batch_id"}
-    blob = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
-    return hashlib.sha1(blob.encode("utf-8")).hexdigest()[:16]
-
-
 def run_batches(batches: list[dict], worker: Callable[[dict], dict],
                 raw_dir: Path, concurrency: int = 8,
                 label: str = "batch") -> tuple[list[dict], list[dict]]:
-    """并发执行，以 raw/<batch_id>.json 存在性做断点续跑。返回 (结果, 失败)。
-
-    Ada接入补丁 2026-09-21 (Bug-1 根因修复): 命中判定原本是「位置型」——只看
-    <batch_id>.json 是否存在就复用,不比对输入内容。换了输入(不同 record 集)但
-    batch 名相同 / run-dir 复用时,旧缓存会被当命中而复用 → 数据串味。现额外把每批的
-    输入内容哈希落到 sidecar(raw_dir/_input_hashes/hashes.json),续跑时比对哈希:
-    一致才复用,不一致视为未命中并重跑(覆盖旧缓存与哈希)。sidecar 放子目录,避开
-    x1_presplit_blocks 对 raw/block_archive 的非递归 `*.json` glob,且不改
-    <batch_id>.json 输出文件结构(向后兼容)。旧缓存无 sidecar 记录时按旧语义信任
-    并回填哈希(不强制整轮重跑,避免误伤在途历史 run);新写入一律带哈希。应同步上游。
-    """
+    """Version-bound, atomic batch cache. Invalid/unversioned cache never hits."""
     raw_dir.mkdir(parents=True, exist_ok=True)
-    hash_dir = raw_dir / "_input_hashes"
-    hash_path = hash_dir / "hashes.json"
-    stored_hashes: dict[str, str] = {}
-    if hash_path.exists():
-        try:
-            stored_hashes = json.loads(hash_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            stored_hashes = {}
-    hash_lock = threading.Lock()
-
-    def _persist_hashes() -> None:
-        hash_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            hash_path.write_text(
-                json.dumps(stored_hashes, ensure_ascii=False), encoding="utf-8")
-        except OSError:
-            pass
-
-    results: list[dict] = []
-    failures: list[dict] = []
-    todo = []
-    backfilled = False
+    context = os.environ.get("C2_CACHE_CONTEXT")
+    if not context:
+        # Conservative direct-script identity. Unified runner passes its immutable
+        # input/config/code digest, allowing safe reuse across attempt directories.
+        script_dir = Path(__file__).resolve().parent
+        root = raw_dir.parent.parent
+        context = digest({"code": {p.name: file_hash(p) for p in script_dir.glob("*.py")},
+                          "argv": sys.argv[1:],
+                          "work": {p.name: file_hash(p) for p in (root / "work").glob("*") if p.is_file()}})
+    if concurrency < 1 or len({b["batch_id"] for b in batches}) != len(batches):
+        raise ValueError("Invalid concurrency or duplicate batch IDs")
+    results, failures, todo = {}, [], []
+    def key(batch):
+        return digest({"context": context, "batch": batch})
     for batch in batches:
-        cached = raw_dir / f"{batch['batch_id']}.json"
-        if cached.exists():
-            cur_hash = _batch_input_hash(batch)
-            prev = stored_hashes.get(batch["batch_id"])
-            if prev is None:
-                # 补丁前写入的旧缓存: 无哈希记录,按旧语义信任并回填
-                stored_hashes[batch["batch_id"]] = cur_hash
-                backfilled = True
-                results.append(json.loads(cached.read_text(encoding="utf-8")))
-            elif prev == cur_hash:
-                results.append(json.loads(cached.read_text(encoding="utf-8")))
-            else:
-                print(f"[{label}] {batch['batch_id']} 输入内容变化"
-                      f"（缓存哈希 {prev} → 当前 {cur_hash}），缓存失效,重跑",
-                      flush=True)
-                todo.append(batch)
-        else:
-            todo.append(batch)
-    if backfilled:
-        _persist_hashes()
-    done = len(results)
-    print(f"[{label}] 共 {len(batches)} 批，已完成 {done}，待跑 {len(todo)}", flush=True)
-    if not todo:
-        return results, failures
-
-    lock = threading.Lock()
-    with ThreadPoolExecutor(max_workers=concurrency) as pool:
-        futures = {pool.submit(worker, b): b for b in todo}
-        for fut in as_completed(futures):
-            batch = futures[fut]
-            try:
-                payload = fut.result()
-            except Exception as exc:  # 单批失败不拖垮整轮，记录后继续
-                failures.append({"batch_id": batch["batch_id"], "error": repr(exc)})
-                print(f"[{label}] {batch['batch_id']} 失败：{exc!r}", flush=True)
+        bid = batch["batch_id"]
+        path = raw_dir / (bid + ".json")
+        meta = raw_dir / "_input_hashes" / (bid + ".json")
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            receipt = json.loads(meta.read_text(encoding="utf-8"))
+            if receipt["input_hash"] == key(batch) and receipt["output_hash"] == digest(payload):
+                results[bid] = payload
                 continue
-            (raw_dir / f"{batch['batch_id']}.json").write_text(
-                json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-            # Ada接入补丁 2026-09-21 (Bug-1): 输出落盘的同时记录该批输入哈希,
-            # 供后续续跑比对(与逐批写 <batch_id>.json 同频,保证崩溃后进度一致)。
-            with hash_lock:
-                stored_hashes[batch["batch_id"]] = _batch_input_hash(batch)
-                _persist_hashes()
-            with lock:
-                results.append(payload)
-                progress = len(results)
-            print(f"[{label}] {batch['batch_id']} 完成 ({progress}/{len(batches)})",
-                  flush=True)
-    return results, failures
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+        todo.append(batch)
+    print(f"[{label}] {len(batches)} batches, {len(results)} cached, {len(todo)} pending", flush=True)
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        jobs = {pool.submit(worker, b): b for b in todo}
+        for future in as_completed(jobs):
+            batch = jobs[future]; bid = batch["batch_id"]
+            try:
+                payload = future.result()
+                atomic_json(raw_dir / (bid + ".json"), payload)
+                atomic_json(raw_dir / "_input_hashes" / (bid + ".json"),
+                            {"input_hash": key(batch), "output_hash": digest(payload)})
+                results[bid] = payload
+            except Exception as exc:
+                failures.append({"batch_id": bid, "error_type": type(exc).__name__})
+                print(f"[{label}] {bid} failed: {type(exc).__name__}", flush=True)
+    return [results[b["batch_id"]] for b in batches if b["batch_id"] in results], failures
 
 
 def read_jsonl(path: Path) -> Iterator[dict]:

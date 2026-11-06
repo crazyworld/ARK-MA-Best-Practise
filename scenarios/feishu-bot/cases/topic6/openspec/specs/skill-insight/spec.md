@@ -8,7 +8,7 @@ Skill `topic6-insight`（Phase E + F）：从标注宽表生成 E1~E4 四个周�
 ## Requirements
 
 ### Requirement: Phase E 单入口
-`pipeline_e.py --project-dir --mode {demo|skip_sampling} [--publish-date] [--model 默认 Doubao-Seed-Evolving] [--version N] [--skip-data-prep] [--data-run-id] [--sections e1,…] [--max-workers 6] [--max-attempts 5]` SHALL 一次完成：`01_统计/run_stats.py` 数据预处理 → 进程内以有限并发（默认 6，等于 E 阶段峰值路数）流式调用 E1~E4。`--mode full` MUST 被拒绝（500 条仅用于校准）。非 demo 且 run_config 存在时，`status.hc2_passed != true` MUST 以"HC2 未通过前禁止进入 Phase E"退出 1。LLM 凭据只读 bmc-llm-relay 的 `LLM_RELAY_BASE_URL`/`LLM_RELAY_API_KEY`，缺失时抛 `EnvironmentError`，MUST NOT 回退 `ARK_*`/`OPENAI_*`；成本台账 platform 记 `bmc-llm-relay`。
+`pipeline_e.py --project-dir --mode {demo|skip_sampling} [--publish-date] [--model 默认 DeepSeek-V4.1-Flash] [--version N] [--skip-data-prep] [--data-run-id] [--sections e1,…] [--max-workers 6] [--max-attempts 5]` SHALL 一次完成：`01_统计/run_stats.py` 数据预处理 → 进程内以有限并发（默认 6，等于 E 阶段峰值路数）流式调用 E1~E4。`--mode full` MUST 被拒绝（500 条仅用于校准）。非 demo 且 run_config 存在时，`status.hc2_passed != true` MUST 以"HC2 未通过前禁止进入 Phase E"退出 1。LLM 凭据只读 bmc-llm-relay 的 `LLM_RELAY_BASE_URL`/`LLM_RELAY_API_KEY`，缺失时抛 `EnvironmentError`，MUST NOT 回退 `ARK_*`/`OPENAI_*`；成本台账 platform 记 `bmc-llm-relay`。
 
 #### Scenario: full 模式
 - **WHEN** `--mode full`

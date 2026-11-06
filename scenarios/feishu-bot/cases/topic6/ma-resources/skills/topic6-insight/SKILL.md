@@ -53,7 +53,7 @@ python /mnt/skills/topic6-insight/scripts/pipeline_e.py \
   --project-dir /workspace/Projects/W35_20260824-20260830 \
   --mode skip_sampling \
   --publish-date 2026-08-31 \
-  --model Doubao-Seed-Evolving
+  --model DeepSeek-V4.1-Flash
 ```
 
 该入口一次完成数据预处理，并在进程内以默认最大并发 2 流式调用 E1~E4。每次调用
@@ -74,7 +74,7 @@ E3/E4 为分步路由（参照 CC V2.0），所有子调用共用同一个并发
 关键参数:
 - `--project-dir`: 项目目录(绝对路径,或相对 `/workspace`)
 - `--publish-date`: 报告发布日,影响 E2 节点窗口判断
-- `--model`: bmc-llm-relay 模型 ID(默认 `Doubao-Seed-Evolving`,大小写与网关 `/v1/models` 一致)
+- `--model`: bmc-llm-relay 模型 ID(默认 `DeepSeek-V4.1-Flash`,大小写与网关 `/v1/models` 一致)
 - `--version N`: 强制指定洞察版本(默认自增)
 - `--sections e1,e2`: 只跑指定版块
 - `--skip-data-prep`: 跳过统计脚本,从上一轮复制数据

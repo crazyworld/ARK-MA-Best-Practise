@@ -282,7 +282,7 @@ def parse_hot(value: object) -> tuple[float | None, str]:
 
 
 def load_records(path: Path, id_col: str, title_col: str, heat_col: str | None,
-                 platform_col: str, platform: str) -> list[dict]:
+                 platform_col: str, platform: str, preserve_title: bool = False) -> list[dict]:
     with path.open(encoding="utf-8-sig", newline="") as handle:
         rows = list(csv.DictReader(handle))
     if not rows:
@@ -297,8 +297,8 @@ def load_records(path: Path, id_col: str, title_col: str, heat_col: str | None,
     bad_heat: list[str] = []
     for row in rows:
         rid = str(row[id_col]).strip()
-        title = str(row[title_col]).strip()
-        if not rid or not title:
+        title = str(row[title_col]) if preserve_title else str(row[title_col]).strip()
+        if not rid or not title.strip():
             continue
         row_platform = str(row.get(platform_col, "")).strip() if has_platform else platform
         if has_platform and ALIASES.get(row_platform.lower(), row_platform) != platform:

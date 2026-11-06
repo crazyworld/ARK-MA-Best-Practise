@@ -72,7 +72,7 @@ C3_SOURCE_COLS = ["提取节点", "是否节日营销", "是否窗口期内", "c
 VALID_PASS = 0.92
 VALID_FAIL = 0.80
 C2_COVERAGE_MIN = 0.50          # 营销可用行中「事件簇名」非空率
-USABLE_BASELINE = (0.55, 0.58)  # C0 是否营销可用=是 的历史区间
+USABLE_BASELINE = (0.37, 0.41)  # C0 是否营销可用=是 的基线(DeepSeek-V4-Flash + C0 v13, W43 全量 37.52%/小样本 41%)
 USABLE_TOLERANCE = 0.05         # 偏离基线超过该值才提示人工复核
 PLATFORM_MIN_SHARE = 0.05       # 单平台行数占比低于该值视为「平台行数异常偏少」
 CLUSTER_MAX_SHARE = 0.10        # 最大事件簇占营销可用行比例超过该值视为「聚类规模极端」
@@ -197,6 +197,9 @@ def quality_report(
     else:
         checks.append(_check("C2 事件簇非空率", c2_coverage, f"> {C2_COVERAGE_MIN:.0%}",
                              "pass" if c2_coverage > C2_COVERAGE_MIN else "warn"))
+    if not missing.get("c0"):
+        # C0 未决行(解析失败/缺失,3 轮重提后仍未解决)已送入 R1~R5/C2,需 HC1 人工判定是否营销可用
+        checks.append(_check("C0 未决行", c0_null, "= 0", "warn" if c0_null else "pass"))
     low, high = USABLE_BASELINE
     if usable_ratio is not None:
         off = usable_ratio < low - USABLE_TOLERANCE or usable_ratio > high + USABLE_TOLERANCE
@@ -221,6 +224,9 @@ def quality_report(
             warnings.append(f"{task} 整批缺失:按缺失继续,对应版块无候选数据")
         elif c["item"] == "平台行数分布":
             warnings.append(f"平台行数异常偏少: {thin}")
+        elif c["item"] == "C0 未决行":
+            warnings.append(f"C0 未决 {c0_null} 行(解析失败/缺失):已送入 R1~R5/C2,"
+                            "请在宽表中人工判定「是否营销可用」")
         elif c["item"] == "最大事件簇规模":
             warnings.append(f"聚类规模极端: 「{max_cluster_name}」{max_cluster} 行")
         else:

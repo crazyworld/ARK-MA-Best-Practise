@@ -1,0 +1,26 @@
+# Topic5 case-local ignores (repo-root .gitignore already blocks assets_from_customer/ and *.db)
+
+# 运行期事实（引擎落盘：tasks/{task}/runs/{run}/ 下的 run.json/artifacts/attempts）
+ma-workspaces/
+**/ma-workspaces/
+
+# 技能私密凭据与本地配置（后续波次移植 datahub/ssjh/cos/cover 时带入）
+skills/**/.env
+skills/**/config.json
+!skills/**/config.example.json
+
+# 技能本地产出与缓存
+skills/**/Outputs/
+tools/out/*.zip
+tools/out/*.sha256
+
+# 所有 Topic5 字体二进制仅放仓库外缓存，由部署脚本注入临时 Skill 包。
+*.otf
+*.ttf
+*.ttc
+*.woff
+*.woff2
+
+# Python 缓存
+**/__pycache__/
+*.pyc

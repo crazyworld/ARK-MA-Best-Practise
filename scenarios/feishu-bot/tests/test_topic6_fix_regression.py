@@ -504,19 +504,6 @@ class TestP14ValidatePayload:
         })
         assert result is None
 
-    def test_hc1_fallback_skips_wide_table_check(self):
-        """__fallback__=True 的兜底 payload 跳过 wide_table_path 校验。"""
-        result = validate_hc_payload({
-            "hc": "HC1", "__fallback__": True, "mode": "full"
-        })
-        assert result is None  # 不 reject
-
-    def test_hc2_fallback_also_skips(self):
-        result = validate_hc_payload({
-            "hc": "HC2", "__fallback__": True
-        })
-        assert result is None
-
     def test_hc2_normal_missing_wide_table_rejected(self):
         result = validate_hc_payload({"hc": "HC2"})
         assert result is not None
@@ -567,11 +554,6 @@ class TestCleanness:
         result = extract_hc_payload(text)
         assert result is not None
         assert result["hc"] == "HC1"
-
-    def test_fallback_intent_detection_still_works(self):
-        detect_hc_intent = runner_mod.detect_hc_intent
-        assert detect_hc_intent("HC1 等用户确认") == "HC1"
-        assert detect_hc_intent("无关文本") is None
 
     def test_original_hc3_validation_preserved(self):
         """HC3 缺 URL 的原有校验不受新增逻辑影响。"""

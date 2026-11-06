@@ -66,6 +66,38 @@ def test_parse_dict_braces_inside_strings(dh):
     assert dh._parse_dict('```json\n{"a": 1}\n```\n附注') == {"a": 1}
 
 
+_C0_HEAD = ('{"商业实体":null,"热点驱动词":"吃蟹","行业归属":"食品零食","营销触发方式":"无主体潜在机会",'
+            '"营销维度":"品类/行业相关","平台原生形式":"否","不可用原因":"无","是否营销可用":"是",'
+            '"判断说明":"食品零食｜南北吃蟹差异讨论"')
+
+
+@pytest.mark.parametrize("raw", [
+    _C0_HEAD,                 # W43 实测:缺结尾 }
+    _C0_HEAD + '}"',          # 多出 "
+    _C0_HEAD + '}]',          # 多出 ]
+    _C0_HEAD[:-1],            # 判断说明字符串未闭合
+])
+def test_parse_dict_repairs_truncated_tail_with_primary(dh, raw):
+    obj = dh._parse_dict(raw, "是否营销可用")
+    assert obj["是否营销可用"] == "是" and obj["行业归属"] == "食品零食"
+
+
+def test_parse_dict_tail_repair_requires_primary_and_valid_value(dh):
+    assert dh._parse_dict(_C0_HEAD) is None                       # 未传 primary 不补全
+    half = '{"商业实体":null,"热点驱动词":"吃蟹","是否营销可用":"'   # 主字段被截断
+    assert dh._parse_dict(half, "是否营销可用") is None
+    assert dh._parse_dict('{"是否营销可用":"可能","判断说明":"x"', "是否营销可用") is None
+    assert dh._parse_dict("模型拒绝回答", "是否营销可用") is None
+
+
+def test_postprocess_counts_repaired_rows_as_valid(dh):
+    df = pd.DataFrame({"row_id": ["T1", "T2"], "llm_result": [_C0_HEAD, None]})
+    out, stats = dh._postprocess(df, "c0")
+    assert out["c0_parse_error"].tolist() == [0, 1]
+    assert out.loc[0, "c0_是否营销可用"] == "是"
+    assert stats["valid"] == 1
+
+
 def _setup_retry(tmp_path, dh, monkeypatch, retry_rows, *, fail=False):
     upload = tmp_path / "input.xlsx"
     pd.DataFrame({"row_id": ["T1", "T2", "T3"], "title": ["a", "b", "c"]}).to_excel(upload, index=False)

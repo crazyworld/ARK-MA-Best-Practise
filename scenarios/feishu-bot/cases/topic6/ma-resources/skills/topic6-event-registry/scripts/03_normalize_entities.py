@@ -12,6 +12,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from c2_runtime import cached_request, digest, file_hash, unique_ids
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from relay import (Relay, make_batches, parse_json, read_jsonl, report,
@@ -120,12 +121,17 @@ def main() -> int:
     ap.add_argument("--model", default="claude-sonnet-4-6")
     ap.add_argument("--batch-size", type=int, default=50)
     ap.add_argument("--max-tokens", type=int, default=16000)
+    ap.add_argument("--model-revision", default=None,
+                    help="Pinned deployment revision for cache identity; defaults to model label")
     args = ap.parse_args()
 
     src = args.run_dir / "work" / "frames.jsonl"
     if not src.exists():
         raise SystemExit(f"缺少 {src}，先跑 02_extract_frames.py")
     frames = list(read_jsonl(src))
+    unique_ids(frames)
+    if args.batch_size < 1:
+        raise SystemExit("batch-size must be positive")
     names = collect_names(frames)
     print(f"共 {len(names)} 个待归一实体名，来自 {len(frames)} 条 Frame")
 
@@ -133,20 +139,29 @@ def main() -> int:
     registry = Registry()
     batches = make_batches(names, args.batch_size, id_field="name", tag="EN")
     raw_dir = args.run_dir / "raw" / "entities"
+    cache_hits = 0
+    missing_names = 0
 
     # 注册表是逐批累积的，必须串行——本批的判定要看到前面批次建立的实体
     for batch in batches:
-        cached = raw_dir / f"{batch['batch_id']}.json"
-        if cached.exists():
-            payload = parse_json(cached.read_text(encoding="utf-8"))
-        else:
-            lines = "\n".join(
-                f"{e['name']}\t{e['type']}\t出现={len(e['record_ids'])}次"
-                for e in batch["items"])
-            payload = relay.call_json(USER_TMPL.format(registry=registry.render(),
-                                                       names=lines))
-            raw_dir.mkdir(parents=True, exist_ok=True)
-            cached.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        lines = "\n".join(
+            f"{e['name']}\t{e['type']}\t出现={len(e['record_ids'])}次"
+            for e in batch["items"])
+        user_text = USER_TMPL.format(registry=registry.render(), names=lines)
+        request = {"schema": "c2-entity-request/1", "model": args.model,
+                   "revision": args.model_revision or args.model,
+                   "endpoint_hash": digest(relay.base), "system": SYSTEM,
+                   "user": user_text, "max_tokens": args.max_tokens,
+                   "temperature": relay.temperature,
+                   "implementation_hash": file_hash(Path(__file__)),
+                   "registry": registry.entities, "batch": batch}
+        payload, hit = cached_request(raw_dir, request, lambda: relay.call_json(user_text))
+        cache_hits += hit
+        returned = [r.get("name") for r in payload.get("resolutions", [])]
+        expected = [r["name"] for r in batch["items"]]
+        if sorted(returned) != sorted(expected):
+            # Preserve legacy local fallback but let a later attempt repair omissions.
+            (raw_dir / (digest(request) + ".json")).unlink(missing_ok=True)
         by_name = {e["name"]: e for e in batch["items"]}
         handled: set[str] = set()
         for row in payload.get("resolutions", []):
@@ -169,6 +184,7 @@ def main() -> int:
         # 漏返的自成实体，绝不丢
         for name in by_name:
             if name not in handled:
+                missing_names += 1
                 eid = registry.add(name, by_name[name]["type"], None)
                 registry.alias(eid, name)
                 registry.entities[eid]["source_records"].extend(by_name[name]["record_ids"])
@@ -206,7 +222,10 @@ def main() -> int:
     print(f"实体 {len(registry.entities)} 个，其中有父实体 {linked} 个；"
           f"未解析 actor 引用 {unresolved} 处")
     report(relay, "03_normalize_entities", args.run_dir / "run_manifest.json",
-           {"entities": len(registry.entities), "linked": linked})
+           {"entities": len(registry.entities), "linked": linked,
+            "input_sha256": file_hash(src), "cache_hits": cache_hits,
+            "missing_names": missing_names, "unresolved_actors": unresolved,
+            "quality_status": "DEGRADED" if missing_names or unresolved else "COMPLETE"})
     return 0
 
 

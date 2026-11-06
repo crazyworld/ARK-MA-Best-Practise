@@ -1,0 +1,105 @@
+---
+name: pipeline-orchestrator
+description: Run the Topic5 durable report pipeline. Use for starting, resuming and inspecting Topic5 runs, human gates, quality checks and native Feishu delivery.
+---
+
+# pipeline-orchestrator
+
+Topic5 复盘报告流水线的确定性执行引擎。读取包内 `contracts/pipeline.v0.2.yaml`
+（29 节点 + 治理层），按节点 `handler` 驱动执行、在人工关卡暂停、支持续跑、受限换源与状态查看。
+该文件由打包脚本从源码树唯一权威契约注入。归属 **Topic5 专属**，由 coordinator 身份持有。
+
+## 文件
+
+| 文件 | 职责 |
+|---|---|
+| `engine.py` | DAG 加载 + 节点调度 + 续跑（`Dag.load` / `create_run` / `run` / `resume`）；含幂等执行层（render→ledger 重放/对账） |
+| `handlers.py` | 各业务节点 handler、质检返修及原生飞书交付 |
+| `report_contract.py` / `REPORT_CONTRACT.md` | 固定报告模块、数据说明、PGC/UGC Top10、观点与代表内容、正确图片装配及写作规范 |
+| `validator_scan.py` | 打包时注入独立Validator权威扫描器，供协调器内N19使用同一规则预检 |
+| `feishu.py` | N20 原生文档发布、表格扩容、图片回填及回读校验 |
+| `excel_source.py` | 按飞书附件引用下载、校验并缓存用户活动明细 `.xlsx`，兼容旧挂载输入，映射为 n07 `clean_campaign` 行结构 |
+| `state.py` | Run 状态持久化（`RunState`，落 run 目录 `attempts/artifacts/...`） |
+| `run_pipeline.py` | CLI 入口 |
+| `contracts/pipeline.v0.2.yaml` | 部署包内 DAG；打包时从 `ma-resources/io/contracts/` 注入 |
+| `publish_spec.py` | 发布/飞书布局规格 |
+| `acceptance.py` | 验收检查清单 |
+| `tests/` | 引擎/handler/state/幂等 单测 |
+
+## 用法
+
+```bash
+cd /mnt/skills/pipeline-orchestrator
+# 启动一条 run
+python run_pipeline.py start  --dag contracts/pipeline.v0.2.yaml \
+  --workspace <ma-workspaces/projects/{pid}> --task <task_id> [--run <run_id>]
+# 遇人工关卡暂停后续跑（默认用占位人工产物）
+python run_pipeline.py resume --dag contracts/pipeline.v0.2.yaml \
+  --workspace <ws> --task <task_id> --run <run_id>
+# 仅 n04 的 excel_source 校验失败后，把修正版源写入新版 confirmed_plan
+python run_pipeline.py replace-source --workspace <ws> \
+  --task <task_id> --run <run_id> \
+  --source-name <display.xlsx> --source-mount <mounted-basename.xlsx>
+# 显式重试当前失败节点
+python run_pipeline.py retry --dag contracts/pipeline.v0.2.yaml \
+  --workspace <ws> --task <task_id> --run <run_id>
+# 查看状态
+python run_pipeline.py status --workspace <ws> --task <task_id> --run <run_id>
+```
+
+遇 `mode: human` 节点（G1/G2/G3/G4 及操作级 HC）会 `awaiting_human` 暂停并打印待办；`resume` 继续。
+`replace-source` 不直接重试；它只在当前 Run 为 `failed`、当前失败节点为 `n04_run_init`
+且失败详情包含 `excel_source:` 时更新源引用并生成新版 `confirmed_plan`。随后必须显式执行
+`retry`。其他节点或其他失败原因禁止换源。
+
+## 依赖
+
+- Python 3.9+；`PyYAML`（解析 contract）、`openpyxl`（读取用户上传的活动明细 Excel）。
+- 运行期事实写入 `--workspace` 指向的 `tasks/{task_id}/runs/{run_id}/`，**不写回本资源目录**。
+- G1 默认由 Gateway 传递完整 JSON，兼容旧的 Files 需求文件引用。G2 后 Gateway 校验
+  飞书 Excel 并传递 `source_file`（`transport=feishu_resource`、`message_id`、
+  `file_key`、`sha256`、`name`、`mount_path`），桥接层完整写入 `confirmed_plan`。
+  n04/n07 的读取器用环境中的飞书凭据直接下载原附件，SHA256 校验通过后原子缓存至
+  `/workspace/topic5_repro_inputs/<mount_path>`，续跑校验并复用缓存。下载或哈希校验失败则停止。
+  不需要 Agent 拼下载代码，也不经过 Ark Files API。凭据只从环境读取，不写入源引用。
+  旧任务缺少 `transport` 时仍从 `/mnt/session/uploads/<mount_path>` 读取。
+  `TOPIC5_SESSION_UPLOADS_DIR` 可显式覆盖缓存/挂载目录。
+
+## 幂等执行层（已实现）
+
+`engine.py` 已消费节点的 `idempotency` 字段：`side_effect != none` 的节点执行前
+`render_idempotency` 渲染幂等键，命中 `ledger` 则跳过执行、复用已记产物（`idempotent_replay`）；
+执行成功后登记键→产物（`idempotent_commit`）；执行抛错时先查 `ctx["reconcile"]` 外部回执对账
+（reconcile-before-retry），命中则视为成功推进。ledger/frontier/counters 随 `run.json` 持久化，
+冷进程续跑（`RunState.load`）忠实恢复。覆盖见 `tests/test_idempotency.py`、`tests/test_crossprocess_resume.py`。
+
+> 历史备注：早期 STATUS/SKILL 文档曾称“幂等未实现、接真前须先补执行层”——该说法已过时。
+> 实际执行层随 engine 一并交付，曾出现的 7 个测试失败根因是 `tests/_util.py::make_state`
+> 未 seed `frontier`（engine 靠 `while st.frontier` 驱动），已修复。
+
+## N20 飞书发布约束与自动纠正
+
+- 调用 `feishu.create_delivery` 发布原生文档；保持报告内容、表格数据和质检版本一致，
+  不得为了绕过 API 限制删行、截断表格或退回 Markdown 表格。
+- `POST /docx/v1/documents/{document_id}/blocks/{block_id}/children` 创建原生表格时，
+  `row_size` 和 `column_size` **均不得超过 9**。这只是创建接口的限制，不是最终表格的尺寸上限。
+  2026-10-27 实测 11×7 表格返回 HTTP 400 / `1770001 invalid param`；9×7 成功。
+- 发布器自动将初始表格压到至多 9×9，再用 `PATCH blocks/{table_block_id}` 的
+  `insert_table_column.column_index=-1` / `insert_table_row.row_index=-1` 补足列和行。
+  每次扩容携带稳定 `client_token`；扩容前后读取实际尺寸，核对单元格数再写入全部数据。
+  此适配由确定性代码执行，Coordinator 不临时重写报告。
+- 若发布失败，保留接口路径、HTTP 状态、飞书 `code/msg/log_id`；不得输出 token、请求头
+  或凭据正文。参数错误应先诊断并修正，禁止用相同非法请求反复重试或从 G1 重启。
+- 排查时读到的旧 `start.log` / `HC_PENDING` 只代表历史，不得当作当前关卡回报；
+  当前 `run.json` 终态与失败回执优先。不得把 N20 发布失败改成人工需求审核。
+- N10 确认必须绑定 `opinion_candidates` 与 `ugc_category_list` 版本。Gateway 保存确认
+  快照并在后续卡片中持续展示；不要重新生成已确认的标签。
+- 新任务默认动态UGC类别，触发标签人工确认属预期行为。
+- 品牌词云从stats_bundle.brand读取，活动词云从wordcloud_data读取；各活动/维度/平台独立。n14调用wordcloud-insight v0.2.6生成透明/白底PNG及render.json；n15依赖chart_urls，通读全词表、抽样全文阅读已有原帖并按需补读，生成topics.json和schema2 post-review.json后compose。报告默认引用透明图wordcloud.png，保留完整双图与审计文件。不可截词、截正文、自动剔词或把未核验产物当作成功；无原帖正常走词频分析，有原帖失败必须阻断。
+- n15 原句由模型选择 `quote_id`、代码复制原字段片段，拒绝未知/跨字段/冲突引用。候选及最终原词必须精确属于当前范围且无重复，证据帖子须已读，未读先补读；错误反馈列明议题、未知词、重复词、未读帖子与允许集合后重试。默认2–4议题、最多5个，低证据可1个，不强制建议。
+- 飞书交付使用原生Callout和50:50 Grid；缺本地图片直接失败，发布后回读Grid/Column/Callout/表格。
+- N16结构或口径不达标时停止，不整篇降级；N19固定模块由report_contract重新装配并按完整扫描器复检。
+
+接口依据：
+[创建块](https://open.feishu.cn/document/server-docs/docs/docs/docx-v1/document-block/create.md)、
+[更新块](https://open.feishu.cn/document/server-docs/docs/docs/docx-v1/document-block/patch.md)。

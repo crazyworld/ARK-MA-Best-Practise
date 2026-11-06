@@ -51,7 +51,10 @@ extract_final_online_url = topic6_runner.extract_final_online_url
 
 
 class _StubArk:
-    pass
+    session_status = "idle"
+
+    async def get_session(self, session_id):
+        return {"id": session_id, "status": self.session_status}
 
 
 class _StubSender:
@@ -315,7 +318,8 @@ def test_idle_without_hc_or_final_url_is_not_marked_done(loop, tmp_path):
     loop.run_until_complete(runner._handle_idle(job.job_id, []))
 
     reloaded = store.get_job(job.job_id)
-    assert reloaded.status == STATUS_STOPPED
+    assert reloaded.status == STATUS_FAILED
+    assert reloaded.failure_scope == "recoverable"
     assert "Phase A" in reloaded.last_error
     assert "中断" in reloaded.last_error
 
@@ -339,7 +343,8 @@ def test_idle_does_not_treat_feishu_doc_url_as_phase_h_result(loop, tmp_path):
     loop.run_until_complete(runner._handle_idle(job.job_id, [message]))
 
     reloaded = store.get_job(job.job_id)
-    assert reloaded.status == STATUS_STOPPED
+    assert reloaded.status == STATUS_FAILED
+    assert reloaded.failure_scope == "recoverable"
     assert reloaded.online_url == ""
 
 
@@ -450,8 +455,8 @@ def test_idle_marks_done_for_miaoda_page_url(loop, tmp_path):
     assert reloaded.online_url == "https://bluefocus.feishu.cn/page/AsbomkwecdDshSaehW5cNisVn7c"
 
 
-def test_get_resumable_job_includes_failed_and_stopped(tmp_path):
-    """get_resumable_job_by_session_key 必须能捞到 failed/stopped(供 /continue 用)。
+def test_get_resumable_job_includes_failed_but_excludes_stopped(tmp_path):
+    """get_resumable_job_by_session_key 只捞可恢复失败，不恢复用户停止的任务。
 
     get_active_job_by_session_key 只认 running/wait_hc,拿不到本地收口成 failed 的 job;
     /continue 的主场景正是“卡片已失败但 Session 可能还 idle”,故需要更宽的查询。
@@ -474,6 +479,9 @@ def test_get_resumable_job_includes_failed_and_stopped(tmp_path):
     assert resumable is not None
     assert resumable.job_id == job.job_id
     assert resumable.status == STATUS_FAILED
+
+    store.mark_stopped(job.job_id, "stopped_by:user")
+    assert store.get_resumable_job_by_session_key("c1", "", "u1") is None
 
     # done 不算可续跑
     store.mark_done(job.job_id, "https://topic6-demo.aiforce.cloud/report")
@@ -518,7 +526,32 @@ def test_continue_job_resumes_failed_session(loop, tmp_path):
     reloaded = store.get_job(job.job_id)
     assert reloaded.status == pipeline_store.STATUS_RUNNING
     assert reloaded.last_error == ""
+    assert reloaded.failure_scope == ""
     assert reloaded.current_phase == "D"
+
+
+@pytest.mark.parametrize("session_status", ["failed", "terminated", "error"])
+def test_continue_job_rejects_terminal_session(loop, tmp_path, session_status):
+    runner, store = _make_runner(tmp_path, loop)
+    runner._ark.session_status = session_status
+    job = store.create_job(
+        chat_id="c1",
+        thread_id="",
+        user_open_id="u1",
+        ma_session_id="session-1",
+        mode="full",
+        project_dir="/workspace/x",
+    )
+    store.mark_failed(job.job_id, "local retryable failure")
+
+    with pytest.raises(Topic6RunnerError, match=f"状态为 {session_status}"):
+        loop.run_until_complete(
+            runner.continue_job(chat_id="c1", thread_id="", user_open_id="u1")
+        )
+
+    reloaded = store.get_job(job.job_id)
+    assert reloaded.status == STATUS_FAILED
+    assert reloaded.failure_scope == "session"
 
 
 def test_continue_job_passes_user_supplied_message(loop, tmp_path):
@@ -843,6 +876,9 @@ def _replay_ark(published: bool):
     class _Ark:
         async def list_session_events(self, _session_id):
             return events
+
+        async def get_session(self, session_id):
+            return {"id": session_id, "status": "idle"}
 
     return _Ark()
 

@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
-"""Run the complete Topic6 C2 cross-platform event archive.
+"""Run the complete Topic6 C2 cross-platform event archive (blueai C2 3.0.0-rc.14).
 
-The cross-platform path is:
-  platform 00 in parallel -> x0 -> merged 01..07 -> x2 -> x3 -> x4
-  -> 08 rank -> 09 commit registry (best-effort, 不阻断 C2 结果)
+Topic6 封装：把 MA 的项目约定（可用子集 xlsx、c2_status.json、run_config、结果 xlsx、
+后台 launcher / wait 检查器、单实例锁、签名续跑）适配到 rc.14 统一入口 run_c2.py：
 
-Stage-level retry(对齐原版 c2_run_all_platforms):每个平台的 00 与 04/07 失败后
-退避重跑 1 次;08/09 失败只记 registry_status,不影响 x4 产出的 C2 结果。
+  input.csv -> run_c2.py run --mode cross-platform --frontend fused --execute
+     F1 融合抽取（00+01+02 一次调用，各平台并行）-> 合流 -> 补证前判定
+     -> E/V 并行（03 实体 ∥ 04 向量）-> 05 召回 -> 06 分块 -> 07 归档（覆盖重试）
+     -> x2 置信度（边界带模型裁定）-> x3 合并/拆分复核 -> 原热点保留
+     -> 09 registry -> x4 七列明细 -> finalize（c2_quality / provenance / metrics）
+  -> 04_标注/C2_事件归档/c2_event_result_r{N}.xlsx（row_id + 一级事件名，契约不变）
 
-Each completed stage is recorded in c2_status.json. Re-running the command
-resumes from the first incomplete stage; the underlying LLM scripts also keep
-their content-addressed caches.
+MA 无人值守：--review-policy record（审核门禁不停，待审项进 c2_quality.review_pending
+交 HC1/HC2）、--degraded-policy accept（07 技术降级不阻断，降级明细进 c2_quality）。
+run_c2.py 自带阶段级 checkpoint 与内容寻址缓存：同一签名重跑直接续跑。
 """
 
 from __future__ import annotations
@@ -25,7 +28,6 @@ import shutil
 import subprocess
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
@@ -47,12 +49,20 @@ PLATFORMS = {
     "bilibili": "B站",
     "zhihu": "知乎",
 }
-RUNNER_SCHEMA_VERSION = 1
-# 阶段内重试次数(不含首次)。04 网络读超时 / 07 偶发空响应截断 / 00 单平台失败
-STAGE_RETRIES = {"00_platforms": 1, "04_embeddings": 1, "07_archive": 1}
-STAGE_RETRY_BACKOFF_SECONDS = 15
-# 失败不阻断 C2 主产物的阶段(Registry 落库是跨窗口增量用的副产物)
-BEST_EFFORT_STAGES = {"08_rank", "09_registry"}
+RUNNER_SCHEMA_VERSION = 2  # 2 = rc.14 统一入口；签名变化会清理 v1 旧产物
+C2_ENGINE = "run_c2.py"
+# 整体重试次数(不含首次)：run_c2 有 checkpoint，重跑只补失败节点，不重复计费已成功批次
+C2_RETRIES = 1
+C2_RETRY_BACKOFF_SECONDS = 15
+# 并发与分块参数（重跑时不要改：checkpoint 与配置哈希绑定，改了会整轮重算）
+C2_MAX_REQUESTS = 8
+C2_TOP_K = 60          # 跨平台合库召回（与 2.2.0 一致）
+C2_CAP = 60
+C2_OUT_BUDGET = 6000
+C2_STAGE_TIMEOUT = 3600
+# 同时跑 F1 的平台数。总并发 = C2_FRONT_WORKERS × C2_MAX_REQUESTS = 16，与 V2 生产
+# (2 平台 × 8) 及 2.2.0 的 00 阶段(4 × 4)实测量级一致，避免 relay 限流。
+C2_FRONT_WORKERS = 2
 DEMO_FAST_SYSTEM = """你是社媒热点事件归并器。给定少量热点标题，把描述同一现实事件的记录归入同一事件簇。
 
 规则：
@@ -70,128 +80,37 @@ def resolve_project_dir(project_dir: str | Path) -> Path:
     return path if path.is_absolute() else Path("/workspace") / path
 
 
-def build_stage_plan(
+def build_c2_command(
     run_dir: Path,
     input_csv: Path,
     chat_model: str,
     embedding_model: str,
     *,
     x2_verdict: str = "sonnet",
-    platforms: tuple[str, ...] | None = None,
     window: str = "",
-) -> list[tuple[str, list[list[str]]]]:
-    """platforms: 本次输入里实际有记录的平台 key（PLATFORMS 的子集，保持原顺序）。
-
-    00_clean_titles.py 遇到无记录的平台会直接 SystemExit；smoke/demo 小样本经筛选后
-    某平台可能为 0 条，因此只为有数据的平台起 00 并合流。None = 四平台全跑。
-    """
-    py = sys.executable
-    script = lambda name: str(SCRIPT_DIR / name)
-    active = {
-        key: label for key, label in PLATFORMS.items()
-        if platforms is None or key in platforms
-    }
-    if not active:
-        raise ValueError("C2 输入没有任何已知平台的记录")
-    platform_00 = [
-        [
-            py,
-            script("00_clean_titles.py"),
-            "--input",
-            str(input_csv),
-            "--run-dir",
-            str(run_dir / platform),
-            "--platform",
-            label,
-            "--heat-col",
-            "heat",
-            "--model",
-            chat_model,
-            "--concurrency",
-            "4",
-        ]
-        for platform, label in active.items()
+) -> list[str]:
+    """组装 rc.14 run_c2.py 的无人值守命令。"""
+    return [
+        sys.executable, str(SCRIPT_DIR / C2_ENGINE), "run",
+        "--input", str(input_csv),
+        "--run-dir", str(run_dir / "engine"),
+        "--mode", "cross-platform",
+        "--frontend", "fused",
+        "--heat-col", "heat",
+        "--window", window or "unspecified",
+        "--chat-model", chat_model,
+        "--embedding-model", embedding_model,
+        "--max-requests", str(C2_MAX_REQUESTS),
+        "--front-workers", str(C2_FRONT_WORKERS),
+        "--top-k", str(C2_TOP_K),
+        "--cap", str(C2_CAP),
+        "--out-budget", str(C2_OUT_BUDGET),
+        "--stage-timeout", str(C2_STAGE_TIMEOUT),
+        "--verdict", "off" if x2_verdict == "off" else x2_verdict,
+        "--review-policy", "record",
+        "--degraded-policy", "accept",
+        "--execute",
     ]
-    merged = run_dir / "merged"
-    stages: list[tuple[str, list[list[str]]]] = [
-        ("00_platforms", platform_00),
-        (
-            "x0_merge",
-            [[
-                py,
-                script("x0_merge_platforms.py"),
-                "--out-dir",
-                str(merged),
-                "--from",
-                *(str(run_dir / platform) for platform in active),
-            ]],
-        ),
-        (
-            "01_eventness",
-            [[py, script("01_eventness.py"), "--run-dir", str(merged),
-              "--model", chat_model, "--batch-size", "60", "--concurrency", "4"]],
-        ),
-        (
-            "02_frames",
-            [[py, script("02_extract_frames.py"), "--run-dir", str(merged),
-              "--model", chat_model, "--batch-size", "40", "--concurrency", "4"]],
-        ),
-        (
-            "03_entities",
-            [[py, script("03_normalize_entities.py"), "--run-dir", str(merged),
-              "--model", chat_model, "--batch-size", "60"]],
-        ),
-        (
-            "04_embeddings",
-            [[py, script("04_build_embeddings.py"), "--run-dir", str(merged),
-              "--model", embedding_model, "--concurrency", "8"]],
-        ),
-        (
-            "05_recall",
-            [[py, script("05_recall_candidates.py"), "--run-dir", str(merged),
-              "--top-k", "60"]],
-        ),
-        (
-            "06_blocks",
-            [[py, script("06_build_blocks.py"), "--run-dir", str(merged),
-              "--cap", "60"]],
-        ),
-        (
-            "07_archive",
-            [[py, script("07_block_archive.py"), "--run-dir", str(merged),
-              "--model", chat_model, "--concurrency", "7"]],
-        ),
-    ]
-    x2_command = [
-        py,
-        script("x2_confidence_filter.py"),
-        "--run-dir",
-        str(merged),
-        "--verdict",
-        x2_verdict,
-    ]
-    if x2_verdict != "off":
-        x2_command.extend(["--model", chat_model])
-    stages.extend([
-        ("x2_confidence", [x2_command]),
-        (
-            "x3_review",
-            [[py, script("x3_review_bidirectional.py"), "--run-dir", str(merged),
-              "--model", chat_model]],
-        ),
-        (
-            "x4_detail",
-            [[py, script("x4_detail_table.py"), "--run-dir", str(merged),
-              "--source", str(input_csv)]],
-        ),
-        ("08_rank", [[py, script("08_rank_events.py"), "--run-dir", str(merged)]]),
-        (
-            "09_registry",
-            [[py, script("09_commit_registry.py"), "--run-dir", str(merged),
-              "--window", window]],
-        ),
-    ])
-    return stages
 
 
 def resolve_window(project: Path) -> str:
@@ -240,11 +159,32 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _engine_digest() -> str:
+    """run_c2 config.json 的全部可变来源指纹：scripts/*.py、references/*、封装参数、模型端点。
+
+    run_c2 发现 config.json 与已有运行目录不一致会直接拒绝（"use a new run directory"）。
+    任一来源变化都必须改变签名，让封装清空 engine/ 重跑，否则同一项目会永久卡在 FAILED。
+    """
+    digest = hashlib.sha256()
+    for path in [*sorted(SCRIPT_DIR.glob("*.py")),
+                 *sorted(p for p in (SCRIPT_DIR.parent / "references").rglob("*") if p.is_file())]:
+        digest.update(path.relative_to(SCRIPT_DIR.parent).as_posix().encode("utf-8"))
+        digest.update(path.read_bytes())
+    digest.update(json.dumps([C2_MAX_REQUESTS, C2_FRONT_WORKERS, C2_TOP_K, C2_CAP,
+                              C2_OUT_BUDGET, C2_STAGE_TIMEOUT]).encode("utf-8"))
+    for name in ("LLM_RELAY_BASE_URL", "EMBEDDING_BASE_URL"):
+        digest.update(os.environ.get(name, "").encode("utf-8"))
+    return digest.hexdigest()
+
+
 def _run_signature(
     input_sha256: str,
     chat_model: str,
     embedding_model: str,
     x2_verdict: str,
+    *,
+    window: str = "",
+    engine_digest: str = "",
 ) -> str:
     payload = {
         "schema_version": RUNNER_SCHEMA_VERSION,
@@ -252,6 +192,8 @@ def _run_signature(
         "chat_model": chat_model,
         "embedding_model": embedding_model,
         "x2_verdict": x2_verdict,
+        "window": window,
+        "engine_digest": engine_digest,
     }
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True).encode("utf-8")
@@ -259,7 +201,8 @@ def _run_signature(
 
 
 def _reset_stage_outputs(run_dir: Path, result_path: Path) -> None:
-    for name in (*PLATFORMS, "merged", "logs"):
+    # PLATFORMS/merged 为 2.2.0 遗留目录，升级后首跑一并清理
+    for name in (*PLATFORMS, "merged", "engine", "logs"):
         path = run_dir / name
         if path.is_dir():
             shutil.rmtree(path)
@@ -292,6 +235,14 @@ def _prepare_input(source: Path, destination: Path) -> int:
             )
         selected[target] = frame[source_col]
     output = pd.DataFrame(selected)
+    # run_c2 遇空标题整轮失败；空标题行无法归档，剔出 C2 输入（宽表合并时事件簇名留空）
+    blank = output["title"].isna() | (output["title"].astype(str).str.strip() == "")
+    if blank.any():
+        print(f"[c2] 跳过空标题 {int(blank.sum())} 行: "
+              f"{output.loc[blank, 'record_id'].astype(str).tolist()[:20]}", flush=True)
+        output = output.loc[~blank].reset_index(drop=True)
+    if output.empty:
+        raise ValueError("C2 input has no rows with a non-empty title")
     if output["record_id"].astype(str).duplicated().any():
         raise ValueError("C2 input record_id must be unique")
     unknown = sorted(set(output["platform"].dropna()) - set(PLATFORMS.values()))
@@ -312,20 +263,8 @@ def _run_command(command: list[str], log_path: Path) -> None:
         subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, check=True)
 
 
-def _command_platform(command: list[str], fallback: str) -> str:
-    """日志名取命令的 --run-dir 末级目录（平台 key）；跳过空平台后不能再按位置对应。"""
-    if "--run-dir" in command:
-        index = command.index("--run-dir") + 1
-        if index < len(command):
-            return Path(command[index]).name
-    return fallback
-
-
 def _input_platforms(input_csv: Path) -> tuple[str, ...]:
-    """input.csv 里实际有记录的平台 key，按 PLATFORMS 顺序。
-
-    _prepare_input 已保证 platform 列存在且取值合法；读不出列时退回四平台全跑（原行为）。
-    """
+    """input.csv 里实际有记录的平台 key，按 PLATFORMS 顺序（仅用于 c2_status 展示）。"""
     try:
         frame = pd.read_csv(input_csv, usecols=["platform"])
     except ValueError:
@@ -334,47 +273,83 @@ def _input_platforms(input_csv: Path) -> tuple[str, ...]:
     return tuple(key for key, label in PLATFORMS.items() if label in labels)
 
 
-def _run_command_with_retry(command: list[str], log_path: Path, retries: int) -> None:
-    for attempt in range(retries + 1):
+def _engine_result(run_dir: Path) -> dict:
+    path = run_dir / "engine" / "result.json"
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _engine_cost(run_dir: Path) -> dict:
+    """汇总 run_c2 成本台账（engine/out/c2_run_metrics.json 的 cost_ledger）。"""
+    path = run_dir / "engine" / "out" / "c2_run_metrics.json"
+    try:
+        ledger = json.loads(path.read_text(encoding="utf-8")).get("cost_ledger") or []
+    except (OSError, json.JSONDecodeError, AttributeError):
+        ledger = []
+    total = {"input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0, "calls": 0}
+    for entry in ledger:
+        if not isinstance(entry, dict):
+            continue
+        for key in total:
+            value = entry.get(key) or 0
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                total[key] += value
+    total["cost_usd"] = round(total["cost_usd"], 6)
+    return total
+
+
+def _engine_progress(run_dir: Path) -> dict:
+    """从 run_c2 的 stage receipts 汇总当前节点与各节点耗时（供 c2_status 展示）。"""
+    stages = run_dir / "engine" / "stages"
+    timings: dict[str, float] = {}
+    current, latest = "", 0.0
+    if stages.is_dir():
+        for receipt in stages.glob("*/*/receipt.json"):
+            try:
+                data = json.loads(receipt.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            name = data.get("node") or receipt.parent.parent.name
+            if data.get("status") == "COMPLETE" and data.get("wall_seconds") is not None:
+                timings[name] = round(float(data["wall_seconds"]), 1)
+            mtime = receipt.stat().st_mtime
+            if data.get("status") == "RUNNING" and mtime >= latest:
+                current, latest = name, mtime
+    return {"current_node": current, "node_seconds": timings}
+
+
+def _run_engine(command: list[str], run_dir: Path) -> dict:
+    """运行 run_c2.py；失败后退避重跑（checkpoint 续跑）。返回 result.json。"""
+    log_path = run_dir / "logs" / "c2_engine.log"
+    last_error: Exception | None = None
+    for attempt in range(C2_RETRIES + 1):
         try:
             _run_command(command, log_path)
-            return
-        except subprocess.CalledProcessError:
-            if attempt >= retries:
-                raise
+            result = _engine_result(run_dir)
+            if result.get("status") != "COMPLETE":
+                raise RuntimeError(f"run_c2 status={result.get('status')}: "
+                                   f"{result.get('error') or result.get('node') or ''}")
+            return result
+        except (subprocess.CalledProcessError, RuntimeError) as error:
+            result = _engine_result(run_dir)
+            last_error = RuntimeError(
+                f"run_c2 failed status={result.get('status', 'UNKNOWN')} "
+                f"node={result.get('node', '')} error={result.get('error', error)}")
+            if attempt >= C2_RETRIES:
+                break
+            log_path.parent.mkdir(parents=True, exist_ok=True)
             with log_path.open("a", encoding="utf-8") as log:
-                log.write(
-                    f"\n[retry] exit!=0,{STAGE_RETRY_BACKOFF_SECONDS}s 后第 "
-                    f"{attempt + 2}/{retries + 1} 次尝试\n"
-                )
-            print(f"[c2] retry {log_path.stem} attempt {attempt + 2}", flush=True)
-            time.sleep(STAGE_RETRY_BACKOFF_SECONDS)
-
-
-def _run_stage(stage: str, commands: list[list[str]], log_dir: Path) -> None:
-    retries = STAGE_RETRIES.get(stage, 0)
-    if len(commands) == 1:
-        _run_command_with_retry(commands[0], log_dir / f"{stage}.log", retries)
-        return
-    with ThreadPoolExecutor(max_workers=len(commands)) as pool:
-        futures = {
-            pool.submit(
-                _run_command_with_retry,
-                command,
-                log_dir / f"{stage}_{platform}.log",
-                retries,
-            ): platform
-            for command, platform in (
-                (command, _command_platform(command, fallback))
-                for command, fallback in zip(commands, PLATFORMS)
-            )
-        }
-        for future in as_completed(futures):
-            future.result()
+                log.write(f"\n[retry] {last_error}; {C2_RETRY_BACKOFF_SECONDS}s 后第 "
+                          f"{attempt + 2}/{C2_RETRIES + 1} 次（checkpoint 续跑）\n")
+            print(f"[c2] retry engine attempt {attempt + 2}", flush=True)
+            time.sleep(C2_RETRY_BACKOFF_SECONDS)
+    raise last_error  # type: ignore[misc]
 
 
 def _write_result(run_dir: Path, destination: Path, expected_rows: int) -> None:
-    source = run_dir / "merged" / "out" / "热点明细_含事件归属.csv"
+    source = run_dir / "engine" / "out" / "热点明细_含事件归属.csv"
     if not source.exists():
         raise FileNotFoundError(f"C2 x4 output not found: {source}")
     frame = pd.read_csv(source)
@@ -584,21 +559,24 @@ def _run_unlocked(args: argparse.Namespace) -> Path:
     run_dir.mkdir(parents=True, exist_ok=True)
     rows = _prepare_input(source, input_csv)
     input_sha256 = _file_sha256(input_csv)
+    window = resolve_window(project)
     run_signature = _run_signature(
         input_sha256,
         args.chat_model,
         args.embedding_model,
         args.x2_verdict,
+        window=window,
+        engine_digest=_engine_digest(),
     )
     status = _load_status(status_path)
     if status.get("run_signature") != run_signature:
         _reset_stage_outputs(run_dir, result_path)
         status = {"status": "pending", "completed_stages": []}
-    completed = set(status.get("completed_stages") or [])
+    already_done = status.get("status") == "done" and result_path.exists()
     platforms = _input_platforms(input_csv)
     skipped_platforms = [PLATFORMS[k] for k in PLATFORMS if k not in platforms]
     if skipped_platforms:
-        print(f"[c2] 输入中无记录的平台跳过 00 阶段: {skipped_platforms}", flush=True)
+        print(f"[c2] 输入中无记录的平台(run_c2 自动跳过): {skipped_platforms}", flush=True)
     status.update({
         "platforms": list(platforms),
         "status": "running",
@@ -624,60 +602,56 @@ def _run_unlocked(args: argparse.Namespace) -> Path:
         }},
     )
 
-    window = resolve_window(project)
-    registry_errors: dict[str, str] = {}
+    started = time.monotonic()
     try:
-        for stage, commands in build_stage_plan(
-            run_dir,
-            input_csv,
-            args.chat_model,
-            args.embedding_model,
-            x2_verdict=args.x2_verdict,
-            platforms=platforms,
-            window=window,
-        ):
-            if stage in BEST_EFFORT_STAGES and not result_path.exists():
-                # x4 已完成(续跑跳过)但结果文件缺失时先补写,保证主产物先落盘
-                _write_result(run_dir, result_path, rows)
-            if stage in completed:
-                print(f"[c2] skip completed stage: {stage}", flush=True)
-                continue
-            print(f"[c2] start: {stage}", flush=True)
-            status["current_stage"] = stage
-            status["updated_at"] = datetime.now().astimezone().isoformat()
-            _atomic_json(status_path, status)
-            update_run_config(
-                project,
-                {"c2_cluster": {"status": "running", "stage": stage}},
+        if not already_done:
+            command = build_c2_command(
+                run_dir, input_csv, args.chat_model, args.embedding_model,
+                x2_verdict=args.x2_verdict, window=window,
             )
-            try:
-                _run_stage(stage, commands, run_dir / "logs")
-            except subprocess.CalledProcessError as error:
-                if stage not in BEST_EFFORT_STAGES:
-                    raise
-                # Registry 落库失败不影响本期 C2 结果,只影响下一窗口增量;记录后继续
-                registry_errors[stage] = f"exit {error.returncode},见 logs/{stage}.log"
-                print(f"[c2] ⚠️ {stage} 失败(不阻断): {registry_errors[stage]}", flush=True)
-                continue
-            if stage == "x4_detail":
-                _write_result(run_dir, result_path, rows)
-            completed.add(stage)
-            status["completed_stages"] = sorted(completed)
+            status.update({"current_stage": "c2_engine", "engine": C2_ENGINE,
+                           "updated_at": datetime.now().astimezone().isoformat()})
             _atomic_json(status_path, status)
-
-        if not result_path.exists():
+            update_run_config(project, {"c2_cluster": {"status": "running", "stage": "c2_engine"}})
+            print(f"[c2] start: {C2_ENGINE} (rc.14 cross-platform, fused)", flush=True)
+            engine = _run_engine(command, run_dir)
             _write_result(run_dir, result_path, rows)
-        registry_snapshot = run_dir / "merged" / "out" / "registry_snapshot.jsonl"
+        else:
+            engine = _engine_result(run_dir)
+        out_dir = run_dir / "engine" / "out"
+        quality_path = out_dir / "c2_quality.json"
+        quality = json.loads(quality_path.read_text(encoding="utf-8")) if quality_path.exists() else {}
+        registry_snapshot = out_dir / "registry_snapshot.jsonl"
+        progress = _engine_progress(run_dir)
         status["registry"] = {
-            "status": "failed" if registry_errors else (
-                "done" if registry_snapshot.exists() else "skipped"),
+            "status": "done" if registry_snapshot.exists() else "skipped",
             "window": window,
             "snapshot": str(registry_snapshot) if registry_snapshot.exists() else "",
-            "errors": registry_errors,
+            "errors": {},
         }
+        status["quality"] = {
+            "coverage_status": quality.get("coverage_status"),
+            "degraded_count": len(quality.get("degraded_ids") or []),
+            "technical_missing_count": len(quality.get("technical_missing_ids") or []),
+            "original_retained_count": quality.get("original_retained_count", 0),
+            "review_pending": [
+                {k: v for k, v in item.items() if k != "files"}
+                for item in quality.get("review_pending") or engine.get("review_pending") or []
+            ],
+            "file": str(quality_path) if quality_path.exists() else "",
+        }
+        cost = _engine_cost(run_dir)
         status.update({
             "status": "done",
             "current_stage": "done",
+            "completed_stages": ["c2_engine"],
+            "input_tokens": cost["input_tokens"],
+            "output_tokens": cost["output_tokens"],
+            "llm_calls": cost["calls"],
+            "cost_usd": cost["cost_usd"],
+            "node_seconds": progress["node_seconds"],
+            "engine_wall_seconds": round(float(engine.get("wall_seconds") or 0), 1),
+            "runner_wall_seconds": round(time.monotonic() - started, 1),
             "output_file": str(result_path),
             "completed_at": datetime.now().astimezone().isoformat(),
         })
@@ -692,7 +666,10 @@ def _run_unlocked(args: argparse.Namespace) -> Path:
                 "output_file": str(result_path),
                 "chat_model": args.chat_model,
                 "embedding_model": args.embedding_model,
+                "engine": "blueai-canonical-event-registry 3.0.0-rc.14",
                 "registry_status": status["registry"]["status"],
+                "degraded_count": status["quality"]["degraded_count"],
+                "review_pending": len(status["quality"]["review_pending"]),
                 "completed_at": status["completed_at"],
             }},
         )
@@ -702,6 +679,7 @@ def _run_unlocked(args: argparse.Namespace) -> Path:
         status.update({
             "status": "failed",
             "error": str(error),
+            "node_seconds": _engine_progress(run_dir)["node_seconds"],
             "failed_at": datetime.now().astimezone().isoformat(),
         })
         _atomic_json(status_path, status)
@@ -748,7 +726,7 @@ def main() -> int:
     parser.add_argument("--input")
     parser.add_argument(
         "--chat-model",
-        default=os.environ.get("C2_CHAT_MODEL_ID") or "Doubao-Seed-Evolving",
+        default=os.environ.get("C2_CHAT_MODEL_ID") or "DeepSeek-V4.1-Flash",
     )
     parser.add_argument(
         "--embedding-model",

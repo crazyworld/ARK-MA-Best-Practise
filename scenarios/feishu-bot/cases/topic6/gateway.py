@@ -22,31 +22,56 @@ from arkagent.lark_vault import (
 )
 from arkagent.store import GatewayStore
 
-from artifact_sync import Topic6ArtifactSync
-from feishu_doc_publisher import FeishuDocPublisher
-from job_notifier import JobNotifier
-from pipeline_store import (
-    STATUS_DONE,
-    STATUS_RUNNING,
-    STATUS_WAIT_HC,
-    PipelineJob,
-    PipelineStore,
-)
-from topic6_hitl import Topic6Hitl, Topic6HitlDeps
-from topic6_runner import (
-    Topic6Config as RunnerConfig,
-    Topic6Runner,
-    Topic6RunnerError,
-    normalize_user_text,
-    parse_trigger,
-)
-from topic6_user_oauth import (
-    FeishuOAuth,
-    Topic6UserAuthorization,
-    UserAuthorizationRequired,
-)
-
-from config import Topic6Config
+try:
+    from .artifact_sync import Topic6ArtifactSync
+    from .feishu_doc_publisher import FeishuDocPublisher
+    from .job_notifier import JobNotifier
+    from .pipeline_store import (
+        STATUS_DONE,
+        STATUS_RUNNING,
+        STATUS_WAIT_HC,
+        PipelineJob,
+        PipelineStore,
+    )
+    from .topic6_hitl import Topic6Hitl, Topic6HitlDeps
+    from .topic6_runner import (
+        Topic6Config as RunnerConfig,
+        Topic6Runner,
+        Topic6RunnerError,
+        normalize_user_text,
+        parse_trigger,
+    )
+    from .topic6_user_oauth import (
+        FeishuOAuth,
+        Topic6UserAuthorization,
+        UserAuthorizationRequired,
+    )
+    from .config import Topic6Config
+except ImportError:  # pragma: no cover - standalone compatibility
+    from artifact_sync import Topic6ArtifactSync
+    from feishu_doc_publisher import FeishuDocPublisher
+    from job_notifier import JobNotifier
+    from pipeline_store import (
+        STATUS_DONE,
+        STATUS_RUNNING,
+        STATUS_WAIT_HC,
+        PipelineJob,
+        PipelineStore,
+    )
+    from topic6_hitl import Topic6Hitl, Topic6HitlDeps
+    from topic6_runner import (
+        Topic6Config as RunnerConfig,
+        Topic6Runner,
+        Topic6RunnerError,
+        normalize_user_text,
+        parse_trigger,
+    )
+    from topic6_user_oauth import (
+        FeishuOAuth,
+        Topic6UserAuthorization,
+        UserAuthorizationRequired,
+    )
+    from config import Topic6Config
 
 log = logging.getLogger("arkagent.case.topic6")
 TOKEN_REFRESH_INTERVAL_S = 60.0
@@ -195,6 +220,11 @@ class Topic6Gateway:
             continue_match = CONTINUE_COMMAND_RE.fullmatch(text)
             if continue_match:
                 continuation_message = (continue_match.group(1) or "").strip() or "继续"
+                user_vault_id = ""
+                if not getattr(self._config, "skip_miaoda_oauth", False):
+                    user_vault_id = await self._ensure_user_authorized(
+                        message.chat_id, message.user_open_id
+                    )
                 resumed = await self._runner.continue_job(
                     chat_id=message.chat_id,
                     thread_id=message.thread_id,
@@ -215,6 +245,10 @@ class Topic6Gateway:
                         )
                         self._store.complete_event(message.event_id, "completed")
                         return
+                    if user_vault_id:
+                        self._start_token_keepalive(resumed, user_vault_id)
+                    if self._artifact_sync is not None:
+                        self._artifact_sync.start(resumed, self._loop)
                     message_hint = (
                         "补充消息已注入。"
                         if continue_match.group(1) and continue_match.group(1).strip()
@@ -272,14 +306,8 @@ class Topic6Gateway:
                 return
 
             try:
-                if getattr(self._config, "skip_miaoda_oauth", False):
-                    user_vault_id = ""
-                    log.warning(
-                        "topic6 user OAuth bypassed for temporary run user=%s; "
-                        "Miaoda publishing is expected to fail without another credential",
-                        message.user_open_id,
-                    )
-                else:
+                user_vault_id = ""
+                if not getattr(self._config, "skip_miaoda_oauth", False):
                     user_vault_id = await self._ensure_user_authorized(
                         message.chat_id, message.user_open_id
                     )
@@ -826,7 +854,7 @@ _COORDINATOR_AGENT_JSON = Path(__file__).resolve().parent / "ma-resources" / "ag
 def _byok_model_headers(config: Topic6Config, agent_json: Path = _COORDINATOR_AGENT_JSON):
     """BYOK 模型鉴权 Header 只在 coordinator 走 BYOK（model.provider 非空）时附加。
 
-    当前 4 个 Agent 统一走 bmc-llm-relay（blueai 模型网关），必须附加 Header，
+    当前 3 个 Agent 统一走 bmc-llm-relay（blueai 模型网关），必须附加 Header，
     缺 BYOK_MODEL_AUTH_HEADER_* 时启动即失败（否则每次模型请求都会被 relay 401）。
     方舟原生模型收到 X-User-Model-Header-* 会直接 400 InvalidModelHeader，所以切回原生
     只改 agents/*.json 即可，config.env 里的 BYOK_* 可以保留不动。

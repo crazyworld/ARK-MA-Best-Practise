@@ -8,7 +8,7 @@ Coordinator 通过 Multi Agent 委派的子 Agent 契约：`topic6-annotator`（
 ## Requirements
 
 ### Requirement: 子 Agent 资源定义
-三个子 Agent SHALL 各自只挂载一个 Skill（annotator→`topic6-annotation`，validator→`validator`，insighter→`topic6-insight`），工具仅 `agent_toolset_20260701`，模型与 Coordinator 保持一致（当前 bmc-llm-relay `DeepSeek-V4-Flash-0731`，完整 `model` 块与 coordinator.json 相同）。子 Agent 的 skill_id/version 以占位符由 `create_all.sh` 渲染。子 Agent 每次只输出一条结构化 JSON 后 end_turn，MUST NOT 输出长文本回显。
+三个子 Agent SHALL 各自只挂载一个 Skill（annotator→`topic6-annotation`，validator→`validator`，insighter→`topic6-insight`），工具仅 `agent_toolset_20260701`，模型与 Coordinator 保持一致（当前 bmc-llm-relay `DeepSeek-V4.1-Flash`，完整 `model` 块与 coordinator.json 相同）。子 Agent 的 skill_id/version 以占位符由 `create_all.sh` 渲染。子 Agent 每次只输出一条结构化 JSON 后 end_turn，MUST NOT 输出长文本回显。
 
 #### Scenario: 新增子 Agent
 - **WHEN** 新增一个子 Agent

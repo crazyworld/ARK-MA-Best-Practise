@@ -17,7 +17,10 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-from pipeline_store import PipelineJob
+try:
+    from .pipeline_store import PipelineJob
+except ImportError:  # pragma: no cover - standalone compatibility
+    from pipeline_store import PipelineJob
 
 log = logging.getLogger("arkagent.topic6.doc_publisher")
 

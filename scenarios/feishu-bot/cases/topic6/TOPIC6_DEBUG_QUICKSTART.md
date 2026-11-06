@@ -13,18 +13,18 @@
 
 ### 0.1 Python 环境(首次)
 
-在仓库根目录创建 Topic6 独立的 Python 3.11 环境，并安装项目及开发依赖（下方命令在仓库根目录执行）：
+Topic5 与 Topic6 共用 `topicX` Python 环境。在仓库根目录首次创建并安装项目及开发依赖：
 
 ```bash
-conda create -n topic6 python=3.11 -y
-conda activate topic6
+conda create -n topicX python=3.11 -y
+conda activate topicX
 python -m pip install -e ".[dev]"
 ```
 
 后续每次打开新终端，先执行：
 
 ```bash
-conda activate topic6
+conda activate topicX
 ```
 
 ---
@@ -36,7 +36,7 @@ cd scenarios/feishu-bot
 python3 -m arkagent init --topic6
 ```
 
-topic6 专用轻量初始化:只问方舟 API Key + 扫码建飞书应用,写入 `~/.arkagent/cases/topic6/config.env`。产出:
+topic6 专用轻量初始化:只问方舟 API Key + 扫码建飞书应用,写入 `~/.arkagent/cases/topicX/config.env`。产出:
 
 - `ARK_API_KEY`
 - `FEISHU_APP_ID` / `FEISHU_APP_SECRET`
@@ -106,7 +106,7 @@ topic6 的 MA 资源统一由第 3 步的 `update_ma.sh` 创建和更新。
 
 ## 2. 环境变量清单(跑 update_ma.sh 前必须齐)
 
-**全部写到 `~/.arkagent/cases/topic6/config.env`**(该文件已在 §1 由 `init --topic6` 生成,追加即可,不会入库)。
+**全部写到 `~/.arkagent/cases/topicX/config.env`**(该文件已在 §1 由 `init --topic6` 生成,追加即可,不会入库)。
 
 ### 2.1 通用(方舟 + 飞书)
 
@@ -189,29 +189,16 @@ refresh token 仅保存在权限为 `0600` 的 Topic6 SQLite 数据库中，不�
 `running` 和 `wait_hc`，不会改变 Session ID、Vault ID 或 Credential ID。未授权用户
 会在任务启动前收到提示。
 
-临时演示若只需跑到妙搭发布前，可在 `config.env` 加：
+仅测试 Phase H 之前的流程时，可临时设置：
 
 ```env
 TOPIC6_SKIP_MIAODA_OAUTH=true
 ```
 
-Gateway 会跳过用户扫码和 Vault 注入；Phase H 因缺少妙搭用户凭据而失败是预期行为。
-完成演示后删除该配置或设为 `false`，恢复正常权限校验。
+该开关默认关闭。开启后 Gateway 不要求扫码，也不会向 Session 挂载用户 Vault；
+Phase H 因缺少妙搭用户凭据失败属于预期结果。测试结束后删除该配置或设为 `false`。
 
-### 2.4 清理中断任务状态
-
-若 Gateway 异常退出后，飞书仍提示“已有热点周报任务运行中”，先确认没有真实任务在执行，
-停止 Gateway 后运行：
-
-```bash
-cd scenarios/feishu-bot
-python cases/topic6/reset_pipeline_state.py --yes
-```
-
-该脚本只删除本地 `pipeline_jobs` 与 HC 记录，不会停止方舟 Session、删除远端资源或产物，
-也会保留妙搭 OAuth 授权。只有明确需要清除本地 refresh token 时才加 `--include-oauth`。
-
-### 2.5 网络中断与继续执行
+### 2.4 网络中断与继续执行
 
 Gateway 与方舟 MA 的 SSE 事件流短暂断开时，会以约 `1 / 2 / 4 / 8 / 16` 秒的退避间隔
 自动重连，且不会重复发送初始触发词。多次重连仍失败时，任务会落为失败；网络恢复后可在
@@ -241,7 +228,7 @@ Gateway 在原 Session 里只重跑 Phase G（重新读取文档配图并生成�
 
 自有 TOS Bucket 调试期不必配置，`environment.json` 已禁用 output storage。
 
-### 2.6 白名单(建议设,防误触)
+### 2.5 白名单(建议设,防误触)
 
 ```env
 AUTHORIZED_OPEN_IDS=ou_xxx ou_yyy   # 空格或逗号分隔
@@ -250,7 +237,7 @@ AUTHORIZED_OPEN_IDS=ou_xxx ou_yyy   # 空格或逗号分隔
 ### 手工执行子脚本时加载到 shell
 
 ```bash
-set -a; source ~/.arkagent/cases/topic6/config.env; set +a
+set -a; source ~/.arkagent/cases/topicX/config.env; set +a
 ```
 
 正常使用 `update_ma.sh` 时不需要执行这一步，脚本会自动读取配置。只有绕过统一入口、
@@ -264,7 +251,7 @@ set -a; source ~/.arkagent/cases/topic6/config.env; set +a
 
 ```bash
 ./cases/topic6/update_ma.sh
-python -m arkagent run --case topic6
+python -m arkagent run --case topicx
 ```
 
 `update_ma.sh` 已包含完整测试、Skill 打包上传、Environment 与 Memory 更新、Agent

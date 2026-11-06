@@ -557,6 +557,16 @@ def load_known_anchors(rd: Path, limit: int = 120) -> dict[str, str]:
     return out
 
 
+def missing_payload_ids(payload, ids):
+    """One-member events are declarations too; only absent IDs are omissions."""
+    if not isinstance(payload, dict):
+        return set(ids)
+    declared = {str(m).strip() for m in payload.get("singletons") or []}
+    for event in payload.get("events") or []:
+        declared.update(str(m).strip() for m in event.get("member_record_ids") or [])
+    return set(ids) - declared
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--run-dir", required=True, type=Path)
@@ -734,7 +744,14 @@ def main() -> int:
     def worker(block: dict) -> dict:
         ids = [r for r in block["record_ids"] if r in frames]
         try:
-            payload = archive_split(ids, block["block_id"])
+            for coverage_attempt in range(3):
+                payload = archive_split(ids, block["block_id"])
+                missing = missing_payload_ids(payload, ids)
+                if not missing:
+                    break
+                print(f"[block] {block['block_id']} coverage missing {len(missing)} IDs, attempt {coverage_attempt + 1}/3", flush=True)
+            if missing:
+                raise ValueError(f"Incomplete archive coverage after 3 attempts: {sorted(missing)}")
         except Exception as exc:
             # Ada接入补丁 2026-09-22（bug3·稳健失败处理）。应同步上游。
             # 空返回(缩块也救不回)/超时/网络/其它异常一律不 hard-raise 中断整平台：
@@ -778,6 +795,7 @@ def main() -> int:
         ids, id_set = res["ids"], set(res["ids"])
         payload = res["payload"] if isinstance(res["payload"], dict) else {}
         seen: set[str] = set()
+        normalized_singletons: set[str] = set()
         key_map: dict[str, str] = {}
         for raw in payload.get("events", []):
             members = [str(m).strip() for m in raw.get("member_record_ids") or []]
@@ -800,6 +818,7 @@ def main() -> int:
             if len(members) == 1:
                 # 协议要求单成员走 singletons；模型仍这么返时按 singleton 处理
                 issues["模型把单成员写成了事件"] += 1
+                normalized_singletons.update(members)
                 continue
             seen.update(members)
             eid = f"{res['block_id']}_{raw.get('event_key') or len(events)}"
@@ -868,7 +887,7 @@ def main() -> int:
                                                for r in members
                                                if frames[r].get("platform")})},
             })
-        declared = {str(m).strip() for m in payload.get("singletons") or []}
+        declared = {str(m).strip() for m in payload.get("singletons") or []} | normalized_singletons
         for rid in ids:
             if rid in seen:
                 continue
@@ -896,7 +915,7 @@ def main() -> int:
                                   "object": frames[rid].get("object", ""),
                                   "event_type": "OTHER"},
                 "name_evidence": {}, "confidence": None, "fallback": True,
-                **refusal_mark,
+                **refusal_mark, "model_omission": rid not in declared,
                 # 单条记录不参与合并，归属置信度对它没有意义
                 "member_confidence": {rid: None}, "member_notes": {},
                 "state": {"latest_stage": frames[rid].get("stage"), "member_count": 1,

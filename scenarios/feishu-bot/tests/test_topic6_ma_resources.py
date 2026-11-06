@@ -44,21 +44,21 @@ def test_coordinator_mcp_servers_and_toolsets_are_one_to_one():
 # ---- 模型统一走 bmc-llm-relay(blueai 模型网关,BYOK)----
 
 RELAY_AGENT_MODEL = {
-    "id": "DeepSeek-V4-Flash-0731",
+    "id": "DeepSeek-V4.1-Flash",
     "provider": "bmc-llm-relay",
     "base_url": "https://bmc-llm-relay.bluemediagroup.cn/v1/chat/completions",
     "protocol": "openai_chat_completions",
-    # BYOK 必须带 token_limits;按模型原生规格:上下文(仅指输入)1M,输出上限 384K 另计
+    # BYOK 必须带 token_limits;按模型原生 256K 上下文
     "token_limits": {
-        "context_window": 1000000,
-        "max_input_token_length": 1000000,
-        "max_output_token_length": 384000,
+        "context_window": 256000,
+        "max_input_token_length": 200000,
+        "max_output_token_length": 56000,
     },
 }
 
 
 def test_all_agents_use_bmc_llm_relay_model():
-    for name in ("coordinator", "annotator", "insighter", "validator"):
+    for name in ("coordinator", "annotator", "validator"):
         config = json.loads(
             (RESOURCE_DIR / "agents" / f"{name}.json").read_text(encoding="utf-8")
         )
@@ -71,7 +71,7 @@ def test_environment_routes_script_models_through_relay():
     assert env["LLM_RELAY_API_KEY"] == "${LLM_RELAY_API_KEY}"
     # 沙箱脚本不再需要方舟凭据:模型走 relay,ARK_* 只在 Gateway/部署侧调控制面
     assert "ARK_API_KEY" not in env and "ARK_BASE_URL" not in env
-    assert env["C2_CHAT_MODEL_ID"] == "Doubao-Seed-Evolving"
+    assert env["C2_CHAT_MODEL_ID"] == "DeepSeek-V4.1-Flash"
     assert env["EMBEDDING_MODEL_ID"] == "Doubao-embedding"
     assert env["EMBEDDING_IS_MULTIMODAL"] == "false"
 
@@ -132,7 +132,7 @@ def test_byok_header_kept_for_byok_model(tmp_path):
     gateway = _load_gateway()
     agent = tmp_path / "coordinator.json"
     agent.write_text(
-        json.dumps({"model": {"id": "DeepSeek-V4-Flash-0731", "provider": "bmc-llm-relay"}}),
+        json.dumps({"model": {"id": "DeepSeek-V4.1-Flash", "provider": "bmc-llm-relay"}}),
         encoding="utf-8",
     )
     assert gateway._byok_model_headers(_cfg(), agent) == {
