@@ -31,6 +31,34 @@ CHAT_ROSTER_TTL_SECONDS = 60.0
 # open_id → 真名 的反查缓存有效期（秒）：卡片按钮回调只带 open_id，要给"操作人"回显真名必须
 # 反查一次（群里走 chat_roster，单聊走 contact.v3.user.get）。改名不频繁，缓存 10 分钟。
 OPERATOR_NAME_TTL_SECONDS = 600.0
+# 在线表格单次写入：行数上限(飞书 5000) + 请求体 JSON 字符上限。宽表 3928×28 一次写约 124 万字符，
+# 飞书返回 90227 request too large。字符上限待 212 用真实宽表实测后再定，可用环境变量覆盖。
+SHEET_WRITE_MAX_ROWS = 5000
+SHEET_WRITE_MAX_CHARS = int(os.environ.get("FEISHU_SHEET_WRITE_MAX_CHARS") or 300_000)
+
+
+class SpreadsheetWriteError(RuntimeError):
+    """在线表格已创建但写入失败(已尝试删除该空表)。调用方不应重试建表。"""
+
+
+def _sheet_write_batches(rows: list, max_rows: int, max_chars: int) -> list[tuple[int, list]]:
+    """按「行数 ≤ max_rows 且 JSON 字符量 ≤ max_chars」切批，返回 [(起始行下标, 批)]。
+
+    字符量按 requests `json=` 的实际编码计(ensure_ascii=True，中文转成 6 字节的 \\uXXXX)，
+    与真实请求体一致；按 ensure_ascii=False 计会把中文宽表低估约 6 倍。
+    单行自身超过 max_chars 时独占一批(切不开，交给飞书报错)。"""
+    batches: list[tuple[int, list]] = []
+    start, batch, size = 0, [], 0
+    for idx, row in enumerate(rows):
+        row_chars = len(json.dumps(row, default=str))
+        if batch and (len(batch) >= max_rows or size + row_chars > max_chars):
+            batches.append((start, batch))
+            start, batch, size = idx, [], 0
+        batch.append(row)
+        size += row_chars
+    if batch:
+        batches.append((start, batch))
+    return batches
 
 
 @dataclass(frozen=True)
@@ -940,6 +968,7 @@ class FeishuSender:
         不依赖 import_tasks API（需要额外权限），只用 sheets/v3 + sheets/v2。
         folder_token 为空时建在应用（机器人）云空间根目录。
         任一批写入失败直接抛错——半张表交给用户审核比没有表更危险。
+        建表之后的任何失败都会删除这张表再抛 SpreadsheetWriteError，避免留下同名空表。
         """
         import openpyxl
         import requests as _requests
@@ -967,6 +996,21 @@ class FeishuSender:
         if not sheet_token:
             raise RuntimeError(f"飞书创建表格未返回 token: {data}")
         sheet_url = str(spreadsheet.get("url") or "")
+        try:
+            self._fill_spreadsheet(sheet_token, file_path, headers)
+        except Exception as exc:
+            try:
+                self.delete_drive_file(sheet_token, "sheet")
+                cleanup = "已删除该空表"
+            except Exception as del_exc:  # noqa: BLE001 - 删除失败不掩盖原错误
+                cleanup = f"删除空表失败: {del_exc}"
+            raise SpreadsheetWriteError(f"{exc}（{cleanup}）") from exc
+        return sheet_token, sheet_url
+
+    def _fill_spreadsheet(self, sheet_token: str, file_path: str, headers: dict) -> None:
+        """把 xlsx 内容写入已创建的在线表格；失败抛 RuntimeError。"""
+        import openpyxl
+        import requests as _requests
 
         # Step 2: 读取 xlsx 数据
         wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
@@ -977,7 +1021,7 @@ class FeishuSender:
         wb.close()
 
         if not rows:
-            return sheet_token, sheet_url  # 空表也返回 token
+            return  # 空表也返回 token
 
         # Step 3: 获取 sheet_id
         resp = _requests.get(
@@ -988,10 +1032,8 @@ class FeishuSender:
         sheets = (resp.json().get("data") or {}).get("sheets", [])
         sheet_id = sheets[0]["sheet_id"] if sheets else "Sheet1"
 
-        # Step 4: 分批写入（飞书单次写入上限 5000 行）
-        batch_size = 5000
-        for start in range(0, len(rows), batch_size):
-            batch = rows[start:start + batch_size]
+        # Step 4: 分批写入（行数 + 请求体大小双阈值）
+        for start, batch in _sheet_write_batches(rows, SHEET_WRITE_MAX_ROWS, SHEET_WRITE_MAX_CHARS):
             num_cols = max(len(r) for r in batch)
             # 列号转字母：A, B, ..., Z, AA, AB, ...
             end_col = ""
@@ -1019,7 +1061,25 @@ class FeishuSender:
                     f"HTTP {resp.status_code} code={code}: {resp.text[:200]}"
                 )
 
-        return sheet_token, sheet_url
+    def delete_drive_file(self, token: str, file_type: str) -> None:
+        """删除云空间文件（DELETE /drive/v1/files/{token}?type=...），只用于清理本应用自建的产物。"""
+        import requests as _requests
+
+        access_token = self._get_tenant_access_token()
+        resp = _requests.delete(
+            f"https://open.feishu.cn/open-apis/drive/v1/files/{token}",
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={"type": file_type},
+            timeout=30,
+        )
+        try:
+            code = resp.json().get("code")
+        except ValueError:
+            code = None
+        if resp.status_code != 200 or code != 0:
+            raise RuntimeError(
+                f"飞书删除文件失败 token={token} HTTP {resp.status_code} code={code}: {resp.text[:200]}"
+            )
 
     def list_permission_members(self, token: str, token_type: str) -> list[dict]:
         """列出云文档协作者（GET /drive/v1/permissions/{token}/members），用于授权后校验。"""

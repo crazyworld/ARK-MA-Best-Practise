@@ -142,8 +142,13 @@ def main() -> int:
     cache_hits = 0
     missing_names = 0
 
-    # 注册表是逐批累积的，必须串行——本批的判定要看到前面批次建立的实体
-    for batch in batches:
+    auto_split: list[str] = []
+
+    def resolve(batch: dict, depth: int = 0) -> None:
+        """单批归一并写入注册表。截断兜底与 07 archive_split 一致：
+        先原样重试一次（输出长度随机），仍截断才对半拆；两半串行处理，
+        后半批能看到前半批新建的实体，注册表逐批累积的语义不变。拆到 1 个名字仍截断才失败。"""
+        nonlocal cache_hits, missing_names
         lines = "\n".join(
             f"{e['name']}\t{e['type']}\t出现={len(e['record_ids'])}次"
             for e in batch["items"])
@@ -151,11 +156,38 @@ def main() -> int:
         request = {"schema": "c2-entity-request/1", "model": args.model,
                    "revision": args.model_revision or args.model,
                    "endpoint_hash": digest(relay.base), "system": SYSTEM,
-                   "user": user_text, "max_tokens": args.max_tokens,
+                   # 记生效值(relay 按模型原生上限抬高后的值)，改原生上限表时缓存随之失效
+                   "user": user_text, "max_tokens": relay.max_tokens,
                    "temperature": relay.temperature,
                    "implementation_hash": file_hash(Path(__file__)),
                    "registry": registry.entities, "batch": batch}
-        payload, hit = cached_request(raw_dir, request, lambda: relay.call_json(user_text))
+        call = lambda: cached_request(raw_dir, request, lambda: relay.call_json(user_text))
+        payload, hit = None, False
+        try:
+            payload, hit = call()
+        except ValueError as exc:
+            if "max_tokens" not in str(exc):
+                raise
+            if depth == 0:
+                print(f"[entities] {batch['batch_id']} 输出撞到 max_tokens，原样重试一次：{exc}",
+                      flush=True)
+                try:
+                    payload, hit = call()
+                except ValueError as exc2:
+                    if "max_tokens" not in str(exc2):
+                        raise
+            if payload is None:
+                items = batch["items"]
+                if len(items) <= 1:
+                    raise
+                mid = len(items) // 2
+                auto_split.append(f"{batch['batch_id']}(L{depth + 1}:{mid}+{len(items) - mid})")
+                print(f"[entities] {batch['batch_id']} 仍截断，对半拆 {len(items)}→"
+                      f"{mid}+{len(items) - mid}（第 {depth + 1} 层）", flush=True)
+                for suffix, part in (("a", items[:mid]), ("b", items[mid:])):
+                    resolve({"batch_id": f"{batch['batch_id']}{suffix}",
+                             "ids": [str(e["name"]) for e in part], "items": part}, depth + 1)
+                return
         cache_hits += hit
         returned = [r.get("name") for r in payload.get("resolutions", [])]
         expected = [r["name"] for r in batch["items"]]
@@ -191,6 +223,12 @@ def main() -> int:
         print(f"[entities] {batch['batch_id']} 完成，注册表 {len(registry.entities)} 个实体",
               flush=True)
 
+    # 注册表是逐批累积的，必须串行——本批的判定要看到前面批次建立的实体
+    for batch in batches:
+        resolve(batch)
+    if auto_split:
+        print(f"[entities] 截断自动拆批 {len(auto_split)} 次：{', '.join(auto_split)}", flush=True)
+
     linked = registry.resolve_parents()
     for entity in registry.entities.values():
         entity["source_records"] = sorted(set(entity["source_records"]))
@@ -225,6 +263,7 @@ def main() -> int:
            {"entities": len(registry.entities), "linked": linked,
             "input_sha256": file_hash(src), "cache_hits": cache_hits,
             "missing_names": missing_names, "unresolved_actors": unresolved,
+            "auto_split": auto_split, "reasoning_tokens": relay.reasoning_tokens,
             "quality_status": "DEGRADED" if missing_names or unresolved else "COMPLETE"})
     return 0
 

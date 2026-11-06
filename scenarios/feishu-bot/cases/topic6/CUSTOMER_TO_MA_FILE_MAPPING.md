@@ -99,11 +99,12 @@ MA 根目录：`ma-resources/skills/topic6-event-registry/`
 | `CHANGELOG.md` | 同名文件 | 适配迁入 | 顶部追加 MA 适配说明 |
 | `references/runbook.md` | 同名文件 | 适配迁入 | 授权节改为 `LLM_RELAY_*`，路径改 `/mnt/skills` |
 | `references/*.md`（其余 8 个）、`MANIFEST.json`、`examples/synthetic.csv` | 同名文件 | 原样迁入(去 CRLF) | MANIFEST 记录上游哈希，适配文件不匹配属预期 |
-| `scripts/relay.py` | 同名文件 | 适配迁入 | 传输层保留 MA（bmc-llm-relay 流式 + watchdog + 多模态 embedding）；run_batches 版本缓存、Embedder 校验/原子落盘对齐 rc.14 |
+| `scripts/relay.py` | 同名文件 | 适配迁入 | 传输层保留 MA（bmc-llm-relay 流式 + watchdog + 多模态 embedding）；run_batches 版本缓存、Embedder 校验/原子落盘对齐 rc.14；`MODEL_MAX_OUTPUT_TOKENS` 按模型原生输出上限请求（上游默认按 Sonnet 调校），截断报错附 reasoning_tokens（2026-11-06） |
+| `scripts/03_normalize_entities.py` | 同名文件 | 适配迁入 | 截断先原样重试、仍截断对半拆，串行累积注册表（同 07 `archive_split`；2026-11-06 W44 full 阻断修复） |
 | `scripts/run_c2.py` | 同名文件 | 适配迁入 | 新增 `--review-policy`/`--degraded-policy`/`--front-workers`（默认上游语义）；x2 透传 `--model`；端点读 `LLM_RELAY_BASE_URL` |
 | `scripts/retain_original.py`、`x2_confidence_filter.py` | 同名文件 | 适配迁入 | `allow_degraded` 参数；恢复 `--model` 覆盖 |
 | `scripts/run_ev.py`、`04_build_embeddings.py`、`check_environment.py` | 同名文件 | 适配迁入 | `ANTHROPIC_*` → `LLM_RELAY_*` |
-| `scripts/f1_extract.py`、`c2_runtime.py`、`c2_quality.py`、`front_evidence.py`、`link_registry.py`、`review_revision.py`、`verify_package.py`、`00~11_*.py`、`x0~x4_*.py`、`eventlib.py` | 同名文件 | 原样迁入(去 CRLF) | rc.14 主体 |
+| `scripts/f1_extract.py`、`c2_runtime.py`、`c2_quality.py`、`front_evidence.py`、`link_registry.py`、`review_revision.py`、`verify_package.py`、`00~11_*.py`（03 除外）、`x0~x4_*.py`、`eventlib.py` | 同名文件 | 原样迁入(去 CRLF) | rc.14 主体 |
 | `scripts/run_topic6_c2.py`、`launch_c2_background.py`、`wait_c2_complete.py` | 无 | MA 新增 | Topic6 封装：调用 `run_c2.py run --mode cross-platform --frontend fused` |
 | `scripts/__pycache__/` | 客户侧缓存 | 未迁移 | Python 缓存，不属于源码 |
 
@@ -112,11 +113,12 @@ MA 根目录：`ma-resources/skills/topic6-event-registry/`
 | MA 文件 | 客户原始文件 | 状态 | 主要变化 |
 |---|---|---|---|
 | `skills/topic6-insight/SKILL.md` | `topic6/skill/insight/SKILL.md` | 适配迁入 | 补 SkillHub frontmatter、MA 路径和 Ark 环境变量 |
-| `scripts/pipeline_e.py` | `topic6/skill/insight/pipeline_e.py` | 适配迁入并移动 | 去除本地目录上溯，改 `/mnt/skills`、`/workspace`、Ark OpenAI 接口；2026-11-03 移植 V2.0 的 E3/E4 分步路由（E4 的仲裁、A/B 分组撰写与校验取自 V2 `pipeline_e4_agent_steps.py`，改为脚本内直连方舟，不用子 Agent） |
+| `scripts/pipeline_e.py` | `topic6/skill/insight/pipeline_e.py` | 适配迁入并移动 | 去除本地目录上溯，改 `/mnt/skills`、`/workspace`、Ark OpenAI 接口；2026-11-03 移植 V2.0 的 E3/E4 分步路由（E4 的仲裁、A/B 分组撰写与校验取自 V2 `pipeline_e4_agent_steps.py`，改为脚本内直连方舟，不用子 Agent）；2026-11-06 子步骤按表头解析、E3 平台隔离、链接标题清洗（W44 B2/B3/B5） |
 | `scripts/pipeline_f.py` | `topic6/skill/insight/pipeline_f.py` | 适配迁入并移动 | 改项目路径解析和 MA 产物目录 |
-| `01_统计/_common.py`、`e1_industry.py`、`e3_platforms.py` | 客户 V2.0 bundle 同路径文件 | 原样迁入(去 CRLF，保留 `from __future__`) | 2026-11-03 由 V1 升级到 V2.0 |
+| `01_统计/e1_industry.py`、`e3_platforms.py` | 客户 V2.0 bundle 同路径文件 | 原样迁入(去 CRLF，保留 `from __future__`) | 2026-11-03 由 V1 升级到 V2.0 |
+| `01_统计/_common.py` | 客户 V2.0 bundle 同路径文件 | 适配迁入 | 2026-11-03 由 V1 升级到 V2.0；2026-11-06 新增 `md_link_title`，链接标题清洗换行与方括号（W44 B5） |
 | `01_统计/e2_nodes.py` | 客户侧同路径文件 | 适配迁入 | 对齐 C3 节点结果和 MA 日历路径；合入 V2.0 代表热搜 TOP3、30 天信号上限、锚点未核实、品牌IP候选列；日历解析为 0 行时报错 |
-| `01_统计/e4_marketing.py` | 客户 V2.0 bundle 同路径文件 | 原样迁入(去 CRLF) | 新增营销观察/消费洞察结构化候选 |
+| `01_统计/e4_marketing.py` | 客户 V2.0 bundle 同路径文件 | 适配迁入 | 新增营销观察/消费洞察结构化候选；2026-11-06 链接标题改用 `md_link_title`（W44 B5） |
 | `01_统计/run_stats.py` | 客户侧同路径文件 | 适配迁入 | 对齐 MA 项目路径和统计编排；新增 E3 两个 JSON 输入，E2 改用全量 df |
 | `02_洞察/_shared/role_style.md` | 客户侧同路径文件 | 原样迁入 | SHA-256 一致 |
 | `02_洞察/E1_行业话题/v1.md` | 客户侧同路径文件 | 原样迁入 | 当前活跃版 |
@@ -133,14 +135,17 @@ MA 根目录：`ma-resources/skills/topic6-web-report/`
 
 | MA 文件 | 客户原始文件 | 状态 | 说明 |
 |---|---|---|---|
-| `SKILL.md` | 同名文件 | 适配迁入 | Skill 名改为 `topic6-web-report`，补充 MA 场景分工 |
-| `agents/openai.yaml` | 同名文件 | 适配迁入 | `default_prompt` 中的 Skill 名改为 `$topic6-web-report` |
+| `SKILL.md` | 同名文件 | 适配迁入 | Skill 名改为 `topic6-web-report`，补充 MA 场景分工；第 5 步周/月刊按周期标签判定、第 9/10 步删除 snapshot 上传（2026-11-06） |
+| `agents/openai.yaml` | 同名文件 | 适配迁入 | `default_prompt` 中的 Skill 名改为 `$topic6-web-report`；去掉 snapshot 上传描述（2026-11-06） |
 | `CHANGELOG.md` | 无 | MA 新增 | 记录模板在 MA 侧的变更 |
-| `artifact-template.json`、`CLAUDE.md` | 同名文件 | 原样迁入 | SHA-256 一致 |
+| `artifact-template.json` | 同名文件 | 原样迁入 | SHA-256 一致 |
+| `CLAUDE.md` | 同名文件 | 适配迁入 | 删除 snapshot 上传指令，Topic6 网页只走妙搭（2026-11-06） |
 | `references/document-image-extraction.md`、`html-snapshot-upload.md` | 同名文件 | 原样迁入 | SHA-256 一致 |
 | `scripts/upload-html.mjs`、`validate-case-image-sources.mjs`、`validate-rendered-content.mjs`、`validate-template-assets.mjs` | 同名文件 | 原样迁入 | 4 个脚本 SHA-256 一致 |
 | `assets/preview.png` | 同名文件 | 原样迁入 | SHA-256 一致 |
-| `assets/source/app.js`、`build-report.mjs`、`index.html`、`styles.css`、`source.example.json`、`DESIGN_SPEC.md` | 同名文件 | 原样迁入 | 6 个模板源码文件 SHA-256 一致 |
+| `assets/source/app.js`、`index.html`、`source.example.json` | 同名文件 | 原样迁入 | 3 个模板源码文件 SHA-256 一致 |
+| `assets/source/build-report.mjs`、`styles.css` | 同名文件 | 适配迁入 | 此前已有 MA 适配（与 bundle SHA 不一致，原表记为一致属误记）；2026-11-06 build-report 周/月刊改为只按周期标签判定 |
+| `assets/source/DESIGN_SPEC.md` | 同名文件 | 适配迁入 | 「云端交付」节改为不上传 snapshot（2026-11-06） |
 | `assets/source/bluefocus-logo-white.png`、`hero-social-bg.jpg`、`title-monthly.png`、`title-weekly.png` | 同名文件 | 原样迁入 | 4 个根级素材 SHA-256 一致 |
 | `assets/source/assets/case-1-car-livestream.jpg`～`case-4-brand-notice.jpg` | 同名文件 | 原样迁入 | 4 张案例图 SHA-256 一致 |
 | `assets/source/assets/fonts/Poppins-{Bold,Light,Medium,Regular,SemiBold}.ttf` | 同名文件 | 原样迁入 | 5 个字体 SHA-256 一致 |

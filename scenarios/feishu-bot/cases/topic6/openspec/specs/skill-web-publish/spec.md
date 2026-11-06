@@ -42,7 +42,10 @@ Topic6 Phase G SHALL 依次执行 `validate-case-image-sources.mjs source.json` 
 - **THEN** Phase G 失败并报告原文错误
 
 ### Requirement: Topic6 不使用 HTML snapshot 上传
-`upload-html.mjs`（含 `--dry-run`、`--setup-key`）SHALL 保留在 Skill 中但 Topic6 MUST NOT 执行（沙箱无 snapshot API Key，且不属于交付）；Topic6 的网页交付唯一出口是妙搭发布。
+`upload-html.mjs`（含 `--dry-run`、`--setup-key`）SHALL 保留在 Skill 中但 Topic6 MUST NOT 执行（沙箱无 snapshot API Key，且不属于交付）；Topic6 的网页交付唯一出口是妙搭发布。web-report 的 `SKILL.md`、`CLAUDE.md`、`DESIGN_SPEC.md`、`agents/openai.yaml` MUST NOT 指示上传 snapshot。
+
+### Requirement: 周刊/月刊判定
+`build-report.mjs` SHALL 只按页头「数据周期：<标签>（…）」的周期标签判定：`YYYY-Www` 为周刊；标签为月份（`YYYY年M月`、`YYYY-MM`、含月刊/月报）为月刊。MUST NOT 扫描正文（W44 正文「2026年10月…」曾误判月刊）。缺少周期声明 MUST 报错。
 
 #### Scenario: Agent 按 SKILL.md 第 9 步上传
 - **WHEN** Coordinator 试图运行 `upload-html.mjs`

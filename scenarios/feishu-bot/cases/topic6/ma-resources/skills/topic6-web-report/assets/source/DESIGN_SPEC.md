@@ -65,4 +65,4 @@ node build-report.mjs /absolute/path/report.source.json /absolute/path/index.htm
 
 ## 云端交付
 
-本文件只定义网页构建与视觉验收；通过以上本地验收后，每份最终报告 `index.html` 还必须遵循 Skill 根目录的 `references/html-snapshot-upload.md`：使用 `scripts/upload-html.mjs` 先执行 `--dry-run`，再上传并验证公开链接。不要将本目录的保留模板 `index.html` 当作当期报告上传，也不要用 `--allow-relative-assets` 或 `--no-verify` 跳过检查。
+本文件只定义网页构建与视觉验收。Topic6 的网页交付唯一出口是 Phase H 妙搭发布：通过以上本地验收即完成本阶段，**不上传 HTML snapshot**，不得执行 `scripts/upload-html.mjs`（含 `--dry-run` / `--setup-key`），也不要求用户配置 key。

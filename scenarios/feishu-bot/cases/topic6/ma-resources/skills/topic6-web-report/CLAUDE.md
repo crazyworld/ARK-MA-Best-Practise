@@ -16,4 +16,4 @@ node scripts/validate-case-image-sources.mjs /absolute/path/source.json
 
 Do not publish output containing `blob:` image URLs.
 
-After the report passes local validation, read `references/html-snapshot-upload.md` and publish the exact finished `index.html` with the bundled `scripts/upload-html.mjs`: run `--dry-run` first, then upload and require successful CDN verification. If no key is saved, ask the user to run `--setup-key` in their own interactive terminal; never ask for the key in chat or read an environment variable. Return both the local file and verified cloud URL. Do not bypass relative-asset checks, skip verification, expose an API key, or claim cloud delivery if publishing fails. This workflow does not ask about or perform Sites creation, modification, or deletion.
+Do not upload an HTML snapshot. In Topic6 the only web delivery is the Miaoda (妙搭) publish in Phase H; never run `scripts/upload-html.mjs` (including `--dry-run` / `--setup-key`) and never ask the user to set up a key. Return the validated local `index.html`. This workflow does not ask about or perform Sites creation, modification, or deletion.

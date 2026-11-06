@@ -50,6 +50,13 @@ PHRASE_RULES: list[tuple[str, str, re.Pattern, set | None]] = [
 ]
 
 _LINK_RE = re.compile(r"\[([^\]]*)\]\(([^)]*)\)")
+# 与 pipeline_e._E3_PLATFORM_HEADING_RE 同一口径
+_E3_PLATFORM_HEADING_RE = re.compile(
+    r"^\s*#{2,3}\s*\**\s*(微博|抖音|B站|知乎)\s*(?:热点|新鲜事|平台)?\s*\**\s*(?:$|[·:：（(|\-—])")
+_E3_EMPTY_PLACEHOLDER_RE = re.compile(r"^\s*上周\s*(微博|抖音|B站|知乎)\s*无营销可用热点")
+# 「平台重复」只认裸平台标题(`### 微博`/`### **微博**`)。`### 微博 · 平台热点词 TOP 3` 是 pipeline_e
+# 给撰写的输入小标题，模型可能原样转写，属于同一平台的子标题，不算重复。
+_E3_BARE_PLATFORM_HEADING_RE = re.compile(r"^\s*#{2,3}\s*\**\s*(微博|抖音|B站|知乎)\s*\**\s*[:：]?\s*$")
 
 
 def _prose(line: str) -> str:
@@ -111,6 +118,26 @@ def check(text: str) -> dict:
                 m = pattern.search(prose)
                 if m:
                     add(sid, item, severity, f"命中「{m.group(0)}」", no)
+
+    # E3 串平台(W44:微博段内写出其他平台的空占位,之后三个平台标题各出现两次)。
+    current_platform = None
+    seen_platforms: dict[str, int] = {}
+    for no, line in sections.get("e3") or []:
+        m = _E3_PLATFORM_HEADING_RE.match(line)
+        if m:
+            current_platform = m.group(1)
+            if not _E3_BARE_PLATFORM_HEADING_RE.match(line):
+                continue
+            if current_platform in seen_platforms:
+                add("e3", "E3 平台重复", "fail",
+                    f"「### {current_platform}」重复出现(首次在第 {seen_platforms[current_platform]} 行)", no)
+            else:
+                seen_platforms[current_platform] = no
+            continue
+        pm = _E3_EMPTY_PLACEHOLDER_RE.match(line)
+        if pm and current_platform and pm.group(1) != current_platform:
+            add("e3", "E3 串平台", "fail",
+                f"「{current_platform}」小节内出现「上周{pm.group(1)}无营销可用热点」", no)
 
     e4 = sections.get("e4") or []
     in_consumer, insight_blocks, current_has = False, 0, None

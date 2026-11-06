@@ -35,7 +35,7 @@ Skill `topic6-insight`（Phase E + F）：从标注宽表生成 E1~E4 四个周�
 - **THEN** 写入 `06_洞察/v2/`
 
 ### Requirement: E3/E4 分步路由
-E3 SHALL 并发执行热点词打标（`_tagging`）与事件洞察初稿（`_insight_draft`），本地过滤主体不明词并复用 `e3_platforms._score_word_candidates` 重新打分取热点词 TOP3，再按微博/抖音/B站/知乎四平台并发撰写并按该顺序拼接；任一平台失败 MUST 使 E3 失败。打标失败时本轮 MUST NOT 展示未过滤的热点词；初稿失败时撰写阶段退回自行判断。
+E3 SHALL 并发执行热点词打标（`_tagging`）与事件洞察初稿（`_insight_draft`），本地过滤主体不明词并复用 `e3_platforms._score_word_candidates` 重新打分取热点词 TOP3，再按微博/抖音/B站/知乎四平台并发撰写并按该顺序拼接；拼接前每个平台结果 MUST 剔除其他平台标题起的段落与「上周{其他平台}无营销可用热点」行，找不到本平台标题时保留原文并告警；任一平台失败 MUST 使 E3 失败。E3/E4 子步骤输出（打标/初稿/枚举/仲裁）SHALL 按期望表头行定位伪表格（截止于下一个已知表头或 `### `），定位不到再按 `### 标题` 取段；非空输出两者都找不到时告警并写入该版块结果的 `parse_warnings`。热搜标题渲染为链接文字时 SHALL 经 `_common.md_link_title`（换行/`<br>`→空格、`[]`→全角、`|`→`\|`）。打标失败时本轮 MUST NOT 展示未过滤的热点词；初稿失败时撰写阶段退回自行判断。
 E4 SHALL 并发执行打标（`_tagging`）与草稿枚举（`_curation`），再做跨板块归属仲裁与同池去重（`_arbitration`），由脚本完成分组、组间与组内排序，然后 A 组（`_writing_coop_risk`）与 B 组（`_writing_marketing_consumer`）并发撰写并按 A→B 拼接。打标失败保守保留全部候选；枚举失败时营销观察/消费洞察本轮为空；仲裁失败不移除不合并。每组输出 MUST 通过格式校验（B 组卡片字段齐全）与链接溯源校验（引用 URL 全部来自本组输入），不通过则该组重写 1 次，仍不通过则 E4 失败。所有子调用共用版块并发上限、max_tokens 升档与网络重试，token 计入所属版块。
 
 #### Scenario: B 组引用候选池外链接
@@ -68,7 +68,7 @@ E4 SHALL 并发执行打标（`_tagging`）与草稿枚举（`_curation`），�
 - **THEN** 报告开头含冒烟测试声明
 
 ### Requirement: 发布前自校验
-`report_self_check.py --project-dir --report-file [--version]` SHALL 只扫正文（剥离链接文字/URL 与表格内热搜标题），输出单行 `{"status":"pass|warn|fail","failed_sections":[…],"issues":[…]}`，fail 时退出 1。fail 级：缺章节标题、版块无洞察正文（<20 字）、非 http(s) 链接或"链接"行无 URL、LLM 痕迹（综上所述/作为AI/以下是…洞察等）、版块意图泄露（本版块旨在/写作要求/Prompt）、E4 打标内部措辞（乙方能不能接等）、越界推断（年度趋势/密集月份）、热度单位写成"万"、E4 消费洞察缺"营销发现"。warn 级：模糊数字（约/大约/估计/左右）、执行性建议（务必/立即行动等）、E3 跨平台比较。`failed_sections` 为含 fail 问题的版块集合。
+`report_self_check.py --project-dir --report-file [--version]` SHALL 只扫正文（剥离链接文字/URL 与表格内热搜标题），输出单行 `{"status":"pass|warn|fail","failed_sections":[…],"issues":[…]}`，fail 时退出 1。fail 级：缺章节标题、版块无洞察正文（<20 字）、非 http(s) 链接或"链接"行无 URL、LLM 痕迹（综上所述/作为AI/以下是…洞察等）、版块意图泄露（本版块旨在/写作要求/Prompt）、E4 打标内部措辞（乙方能不能接等）、越界推断（年度趋势/密集月份）、热度单位写成"万"、E4 消费洞察缺"营销发现"、E3 同一平台标题重复、E3 某平台小节内出现「上周{其他平台}无营销可用热点」。warn 级：模糊数字（约/大约/估计/左右）、执行性建议（务必/立即行动等）、E3 跨平台比较。`failed_sections` 为含 fail 问题的版块集合。
 
 #### Scenario: LLM 痕迹
 - **WHEN** E2 正文含"综上所述"

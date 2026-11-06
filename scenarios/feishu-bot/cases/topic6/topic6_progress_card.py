@@ -114,6 +114,7 @@ def build_progress_card(
     overflow: int = 0,
     error: str = "",
     online_url: str = "",
+    report_doc_url: str = "",
 ) -> dict:
     """组装一张进度卡片 dict。参数只吃"当前快照",不做状态推断。
 
@@ -121,6 +122,8 @@ def build_progress_card(
     - ``review_lines``: 已完成 HC 的审核人、结果和时间，最多三条。
     - ``overflow``: buffer 已淘汰但未展示的条数,>0 时卡片顶部提示。
     - ``error`` / ``online_url``: 仅终态生效。
+    - ``report_doc_url``: HC3 定稿的飞书报告文档;仅终态生效。报告建在机器人云空间,
+      HC3 卡被覆盖后用户没有其他入口找到它,终态卡始终给出链接。
     """
     tool_snapshot = list(tool_lines)[-MAX_TOOL_LINES:]
     elements: list[dict] = [
@@ -208,6 +211,16 @@ def build_progress_card(
                 "type": "primary_filled",
                 "width": "fill",
                 "behaviors": [{"type": "open_url", "default_url": online_url}],
+            }
+        )
+    if status in (STATUS_DONE, STATUS_FAILED, STATUS_STOPPED) and report_doc_url:
+        elements.append(
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "打开飞书报告文档"},
+                "type": "default",
+                "width": "fill",
+                "behaviors": [{"type": "open_url", "default_url": report_doc_url}],
             }
         )
     if status in (STATUS_RUNNING, STATUS_WAIT_HC) and job.task_id:

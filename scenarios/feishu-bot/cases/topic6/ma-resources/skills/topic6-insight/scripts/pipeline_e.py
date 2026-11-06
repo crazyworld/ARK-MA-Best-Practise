@@ -64,7 +64,7 @@ STATS_DIR = SKILL_DIR / "01_统计"
 if str(STATS_DIR) not in sys.path:
     sys.path.insert(0, str(STATS_DIR))
 from e3_platforms import EXPECTED_PLATFORMS, _score_word_candidates  # noqa: E402
-from _common import fmt_score  # noqa: E402
+from _common import fmt_score, md_link_title  # noqa: E402
 WORKSPACE_ROOT = Path("/workspace")
 CHECKPOINT_VERSION = 1
 # E 阶段峰值 6 路(E1/E2 + E3 打标∥初稿 + E4 打标∥枚举);CC V2.0 不设上限,这里设为峰值,
@@ -560,6 +560,55 @@ def _split_headed_sections(text: str, prefix: str) -> dict:
     return sections
 
 
+_PSEUDO_SPLIT_RE = re.compile(r"\s*\|\|\s*")
+
+
+def _header_cells(line: str) -> list:
+    return [c.strip() for c in _PSEUDO_SPLIT_RE.split(line.strip())]
+
+
+def _locate_pseudo_table(text: str, expected_header: list, known_headers: list) -> str | None:
+    """按期望表头行在全文中定位一张" || "伪表格,返回「表头行 + 数据行」,找不到返回 None。
+
+    截止于下一个已知表头行或下一个 `### ` 标题。不依赖 `### 标题`:模型漏写标题(W44 E3 打标/
+    初稿直接从表头开始输出)时照样能取到;同一输出里有多张表(E4)时各取各的,不会串表。"""
+    lines = text.splitlines()
+    others = [h for h in known_headers if h != expected_header]
+    for i, line in enumerate(lines):
+        if _header_cells(line) != expected_header:
+            continue
+        block = [line]
+        for nxt in lines[i + 1:]:
+            if nxt.startswith("### ") or _header_cells(nxt) in others:
+                break
+            block.append(nxt)
+        return "\n".join(block)
+    return None
+
+
+def _parse_table(text: str, sections: dict, title: str, expected_header: list,
+                 known_headers: list) -> tuple[list, bool]:
+    """先按表头定位,定位不到才退回按 `### 标题` 取段(兼容模型漏写表头行)。
+
+    返回 (rows, located);located=False 表示表头与标题都没找到。"""
+    block = _locate_pseudo_table(text, expected_header, known_headers)
+    if block is None:
+        if title not in sections:
+            return [], False
+        block = sections[title]
+    return _parse_pseudo_rows(block, expected_header=expected_header), True
+
+
+def _warn_unparsed(label: str, text: str, located: bool, warnings: list | None) -> None:
+    """非空输出里既找不到表头也找不到标题 → 明确告警(此前静默解析为 0 行)。"""
+    if located or not text.strip():
+        return
+    msg = f"{label}输出未找到期望表头或标题,解析为 0 行"
+    print(f"[pipeline_e] ⚠️ {msg}", file=sys.stderr)
+    if warnings is not None:
+        warnings.append(msg)
+
+
 def _strip_trailing_rule(body: str) -> str:
     """_split_headed_sections 切出的非末节会带上原分隔符"---",重新拼接前剥掉。"""
     body = body.rstrip()
@@ -662,12 +711,14 @@ def _build_e3_tagging_input(candidates: dict) -> str | None:
     return _render_pseudo_rows(["热点驱动词", "词频", "均分"], rows)
 
 
-def _parse_e3_tagging_output(text: str) -> dict:
+E3_TAGGING_HEADER = ["热点驱动词", "归类", "可借势", "理由"]
+E3_DRAFT_HEADER = ["平台", "事件簇名", "信号类型", "判断依据"]
+
+
+def _parse_e3_tagging_output(text: str, warnings: list | None = None) -> dict:
     sections = _split_headed_sections(text, prefix="### ")
-    rows = _parse_pseudo_rows(
-        sections.get("热点词打标", ""),
-        expected_header=["热点驱动词", "归类", "可借势", "理由"],
-    )
+    rows, located = _parse_table(text, sections, "热点词打标", E3_TAGGING_HEADER, [E3_TAGGING_HEADER])
+    _warn_unparsed("E3热点词打标", text, located, warnings)
     return {
         r["热点驱动词"]: {"归类": r.get("归类", ""), "可借势": r.get("可借势", "")}
         for r in rows if r.get("热点驱动词")
@@ -687,12 +738,10 @@ def _build_e3_insight_draft_input(fulltext: dict) -> str | None:
     return "\n\n".join(blocks) if blocks else None
 
 
-def _parse_e3_insight_draft_output(text: str) -> dict:
+def _parse_e3_insight_draft_output(text: str, warnings: list | None = None) -> dict:
     sections = _split_headed_sections(text, prefix="### ")
-    rows = _parse_pseudo_rows(
-        sections.get("洞察初稿", ""),
-        expected_header=["平台", "事件簇名", "信号类型", "判断依据"],
-    )
+    rows, located = _parse_table(text, sections, "洞察初稿", E3_DRAFT_HEADER, [E3_DRAFT_HEADER])
+    _warn_unparsed("E3洞察初稿", text, located, warnings)
     result = {}
     for r in rows:
         pname, event = r.get("平台"), r.get("事件簇名")
@@ -748,6 +797,45 @@ def _compose_e3_platform_blocks(raw_e3_data: str, candidates: dict | None,
     return blocks
 
 
+# 平台小节标题:`### 微博`、`### **抖音**`、`### 微博热点`、`### B站 · 平台热点词 TOP 3`。
+# 平台名后必须是结尾/分隔符/固定后缀,避免把「#### 微博之夜…」这类事件小标题误当成平台切换。
+_E3_PLATFORM_HEADING_RE = re.compile(
+    r"^\s*#{2,3}\s*\**\s*(微博|抖音|B站|知乎)\s*(?:热点|新鲜事|平台)?\s*\**\s*(?:$|[·:：（(|\-—])")
+
+
+def _isolate_e3_platform(pname: str, body: str, warnings: list | None = None) -> str:
+    """单平台撰写结果只保留本平台内容(W44:微博段里写出「上周抖音/B站/知乎无营销可用热点」,
+    拼接后三个平台标题各出现两次)。
+
+    - 以其他平台名开头的标题(`### 抖音`、`### 抖音热点`、`## **B站**`…)起、到下一个本平台标题前的内容丢弃;
+    - 删除「上周{其他平台}无营销可用热点」占位行(模型可能不写标题直接写这句);本平台的这句保留;
+    - 找不到本平台标题时原样返回并告警:宁可留给 report_self_check 判 fail 定点重跑,也不丢正文。"""
+    lines = body.split("\n")
+    if not any((m := _E3_PLATFORM_HEADING_RE.match(l)) and m.group(1) == pname for l in lines):
+        msg = f"E3·{pname} 撰写结果未找到「### {pname}」标题,未做跨平台过滤"
+        print(f"[pipeline_e] ⚠️ {msg}", file=sys.stderr)
+        if warnings is not None:
+            warnings.append(msg)
+        return body
+    others = [p for p in EXPECTED_PLATFORMS if p != pname]
+    placeholder = re.compile(rf"^\s*上周\s*(?:{'|'.join(map(re.escape, others))})\s*无营销可用热点")
+    kept, owner, dropped = [], None, 0
+    for line in lines:
+        m = _E3_PLATFORM_HEADING_RE.match(line)
+        if m:
+            owner = m.group(1)
+        if (owner not in (None, pname)) or placeholder.match(line):
+            dropped += bool(line.strip())
+            continue
+        kept.append(line)
+    if dropped:
+        msg = f"E3·{pname} 撰写结果混入其他平台内容,已剔除 {dropped} 行"
+        print(f"[pipeline_e] ⚠️ {msg}", file=sys.stderr)
+        if warnings is not None:
+            warnings.append(msg)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(kept))
+
+
 async def build_e3_task(llm_call, sec: dict, insight_dir: Path, model: str = "") -> dict:
     sid = sec["id"]
     t0 = time.time()
@@ -786,14 +874,15 @@ async def build_e3_task(llm_call, sec: dict, insight_dir: Path, model: str = "")
     usage.add(tag_res)
     usage.add(draft_res)
 
+    parse_warnings: list = []
     word_tags = None
     if tagging_input and _sub_ok(tag_res, sid, "热点词打标", "本轮不展示「平台热点词」"):
-        word_tags = _parse_e3_tagging_output(tag_res["content"])
+        word_tags = _parse_e3_tagging_output(tag_res["content"], parse_warnings)
         _atomic_text(tag_res["content"], insight_dir / E3_TAGGING_AUDIT_FILE)
         print(f"[{sid}] 打标完成({len(word_tags)} 个候选词)")
     draft = None
     if draft_input and _sub_ok(draft_res, sid, "洞察初稿", "撰写阶段自行判断信号"):
-        draft = _parse_e3_insight_draft_output(draft_res["content"])
+        draft = _parse_e3_insight_draft_output(draft_res["content"], parse_warnings)
         _atomic_text(draft_res["content"], insight_dir / E3_INSIGHT_DRAFT_AUDIT_FILE)
         print(f"[{sid}] 洞察初稿完成({len(draft)} 个事件)")
 
@@ -817,13 +906,15 @@ async def build_e3_task(llm_call, sec: dict, insight_dir: Path, model: str = "")
         return {**await _error_result(sec, f"E3 分平台撰写失败：{errs}"),
                 "input_tokens": usage.input_tokens, "output_tokens": usage.output_tokens}
 
-    content = "\n\n".join(
-        _strip_leading_heading(_strip_markdown_fence(r["content"]), sec["section_title"]).strip()
-        for r in results
-    )
+    parts = []
+    for pname, r in zip(ordered, results):
+        body = _strip_leading_heading(_strip_markdown_fence(r["content"]), sec["section_title"])
+        parts.append(_isolate_e3_platform(pname, body, parse_warnings).strip())
+    content = "\n\n".join(parts)
     truncated = any(r.get("stop_reason") == "length" for r in results)
     return _section_result(sec, content, usage, t0, model,
-                           "length" if truncated else "stop", split_platforms=ordered)
+                           "length" if truncated else "stop", split_platforms=ordered,
+                           **({"parse_warnings": parse_warnings} if parse_warnings else {}))
 
 
 # ---------------------------------------------------------------------------
@@ -869,7 +960,7 @@ def _score_of(item: dict) -> float:
 def _render_risk_candidate_links(item: dict) -> str:
     lines = []
     for t in item.get("具体热搜", []):
-        title = _escape_md_cell(t["标题"])
+        title = md_link_title(t["标题"])
         link = t.get("链接", "")
         text = f"[{title}]({link})" if (link and link != "—") else title
         lines.append(f"- {text} · {t.get('平台', '—')} · {t.get('热度分', '—')}")
@@ -877,7 +968,7 @@ def _render_risk_candidate_links(item: dict) -> str:
 
 
 def _render_coop_candidate_link(item: dict) -> str:
-    title = _escape_md_cell(item.get("代表热搜标题", ""))
+    title = md_link_title(item.get("代表热搜标题", ""))
     link = item.get("代表热搜链接", "")
     return f"[{title}]({link})" if (link and link != "—") else title
 
@@ -897,18 +988,22 @@ def _build_e4_tagging_input(candidates: dict) -> str | None:
     return "\n\n".join(parts) if parts else None
 
 
-def _parse_e4_tagging_output(text: str) -> tuple:
+E4_RISK_TAG_HEADER = ["事件簇名", "风险类型", "可接性", "理由"]
+E4_COOP_TAG_HEADER = ["事件簇名", "变动类型", "参考价值", "理由"]
+E4_MARKETING_DRAFT_HEADER = ["事件簇名", "现象概括"]
+E4_CONSUMER_DRAFT_HEADER = ["候选组合", "现象概括"]
+E4_CROSS_ARB_HEADER = ["涉及候选", "最终归属", "理由"]
+E4_SAME_ARB_HEADER = ["涉及候选", "保留候选", "理由"]
+
+
+def _parse_e4_tagging_output(text: str, warnings: list | None = None) -> tuple:
     sections = _split_headed_sections(text, prefix="### ")
-    risk_tags = {
-        r["事件簇名"]: r for r in _parse_pseudo_rows(
-            sections.get("舆情风险打标", ""), expected_header=["事件簇名", "风险类型", "可接性", "理由"])
-        if r.get("事件簇名")
-    }
-    coop_tags = {
-        r["事件簇名"]: r for r in _parse_pseudo_rows(
-            sections.get("合作动态打标", ""), expected_header=["事件簇名", "变动类型", "参考价值", "理由"])
-        if r.get("事件簇名")
-    }
+    known = [E4_RISK_TAG_HEADER, E4_COOP_TAG_HEADER]
+    risk_rows, risk_loc = _parse_table(text, sections, "舆情风险打标", E4_RISK_TAG_HEADER, known)
+    coop_rows, coop_loc = _parse_table(text, sections, "合作动态打标", E4_COOP_TAG_HEADER, known)
+    _warn_unparsed("E4候选打标", text, risk_loc or coop_loc, warnings)
+    risk_tags = {r["事件簇名"]: r for r in risk_rows if r.get("事件簇名")}
+    coop_tags = {r["事件簇名"]: r for r in coop_rows if r.get("事件簇名")}
     return risk_tags, coop_tags
 
 
@@ -947,17 +1042,18 @@ def _build_e4_curation_input(candidates: dict) -> str | None:
     return "\n\n".join(parts) if parts else None
 
 
-def _parse_e4_curation_output(text: str) -> tuple:
+def _parse_e4_curation_output(text: str, warnings: list | None = None) -> tuple:
     sections = _split_headed_sections(text, prefix="### ")
+    known = [E4_MARKETING_DRAFT_HEADER, E4_CONSUMER_DRAFT_HEADER]
+    mk_rows, mk_loc = _parse_table(text, sections, "营销观察草稿", E4_MARKETING_DRAFT_HEADER, known)
+    cs_rows, cs_loc = _parse_table(text, sections, "消费洞察草稿", E4_CONSUMER_DRAFT_HEADER, known)
+    _warn_unparsed("E4草稿枚举", text, mk_loc or cs_loc, warnings)
     marketing = [
         {"事件簇名": r["事件簇名"], "现象概括": r.get("现象概括", "")}
-        for r in _parse_pseudo_rows(sections.get("营销观察草稿", ""),
-                                    expected_header=["事件簇名", "现象概括"])
-        if r.get("事件簇名")
+        for r in mk_rows if r.get("事件簇名")
     ]
     consumer = []
-    for r in _parse_pseudo_rows(sections.get("消费洞察草稿", ""),
-                                expected_header=["候选组合", "现象概括"]):
+    for r in cs_rows:
         names = [n.strip() for n in r.get("候选组合", "").split("+") if n.strip()]
         if names:
             consumer.append({"候选组合": names, "现象概括": r.get("现象概括", "")})
@@ -991,18 +1087,20 @@ def _split_pool_refs(raw: str) -> list:
     return refs
 
 
-def _parse_e4_arbitration_output(text: str) -> tuple:
+def _parse_e4_arbitration_output(text: str, warnings: list | None = None) -> tuple:
     """返回 (跨板块重复[{涉及候选, 最终归属}], 同池重复[{pool, names, keep}])。"""
     sections = _split_headed_sections(text, prefix="### ")
+    known = [E4_CROSS_ARB_HEADER, E4_SAME_ARB_HEADER]
+    cross_rows, cross_loc = _parse_table(text, sections, "跨板块重复事件", E4_CROSS_ARB_HEADER, known)
+    same_rows, same_loc = _parse_table(text, sections, "同池内部重复事件", E4_SAME_ARB_HEADER, known)
+    _warn_unparsed("E4跨板块仲裁", text, cross_loc or same_loc, warnings)
     cross = []
-    for r in _parse_pseudo_rows(sections.get("跨板块重复事件", ""),
-                                expected_header=["涉及候选", "最终归属", "理由"]):
+    for r in cross_rows:
         refs = _split_pool_refs(r.get("涉及候选", ""))
         if refs and r.get("最终归属"):
             cross.append({"涉及候选": refs, "最终归属": r["最终归属"].strip()})
     same = []
-    for r in _parse_pseudo_rows(sections.get("同池内部重复事件", ""),
-                                expected_header=["涉及候选", "保留候选", "理由"]):
+    for r in same_rows:
         refs = _split_pool_refs(r.get("涉及候选", ""))
         pools = {p for p, _ in refs}
         keep = r.get("保留候选", "").strip()
@@ -1255,15 +1353,16 @@ async def build_e4_task(llm_call, sec: dict, insight_dir: Path, model: str = "")
     usage.add(tag_res)
     usage.add(cur_res)
 
+    parse_warnings: list = []
     risk_tags = coop_tags = None
     if tagging_input and _sub_ok(tag_res, sid, "打标", "保守保留全部舆情风险/合作动态候选"):
-        risk_tags, coop_tags = _parse_e4_tagging_output(tag_res["content"])
+        risk_tags, coop_tags = _parse_e4_tagging_output(tag_res["content"], parse_warnings)
         _atomic_text(tag_res["content"], insight_dir / E4_TAGGING_AUDIT_FILE)
     risk_kept, coop_kept = _filter_e4_tagged(candidates, risk_tags, coop_tags)
 
     marketing, consumer = [], []
     if curation_input and _sub_ok(cur_res, sid, "草稿枚举", "营销观察/消费洞察本轮为空"):
-        marketing, consumer = _parse_e4_curation_output(cur_res["content"])
+        marketing, consumer = _parse_e4_curation_output(cur_res["content"], parse_warnings)
         _atomic_text(cur_res["content"], insight_dir / E4_CURATION_AUDIT_FILE)
     print(f"[{sid}] 打标/枚举完成:舆情风险{len(risk_kept)} 合作动态{len(coop_kept)} "
           f"营销观察{len(marketing)} 消费洞察{len(consumer)}")
@@ -1275,7 +1374,7 @@ async def build_e4_task(llm_call, sec: dict, insight_dir: Path, model: str = "")
             llm_call, "e4_arbitration", "E4跨板块仲裁", E4_ARBITRATION_PROMPT_DIR,
             arb_input, E4_ARBITRATION_MAX_TOKENS))
         if _sub_ok(arb_res, sid, "仲裁", "三板块候选不做移除/合并(人工核查时留意重复)"):
-            cross, same = _parse_e4_arbitration_output(arb_res["content"])
+            cross, same = _parse_e4_arbitration_output(arb_res["content"], parse_warnings)
             risk_kept, coop_kept, marketing, n_removed, n_merged = _apply_e4_arbitration(
                 risk_kept, coop_kept, marketing, cross, same)
             _atomic_text(arb_res["content"], insight_dir / E4_ARBITRATION_AUDIT_FILE)
@@ -1316,7 +1415,8 @@ async def build_e4_task(llm_call, sec: dict, insight_dir: Path, model: str = "")
     body_b = _strip_leading_heading(res_b["content"], sec["section_title"]).strip()
     truncated = any(r.get("stop_reason") == "length" for r in (res_a, res_b))
     return _section_result(sec, f"{body_a}\n\n{body_b}", usage, t0, model,
-                           "length" if truncated else "stop", split_writing=True)
+                           "length" if truncated else "stop", split_writing=True,
+                           **({"parse_warnings": parse_warnings} if parse_warnings else {}))
 
 
 def _atomic_text(text: str, path: Path) -> None:

@@ -13,6 +13,22 @@ from pathlib import Path
 import pandas as pd
 
 
+_LINK_TITLE_BREAK_RE = re.compile(r"<br\s*/?>|\r\n|\r|\n", re.IGNORECASE)
+
+
+def md_link_title(title) -> str:
+    """热搜标题 → 可安全放进 markdown 链接文字与表格单元格的文本。
+
+    - 换行 / `<br>` → 空格:原标题含换行时链接文字带 `<br>`,渲染断开(W44「不烧心」)
+    - `[` `]` → 全角 `［` `］`:半角方括号打断 `[文字](url)`(W44 B站「【[AI全民制作人】」)。
+      不用反斜杠转义:md2source 的 LINK_RE 不识别 `\\[`,会让链接整体失效
+    - `|` → `\\|`:表格单元格内保持原有转义
+    只用于链接文字;事件簇名/说明等其他单元格仍走各自原逻辑,不改正文字形。"""
+    text = _LINK_TITLE_BREAK_RE.sub(" ", str(title))
+    text = re.sub(r"[ \t]{2,}", " ", text).strip()
+    return text.replace("[", "［").replace("]", "］").replace("|", "\\|")
+
+
 def fmt_score(v, suffix: str = " 分") -> str:
     """格式化标准化分：保留 1 位小数 + 可选后缀（默认" 分"）。
     suffix="" 用于不带"分"字的场景（如E3热点事件/平台热点词的热度值列，2026-09-15新增）。"""
@@ -34,7 +50,7 @@ def _render_titles_with_links(top: pd.DataFrame, show_platform: bool) -> str:
     从 top_titles_with_links_str 抽出，供多个"先筛选/排序、再渲染"的变体复用。"""
     lines = []
     for _, r in top.iterrows():
-        title = safe_field(r, "热点标题", "").replace("|", "\\|")
+        title = md_link_title(safe_field(r, "热点标题", ""))
         link = safe_field(r, "链接", "")
         platform = safe_field(r, "平台", "")
         text = f"[{title}]({link})" if (link and link != "—") else title

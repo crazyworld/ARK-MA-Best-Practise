@@ -91,9 +91,9 @@ TOPIC6_DOCS_FOLDER_TOKEN=fldcnXXXXXXXXX
 
 | Agent | 模型 | provider | 本次改动 |
 |-------|------|----------|----------|
-| coordinator | DeepSeek-V4.1-Flash（256K） | bmc-llm-relay | 2026-11-05 由 DeepSeek-V4-Flash-0731 切换 |
-| annotator | DeepSeek-V4.1-Flash（256K） | bmc-llm-relay | 同上 |
-| validator | DeepSeek-V4.1-Flash（256K） | bmc-llm-relay | 同上 |
+| coordinator | DeepSeek-V4.1-Flash（上下文 1,024K / 输出 384K） | bmc-llm-relay | 2026-11-05 由 DeepSeek-V4-Flash-0731 切换 |
+| annotator | DeepSeek-V4.1-Flash（上下文 1,024K / 输出 384K） | bmc-llm-relay | 同上 |
+| validator | DeepSeek-V4.1-Flash（上下文 1,024K / 输出 384K） | bmc-llm-relay | 同上 |
 
 > Agent JSON 中的 `base_url` 和 `provider` 是方舟 MA 侧的配置，在 `create_all.sh` 时写入。
 > Gateway 本地不需要配这些——但 Gateway 需要 `BYOK_MODEL_AUTH_HEADER_*` 来在每次

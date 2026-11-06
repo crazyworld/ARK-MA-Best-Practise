@@ -11,6 +11,60 @@
 
 ---
 
+## 2026-11-06
+
+### C2 实体归一（03）首批撞 max_tokens=16000 阻断 full；Agent token_limits 恢复模型原生规格
+
+- **现象**：job_d1f123f2c933（W44 full）C2 EV 的 E 阶段 `03_normalize_entities.py` 首批 50 个实体即
+  `ValueError: 输出被 max_tokens=16000 截断`，run_c2 内部重试 + Agent 续跑共 2 次逐字一致失败，停在 HC2 前。
+- **根因**：C2 各阶段 `--max-tokens` 默认（16000/24000）是上游 rc.14 按 `claude-sonnet-4-6` 调校的；MA 把
+  `C2_CHAT_MODEL_ID` 换成 DeepSeek-V4.1-Flash（推理 token 计入 max_tokens，同 Session F1 单次输出已到 23,345/24000）
+  却沿用原值；03 无截断兜底（07 有），temperature=0 + 失败不落缓存 → 每次同一请求、确定性失败。原版 V2 用 Sonnet
+  且按平台各跑 00~09，未触发。
+- **修复**：
+  - `relay.py`：新增 `MODEL_MAX_OUTPUT_TOKENS`（V4.1-Flash 384000），表内模型按原生输出上限请求、不再被脚本默认值
+    压低；截断报错附 `completion_tokens / reasoning_tokens / 正文字符数`，`Relay.reasoning_tokens` 累计。
+  - `03_normalize_entities.py`：截断先原样重试一次、仍截断对半拆（与 07 `archive_split` 一致），两半串行累积注册表；
+    拆到单名仍截断才失败；`auto_split`、`reasoning_tokens` 记入成本台账。
+  - 3 个 Agent `token_limits` 256000/200000/56000 → 1024000/1024000/384000（模型原生：上下文 1,024K 只计输入、
+    输出 384K），不人为压低。
+- **上线**：均为 ma-resources 改动 → `update_ma.sh`，只对新 Session 生效；失败的 job 需新 Session 重跑。
+- **待验证（212）**：full 跑通 C2；关注 03/F1 日志中的 reasoning_tokens 与 `auto_split`，以及 Agent 窗口放大后的
+  单步耗时/成本。
+- **影响文件**：`ma-resources/skills/topic6-event-registry/{scripts/relay.py,scripts/03_normalize_entities.py,CHANGELOG.md}`、
+  `ma-resources/agents/{coordinator,annotator,validator}.json`、`openspec/specs/coordinator-orchestration/spec.md`、
+  `DEPLOY_v2.1.md`、`CUSTOMER_TO_MA_FILE_MAPPING.md`、`tests/test_topic6_{ma_resources,c2_output_budget}.py`
+- **补充**：03 缓存键记录生效的 `relay.max_tokens`（而非脚本参数），原生上限表变化时缓存随之失效。
+  不做 relay 探测，按原生配置上线；212 首轮观察各 C2 阶段有无 HTTP 400、07 有无超时/失败块。
+
+### W44 Review 修复（B1~B7 + 报告链接入口；见 Obsidian `MA_ADA_DEV/review/topic6_W44_整体Review_2026-11-06.md`）
+
+- **B1 HC2 宽表推送失败 + 3 张同名空表**（Gateway）：`arkagent/feishu.py` 写入改为「≤5000 行且单批 JSON ≤
+  `FEISHU_SHEET_WRITE_MAX_CHARS`（默认 300000，按 requests 实际请求体计、中文为 `\uXXXX`；待 212 用 W44 HC2 宽表实测）」切批；建表后失败删除该表并抛
+  `SpreadsheetWriteError`（新增 `delete_drive_file`）。`feishu_doc_publisher._publish_wide_table` 飞书失败返回
+  `{wide_table: {error}}`，`send_hc_card` 不再把它当「未同步」重试建表，HC 卡显示「宽表推送飞书失败，请在任务 outputs 中下载」。
+- **B2 E3/E4 子步骤解析**：8 个解析点统一按期望表头定位伪表格（截止于下一已知表头或 `### `），定位不到再按标题取段；
+  非空输出都找不到时告警并写入版块结果 `parse_warnings`。修复 W44 E3「0 个候选词 / 0 个事件」与 E4 漏写一个标题时串表。
+- **B3 E3 串平台**：拼接前 `_isolate_e3_platform` 剔除其他平台标题起的段落与「上周{其他平台}无营销可用热点」行；
+  标题归一（`### 微博热点`/`### **抖音**`/`### 抖音：`）；找不到本平台标题保留原文并告警。不改 Prompt。
+- **B4 网页误判月刊**：`build-report.mjs` 周/月刊只按页头周期标签判定，周期解析提前到文件头（避免 TDZ）。
+- **B5 热搜链接损坏**：新增 `_common.md_link_title`（换行/`<br>`→空格、`[]`→全角、`|`→`\|`），只用于 5 个链接渲染函数；
+  `_escape_md_cell` 不变（不改非标题单元格字形）。
+- **B6 snapshot 上传指令冲突**：web-report `SKILL.md` 第 5/9/10 步、`CLAUDE.md`、`DESIGN_SPEC.md`、`agents/openai.yaml`
+  删除上传要求；`upload-html.mjs` 保留不引用。
+- **B7 自校验**：`report_self_check` 新增 fail 级「E3 平台重复」（只认裸平台标题，`### 微博 · 平台热点词 TOP 3` 不算）「E3 串平台」，走现有 `--sections e3` 定点重跑路径。
+- **D2 飞书报告入口**：报告仍建在机器人云空间根目录（不迁移）；终态卡（完成/失败/停止）增加「打开飞书报告文档」按钮，
+  终态通知追加「飞书报告：{url}」，链接取自最新一条 HC3 事件。
+- **上线**：B1、D2 只动 Gateway → 重启 Gateway；B2~B7 为 ma-resources 改动 → `update_ma.sh`（只对新 Session 生效）。
+- **待 212 验证**：B1 单批字符上限；B2/B3 用真实 E3/E4 输出确认无误剔除；B4 W44 网页标题为周刊。
+- **影响文件**：`arkagent/feishu.py`、`feishu_doc_publisher.py`、`topic6_hitl.py`、`topic6_runner.py`、`topic6_progress_card.py`、
+  `job_notifier.py`、`topic6-insight/{scripts/pipeline_e.py,scripts/report_self_check.py,01_统计/_common.py,01_统计/e4_marketing.py}`、
+  `topic6-web-report/{assets/source/build-report.mjs,assets/source/DESIGN_SPEC.md,SKILL.md,CLAUDE.md,agents/openai.yaml,CHANGELOG.md}`、
+  `coordinator.system.md`（自校验项列表）、`openspec/specs/{hitl-review,skill-insight,skill-web-publish}`、
+  `CUSTOMER_TO_MA_FILE_MAPPING.md`、`tests/test_topic6_{hc_sheet_roundtrip,web_report_alignment,e_stage_parsing,report_doc_link}.py`
+
+---
+
 ## 2026-11-05
 
 ### 对话模型统一 DeepSeek-V4.1-Flash（DataHub、向量除外）

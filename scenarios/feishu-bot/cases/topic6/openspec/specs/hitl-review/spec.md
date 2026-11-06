@@ -30,8 +30,8 @@ HC1/HC2/HC3 人工审核闭环：审核卡片渲染、HC 产物发布到飞书�
 ### Requirement: HC 前产物发布
 `send_hc_card` 在发布器可用时 SHALL：
 1. 任务无 `docs_folder_token` 时创建 job 子文件夹（名称 `{project_dir 末段 | unknown}_{job_id[:12]}`，父目录为 `TOPIC6_DOCS_FOLDER_TOKEN` 或机器人云空间根）并落库；失败只 warning。
-2. 最多 3 次（间隔 5s）执行"强制 `artifact_sync.sync_once` → `publish_hc_artifacts`"，直到拿到发布结果。
-3. HC1/HC2：在本地同步目录中按文件名查找 `wide_table_path` 对应文件（优先非 `.objects` 的物化路径，其次 `.objects/{hash}__{safe_name}`），用 `create_spreadsheet_from_xlsx` 导入为飞书表格，标题 `{项目名|mode}_{HC1|HC2}_wide_table`；URL 优先使用接口返回值；给任务发起人授予 `edit` 并回查协作者确认（`granted`）。HC3：仅校验 `feishu_doc_url` 存在并返回 `{report: {url, type: docx}}`。
+2. 最多 3 次（间隔 5s）执行"强制 `artifact_sync.sync_once` → `publish_hc_artifacts`"，直到拿到发布结果。只有本地文件未同步（返回空）才重试；飞书写入失败返回 `{wide_table: {error}}`，MUST NOT 重试建表，卡片显示"宽表推送飞书失败，请在任务 outputs 中下载"及原因，且不落库。
+3. HC1/HC2：在本地同步目录中按文件名查找 `wide_table_path` 对应文件（优先非 `.objects` 的物化路径，其次 `.objects/{hash}__{safe_name}`），用 `create_spreadsheet_from_xlsx` 导入为飞书表格，标题 `{项目名|mode}_{HC1|HC2}_wide_table`；写入按"行数 ≤ 5000 且单批 JSON ≤ `FEISHU_SHEET_WRITE_MAX_CHARS`（默认 300000）字符"切批；建表后任何失败 MUST 删除该表（`DELETE /drive/v1/files/{token}?type=sheet`）并抛 `SpreadsheetWriteError`；URL 优先使用接口返回值；给任务发起人授予 `edit` 并回查协作者确认（`granted`）。HC3：仅校验 `feishu_doc_url` 存在并返回 `{report: {url, type: docx}}`。
 4. 发布结果的 `{token, type, url}` MUST 通过 `set_hc_artifacts` 落库，供审核通过后回读。
 
 任一步失败 MUST NOT 阻止发卡。
@@ -91,14 +91,14 @@ HC1/HC2 通过时，若该事件的 `artifacts.wide_table.token` 存在，系统
 - **THEN** 新 xlsx 挂载到 Session，决策消息包含覆盖提示
 
 ### Requirement: 进度卡片渲染
-`build_progress_card` SHALL 只根据传入快照渲染（不推断状态）：头部按状态——运行中蓝"🚀 运行中"、`wait_hc` 青"⏸️ 等待审核 {phase}"、完成绿、失败红、停止灰；正文含元信息行、最近 3 条审核记录、最近 `MAX_TOOL_LINES=10` 条工具行（有淘汰时提示省略条数）；`wait_hc` 提示在当前卡片完成审核；失败/停止显示"错误摘要/停止原因"（≤400 字）；完成且有 `online_url` 时显示"打开报告"按钮。
+`build_progress_card` SHALL 只根据传入快照渲染（不推断状态）：头部按状态——运行中蓝"🚀 运行中"、`wait_hc` 青"⏸️ 等待审核 {phase}"、完成绿、失败红、停止灰；正文含元信息行、最近 3 条审核记录、最近 `MAX_TOOL_LINES=10` 条工具行（有淘汰时提示省略条数）；`wait_hc` 提示在当前卡片完成审核；失败/停止显示"错误摘要/停止原因"（≤400 字）；完成且有 `online_url` 时显示"打开报告"按钮；终态（完成/失败/停止）且传入 `report_doc_url` 时追加"打开飞书报告文档"按钮。Runner 只在终态时从最新一条 HC3 事件的 `feishu_doc_url` 取该链接（报告建在机器人云空间，HC3 卡被覆盖后这是用户找到报告的入口），无 HC3 记录则不渲染。
 
 #### Scenario: 完成态
 - **WHEN** `status=done` 且 `online_url` 非空
 - **THEN** 卡片显示"打开报告"按钮指向该 URL
 
 ### Requirement: @通知
-`JobNotifier` SHALL 在 HC 卡片发出后发送 `notify_hc_ready`，在终态卡片 patch 成功后发送 `notify_done/failed/stopped`（错误/原因截断 200 字）。@ 文本仅在发起人真名出现在群名册中时生成，否则省略 @；所有通知失败 MUST 只记日志不抛异常。
+`JobNotifier` SHALL 在 HC 卡片发出后发送 `notify_hc_ready`，在终态卡片 patch 成功后发送 `notify_done/failed/stopped`（错误/原因截断 200 字），有 HC3 报告链接时追加一行"飞书报告：{url}"。@ 文本仅在发起人真名出现在群名册中时生成，否则省略 @；所有通知失败 MUST 只记日志不抛异常。
 
 #### Scenario: 名册查询失败
 - **WHEN** `chat_roster` 抛异常

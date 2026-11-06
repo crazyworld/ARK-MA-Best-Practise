@@ -5,6 +5,9 @@ MA 适配点（其余文件与上游一致，`MANIFEST.json` 记录的是上游�
 
 - `scripts/relay.py`：保留 bmc-llm-relay（OpenAI 兼容流式 + 整体时限 + 多模态 embedding + PRICING 覆盖）；
   run_batches 版本绑定缓存、Embedder 向量/索引校验与原子落盘与 rc.14 对齐。
+  2026-11-06：`MODEL_MAX_OUTPUT_TOKENS` 按模型原生输出上限请求（V4.1-Flash 384K，上游 16000/24000 按 Sonnet 调校）；
+  截断报错附 reasoning_tokens。
+- `scripts/03_normalize_entities.py`（2026-11-06）：截断先原样重试一次、仍截断对半拆，串行累积注册表（同 07）。
 - `scripts/run_c2.py`：新增 `--review-policy record`（门禁不停，待审项进 `c2_quality.review_pending`）、
   `--degraded-policy accept`（07/03 技术降级不阻断）、`--front-workers`（跨平台 F1 同时运行的平台数，默认 1 = 上游串行）；
   x2 模型裁定透传 `--model`；端点指纹读 `LLM_RELAY_BASE_URL`。默认值保持上游语义。

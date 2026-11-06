@@ -366,3 +366,67 @@ def test_template_example_still_builds_and_validates(tmp_path):
     check = subprocess.run(["node", str(VALIDATE_RENDERED), str(source), str(html_path)],
                            capture_output=True, text=True, check=False)
     assert check.returncode == 0, check.stderr
+
+
+# ---------------------------------------------------------------- B4 周/月刊只看周期标签
+
+def _build_example_variant(tmp_path: Path, mutate) -> str:
+    blocks = json.loads(EXAMPLE.read_text(encoding="utf-8"))
+    mutate(blocks)
+    source = tmp_path / "source.json"
+    source.write_text(json.dumps(blocks, ensure_ascii=False), encoding="utf-8")
+    html_path = tmp_path / "index.html"
+    build = subprocess.run(["node", str(BUILDER), str(source), str(html_path)],
+                           capture_output=True, text=True, check=False)
+    assert build.returncode == 0, build.stderr
+    return html_path.read_text(encoding="utf-8")
+
+
+def _first_body_text_block(blocks):
+    return next(b for b in blocks if "docx-text-block" in b.get("className", "")
+                and "数据周期" not in str(b.get("text", "")))
+
+
+def test_body_month_mention_does_not_make_weekly_report_monthly(tmp_path):
+    """W44：正文出现「2026年10月车企销量交付数据披露」曾让周刊判成月刊。"""
+    def mutate(blocks):
+        blk = _first_body_text_block(blocks)
+        blk["text"] = str(blk.get("text", "")) + "2026年10月车企销量交付数据披露，月度榜单"
+    html = _build_example_variant(tmp_path, mutate)
+    assert "<title>社媒热点周刊" in html and "社媒热点月刊" not in html
+
+
+def test_monthly_period_label_still_builds_monthly(tmp_path):
+    """模板仍支持真实月刊：周期标签本身是月份时判月刊。"""
+    def mutate(blocks):
+        for b in blocks:
+            t = str(b.get("text", ""))
+            if "数据周期：2026-W32" in t:
+                b["text"] = t.replace("数据周期：2026-W32", "数据周期：2026年8月")
+    html = _build_example_variant(tmp_path, mutate)
+    assert "<title>社媒热点月刊 · 2026·08" in html
+
+
+def test_missing_period_still_fails_fast(tmp_path):
+    def mutate(blocks):
+        for b in blocks:
+            b["text"] = str(b.get("text", "")).replace("数据周期", "统计范围")
+    blocks = json.loads(EXAMPLE.read_text(encoding="utf-8"))
+    mutate(blocks)
+    source = tmp_path / "source.json"
+    source.write_text(json.dumps(blocks, ensure_ascii=False), encoding="utf-8")
+    build = subprocess.run(["node", str(BUILDER), str(source), str(tmp_path / "i.html")],
+                           capture_output=True, text=True, check=False)
+    assert build.returncode != 0 and "Missing report period" in build.stderr
+
+
+# ---------------------------------------------------------------- B6 不上传 HTML snapshot
+
+@pytest.mark.parametrize("rel", ["SKILL.md", "CLAUDE.md", "assets/source/DESIGN_SPEC.md", "agents/openai.yaml"])
+def test_web_report_docs_do_not_instruct_snapshot_upload(rel):
+    """coordinator 禁止执行 upload-html.mjs；skill 文档不得再要求上传（W44 Agent 照做后阻断要 key）。"""
+    text = (WEB / rel).read_text(encoding="utf-8")
+    for bad in ("--setup-key in their own", "run it once without `--dry-run`", "先执行 `--dry-run`，再上传",
+                "upload the finished HTML snapshot", "Publish every finished report HTML"):
+        assert bad not in text, (rel, bad)
+    assert (WEB / "scripts" / "upload-html.mjs").exists()  # 文件保留，只是不在流程中引用

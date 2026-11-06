@@ -26,12 +26,12 @@ from pathlib import Path
 from typing import Any, Optional
 
 try:
-    from .feishu_doc_publisher import artifact_urls
+    from .feishu_doc_publisher import artifact_errors, artifact_urls
     from .job_notifier import JobNotifier
     from .pipeline_store import HcEvent, PipelineJob, PipelineStore
     from .topic6_runner import Topic6CardSenderProtocol, Topic6Runner
 except ImportError:  # pragma: no cover - standalone compatibility
-    from feishu_doc_publisher import artifact_urls
+    from feishu_doc_publisher import artifact_errors, artifact_urls
     from job_notifier import JobNotifier
     from pipeline_store import HcEvent, PipelineJob, PipelineStore
     from topic6_runner import Topic6CardSenderProtocol, Topic6Runner
@@ -145,7 +145,8 @@ def _distribution_element(summary: Any) -> Optional[dict]:
     return {"tag": "markdown", "content": "\n".join(lines)}
 
 
-def _payload_summary_elements(payload: dict, published_urls: dict | None = None) -> list[dict]:
+def _payload_summary_elements(payload: dict, published_urls: dict | None = None,
+                              publish_errors: dict | None = None) -> list[dict]:
     """把 HC payload 的主要字段拍成一段可读摘要。字段挑选与三档 HC 通用。
 
     注意: validator_verdict 不在此处渲染,由 _validator_verdict_elements 专责。
@@ -178,6 +179,16 @@ def _payload_summary_elements(payload: dict, published_urls: dict | None = None)
                 "width": "fill",
                 "behaviors": [{"type": "open_url", "default_url": url}],
             })
+    # 飞书侧发布失败(本地文件已就绪)：明确告知，而不是静默没有链接
+    for name, err in (publish_errors or {}).items():
+        label = "宽表" if name == "wide_table" else name
+        elements.append({
+            "tag": "markdown",
+            "content": (
+                f"⚠️ **{label}推送飞书失败**，请在任务 outputs 中下载本地文件审核。\n"
+                f"原因：{err[:150]}"
+            ),
+        })
     return elements
 
 
@@ -248,7 +259,8 @@ def _action_value(job_id: str, hc_kind: str, event_id: int, decision: str) -> di
 
 
 def build_hc_card(job: PipelineJob, hc_kind: str, event_id: int, payload: dict,
-                  published_urls: dict | None = None) -> dict:
+                  published_urls: dict | None = None,
+                  publish_errors: dict | None = None) -> dict:
     """构造一张 HC 交互卡片(schema=2.0)。三档 HC 共用一套骨架,靠 _HC_META 区分。"""
     meta = _HC_META.get(hc_kind, _HC_META["HC1"])
     verdict = payload.get("validator_verdict") or {}
@@ -267,7 +279,7 @@ def build_hc_card(job: PipelineJob, hc_kind: str, event_id: int, payload: dict,
             ),
         },
     ]
-    elements.extend(_payload_summary_elements(payload, published_urls))
+    elements.extend(_payload_summary_elements(payload, published_urls, publish_errors))
     elements.extend(_validator_verdict_elements(payload))
     elements.append({"tag": "hr"})
     # BLOCK 时通过按钮加警示文案,保留操作权但视觉提醒。
@@ -566,7 +578,9 @@ class Topic6Hitl(Topic6CardSenderProtocol):
 
             if _job.docs_folder_token:
                 # 强制同步产物到本地（默认 60 秒轮询可能还没跑到）
-                # Agent 可能刚 publish wide_table，Files API 有传播延迟，最多重试 2 次（间隔 5 秒）
+                # Agent 可能刚 publish wide_table，Files API 有传播延迟，最多重试 2 次（间隔 5 秒）。
+                # 只有「本地文件未同步」返回空 dict 才重试；飞书写入失败返回带 error 的条目，
+                # 非空即跳出，不会再建一张同名表。
                 _max_sync_attempts = 3
                 for _attempt in range(1, _max_sync_attempts + 1):
                     if self._artifact_sync is not None:
@@ -608,12 +622,13 @@ class Topic6Hitl(Topic6CardSenderProtocol):
                 self._store.set_hc_artifacts(_event_id, {
                     name: {k: item.get(k, "") for k in ("token", "type", "url")}
                     for name, item in published_urls.items()
-                    if isinstance(item, dict)
+                    if isinstance(item, dict) and not item.get("error")
                 })
             except Exception as err:  # noqa: BLE001 - 不影响发卡
                 log.warning("topic6 set_hc_artifacts failed event=%s: %s", _event_id, err)
 
-        card = build_hc_card(_job, _hc_kind, _event_id, _payload, artifact_urls(published_urls))
+        card = build_hc_card(_job, _hc_kind, _event_id, _payload, artifact_urls(published_urls),
+                             artifact_errors(published_urls))
 
         # 正常路径复用任务启动时创建的主卡，整个 job 在会话里始终只有一张卡片。
         try:

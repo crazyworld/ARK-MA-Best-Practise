@@ -193,6 +193,131 @@ def test_create_spreadsheet_raises_on_write_failure(tmp_path, monkeypatch):
     assert sender.create_spreadsheet_from_xlsx("", str(xlsx), "demo") == ("sht_w", "https://x/sheets/sht_w")
 
 
+# ---- B1：宽表写入按请求体大小切批 + 失败删表 + 不重试建表 ---------------------------
+
+
+def test_sheet_write_batches_split_by_rows_and_chars():
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from arkagent.feishu import _sheet_write_batches
+
+    rows = [["x" * 100] for _ in range(10)]  # 每行 JSON 约 106 字符
+    batches = _sheet_write_batches(rows, max_rows=4, max_chars=10_000)
+    assert [(s, len(b)) for s, b in batches] == [(0, 4), (4, 4), (8, 2)]
+    batches = _sheet_write_batches(rows, max_rows=5000, max_chars=330)
+    assert [(s, len(b)) for s, b in batches] == [(0, 3), (3, 3), (6, 3), (9, 1)]
+    # 拼回去与原表逐行一致：分批不改变单元格值
+    assert [r for _s, b in batches for r in b] == rows
+    # 单行超过上限独占一批，不丢行
+    assert [len(b) for _s, b in _sheet_write_batches([["y" * 500], ["z"]], 5000, 100)] == [1, 1]
+    # 按真实请求体(requests json= 默认 ensure_ascii=True)计：中文每字 6 字节
+    cn = [["中" * 10]] * 4  # 每行 json.dumps 为 64 字符(ensure_ascii=False 时仅 14)
+    assert [len(b) for _s, b in _sheet_write_batches(cn, 5000, 130)] == [2, 2]
+
+
+def _sender_with_requests(monkeypatch, tmp_path, *, put_codes, delete_code=0):
+    import openpyxl
+    import requests
+
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    import arkagent.feishu as feishu_mod
+
+    xlsx = tmp_path / "w.xlsx"
+    wb = openpyxl.Workbook()
+    for i in range(6):
+        wb.active.append([f"r{i}", "v" * 50])
+    wb.save(xlsx)
+
+    calls = {"put": [], "delete": []}
+    codes = iter(put_codes)
+
+    def _resp(status, body):
+        return SimpleNamespace(status_code=status, json=lambda: body, text=str(body))
+
+    def _put(url, headers=None, json=None, timeout=None):
+        calls["put"].append(json["valueRange"]["range"])
+        return _resp(200, {"code": next(codes)})
+
+    def _delete(url, headers=None, params=None, timeout=None):
+        calls["delete"].append((url.rsplit("/", 1)[-1], params))
+        return _resp(200, {"code": delete_code})
+
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _resp(200, {
+        "code": 0, "data": {"spreadsheet": {"spreadsheet_token": "sht_w", "url": "https://x/sheets/sht_w"}},
+    }))
+    monkeypatch.setattr(requests, "get", lambda *a, **k: _resp(200, {"data": {"sheets": [{"sheet_id": "s1"}]}}))
+    monkeypatch.setattr(requests, "put", _put)
+    monkeypatch.setattr(requests, "delete", _delete)
+    sender = object.__new__(feishu_mod.FeishuSender)
+    sender._get_tenant_access_token = lambda: "t"
+    return feishu_mod, sender, xlsx, calls
+
+
+def test_create_spreadsheet_splits_large_body(tmp_path, monkeypatch):
+    feishu_mod, sender, xlsx, calls = _sender_with_requests(monkeypatch, tmp_path, put_codes=[0] * 10)
+    monkeypatch.setattr(feishu_mod, "SHEET_WRITE_MAX_CHARS", 150)  # 每行约 62 字符 → 每批 2 行
+    assert sender.create_spreadsheet_from_xlsx("", str(xlsx), "demo") == ("sht_w", "https://x/sheets/sht_w")
+    assert calls["put"] == ["s1!A1:B2", "s1!A3:B4", "s1!A5:B6"]
+    assert calls["delete"] == []
+
+
+def test_create_spreadsheet_deletes_empty_sheet_on_write_failure(tmp_path, monkeypatch):
+    feishu_mod, sender, xlsx, calls = _sender_with_requests(
+        monkeypatch, tmp_path, put_codes=[0, 90227])
+    monkeypatch.setattr(feishu_mod, "SHEET_WRITE_MAX_CHARS", 150)
+    with pytest.raises(feishu_mod.SpreadsheetWriteError, match="已删除该空表"):
+        sender.create_spreadsheet_from_xlsx("", str(xlsx), "demo")
+    assert calls["delete"] == [("sht_w", {"type": "sheet"})]
+
+
+def test_create_spreadsheet_delete_failure_keeps_original_error(tmp_path, monkeypatch):
+    feishu_mod, sender, xlsx, calls = _sender_with_requests(
+        monkeypatch, tmp_path, put_codes=[90227], delete_code=1061004)
+    with pytest.raises(feishu_mod.SpreadsheetWriteError, match="90227.*删除空表失败"):
+        sender.create_spreadsheet_from_xlsx("", str(xlsx), "demo")
+
+
+async def test_send_hc_card_write_failure_no_retry_and_card_warns(tmp_path):
+    """本地文件已同步、飞书写入失败：只建表一次(不再 3 次重试建 3 张空表)，卡片显示失败提示，不落库。"""
+    store = PipelineStore(str(tmp_path / "t.db"))
+    job = store.create_job(
+        chat_id="c1", thread_id="", user_open_id=USER, ma_session_id="sess-1",
+        mode="full", project_dir="/workspace/Projects/W42",
+    )
+    payload = {"hc": "HC2", "wide_table_path": WIDE_PATH}
+    event_id = store.append_hc_event(job.job_id, "HC2", payload)
+    safe_job = "".join(c if c.isalnum() or c in "._-" else "_" for c in job.job_id)
+    d = tmp_path / "sync" / safe_job / "W42" / "05_合并"
+    d.mkdir(parents=True)
+    (d / "wide_table_demo_r1.xlsx").write_bytes(b"x")
+
+    feishu = _FakeFeishu()
+
+    def _fail(folder_token, file_path, title):
+        feishu.created.append({"folder": folder_token, "title": title})
+        raise RuntimeError("飞书表格写入失败 code=90227 request too large")
+
+    feishu.create_spreadsheet_from_xlsx = _fail
+    runner = MagicMock()
+    runner.patch_job_card = AsyncMock(return_value="msg_card")
+    runner._feishu = feishu
+    artifact_sync = MagicMock()
+    artifact_sync.sync_once = AsyncMock(return_value=0)
+    hitl = hitl_mod.Topic6Hitl(hitl_mod.Topic6HitlDeps(
+        store=store, runner=runner, publisher=FeishuDocPublisher(feishu, ""),
+        artifact_sync=artifact_sync, sync_root=tmp_path / "sync",
+    ))
+    await hitl.send_hc_card(store.get_job(job.job_id), "HC2", event_id, payload)
+
+    assert len(feishu.created) == 1
+    assert artifact_sync.sync_once.await_count == 1
+    assert store.get_hc_event(event_id).artifacts == {}
+    text = str(runner.patch_job_card.call_args[0][1])
+    assert "宽表推送飞书失败" in text and "90227" in text
+    store.close()
+
+
 # ---- send_hc_card 落库 artifacts ----------------------------------------------
 
 

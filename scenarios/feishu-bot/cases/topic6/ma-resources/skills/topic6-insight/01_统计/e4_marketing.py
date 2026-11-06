@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from _common import fmt_score, safe_field
+from _common import fmt_score, md_link_title, safe_field
 
 
 def _title_with_link(r) -> str:
@@ -16,7 +16,7 @@ def _title_with_link(r) -> str:
     链接语法。合作动态/营销观察/消费洞察专用（这三部分数据已按事件簇去重成1行代表，不需要
     像舆情风险那样group-level取TOP N条，直接用这1行自带的热点标题+链接即可，2026-09-18新增，
     修复"代表热搜"此前一直是纯文本、案例卡"链接"字段无数据来源被LLM编造平台首页链接的问题）。"""
-    title = safe_field(r, "热点标题", "").replace("|", "\\|")
+    title = md_link_title(safe_field(r, "热点标题", ""))
     link = safe_field(r, "链接", "")
     return f"[{title}]({link})" if (link and link != "—") else title
 
@@ -30,7 +30,7 @@ def _titles_platform_score(grp: pd.DataFrame, n: int = 3) -> str:
     top = grp.nlargest(min(n, len(grp)), "标准化热度分")
     lines = []
     for _, r in top.iterrows():
-        title = safe_field(r, "热点标题", "").replace("|", "\\|")
+        title = md_link_title(safe_field(r, "热点标题", ""))
         link = safe_field(r, "链接", "")
         platform = safe_field(r, "平台", "")
         score = fmt_score(r["标准化热度分"])

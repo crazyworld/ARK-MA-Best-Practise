@@ -1469,6 +1469,21 @@ class Topic6Runner:
             )
         return lines
 
+    def _report_doc_url(self, job_id: str) -> str:
+        """最近一次 HC3 的飞书报告链接(HC3 打回 A 会生成新文档,取最新一条)。
+
+        报告建在机器人云空间、HC3 卡通过后被进度卡覆盖,终态卡与通知是用户找到它的唯一入口。
+        HC3 发卡前 validate_hc_payload 已保证 feishu_doc_url 非空;未到 HC3 返回空串。
+        """
+        try:
+            event = self._store.latest_hc_for_job(job_id, "HC3")
+        except Exception as err:  # noqa: BLE001 - 查不到不影响终态卡
+            log.warning("topic6 report doc url lookup failed job=%s: %s", job_id, err)
+            return ""
+        if event is None:
+            return ""
+        return str((event.payload or {}).get("feishu_doc_url") or "").strip()
+
     async def _render_and_patch(
         self,
         job_id: str,
@@ -1493,6 +1508,8 @@ class Topic6Runner:
         if not force and now - state.last_patch_at < PROGRESS_MIN_INTERVAL_SEC:
             return
         elapsed_sec = int(time.time() - state.started_at_wall)
+        terminal = status in (STATUS_DONE, STATUS_FAILED, STATUS_STOPPED)
+        report_doc_url = self._report_doc_url(job_id) if terminal else ""
         card = build_progress_card(
             job=job,
             status=status,
@@ -1502,6 +1519,7 @@ class Topic6Runner:
             overflow=state.overflow,
             error=error,
             online_url=online_url,
+            report_doc_url=report_doc_url,
         )
         signature = self._signature(card)
         if signature == state.last_signature and not force:
@@ -1518,14 +1536,17 @@ class Topic6Runner:
         state.last_signature = signature
 
         # 终态统一通知：@ 任务发起人告知结果
-        if status in (STATUS_DONE, STATUS_FAILED, STATUS_STOPPED) and self._notifier is not None:
+        if terminal and self._notifier is not None:
             try:
                 if status == STATUS_DONE:
-                    self._notifier.notify_done(job, online_url=online_url)
+                    self._notifier.notify_done(
+                        job, online_url=online_url, report_doc_url=report_doc_url)
                 elif status == STATUS_FAILED:
-                    self._notifier.notify_failed(job, error=error)
+                    self._notifier.notify_failed(
+                        job, error=error, report_doc_url=report_doc_url)
                 elif status == STATUS_STOPPED:
-                    self._notifier.notify_stopped(job, reason=error)
+                    self._notifier.notify_stopped(
+                        job, reason=error, report_doc_url=report_doc_url)
             except Exception as notify_err:  # noqa: BLE001
                 log.warning("topic6 terminal notification failed job=%s: %s", job_id, notify_err)
 

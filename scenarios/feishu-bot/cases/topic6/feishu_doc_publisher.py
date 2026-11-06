@@ -29,6 +29,15 @@ FEISHU_SHEETS_URL_PREFIX = "https://bluefocus.feishu.cn/sheets/"
 FEISHU_FILE_URL_PREFIX = "https://bluefocus.feishu.cn/drive/folder/"
 
 
+def artifact_errors(artifacts: Optional[dict]) -> dict:
+    """{name: {"error",...}} → {name: error}：飞书侧发布失败(本地文件已就绪)的产物。"""
+    return {
+        name: str(item["error"])
+        for name, item in (artifacts or {}).items()
+        if isinstance(item, dict) and item.get("error")
+    }
+
+
 def artifact_urls(artifacts: Optional[dict]) -> dict:
     """{name: {"url",...}} → {name: url}，供 HC 卡片渲染"打开编辑"按钮。兼容旧的 {name: url}。"""
     urls: dict = {}
@@ -167,11 +176,14 @@ class FeishuDocPublisher:
                 title=title,
             )
         except Exception as err:  # noqa: BLE001
+            # 本地文件已就绪、飞书侧失败：重试只会再建一张同名表(W44 HC2 留下 3 张空表)，
+            # 返回带 error 的条目让上层停止重试，并在卡片上提示用户从 outputs 下载。
             log.error(
                 "topic6 publish_wide_table failed job=%s: %s",
                 job.job_id, err,
             )
-            return {}
+            return {"wide_table": {"url": "", "token": "", "type": "sheet",
+                                   "error": str(err)[:300]}}
         # 优先用接口返回的 url（租户域名不一定是 bluefocus），缺失时才拼前缀兜底
         url = sheet_url or f"{FEISHU_SHEETS_URL_PREFIX}{sheet_token}"
         granted = self._grant_editor(sheet_token, "sheet", job.user_open_id, job.job_id)

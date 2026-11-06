@@ -432,7 +432,7 @@ C→D 全量合并关卡通过后,在输出 HC2 payload 之前,委派子 Agent `
     --project-dir "{project_dir}" --report-file "07_报告/热点报告_{period_label}_v{N}.md"
   ```
   覆盖原版 F Step 1 六项与 HC3 前洞察检查中可脚本化的部分(章节完整、洞察正文、链接格式、
-  LLM 痕迹、版块意图泄露、E4 打标措辞、年度趋势类推断、热度单位、E3 跨平台比较、E4 启示段)
+  LLM 痕迹、版块意图泄露、E4 打标措辞、年度趋势类推断、热度单位、E3 跨平台比较、E3 串平台/平台重复、E4 启示段)
   - `pass`/`warn`:继续发布,`warn` 的 issues 逐条写入 HC3 `issues_detected`
   - `fail`:**不在本阶段改写报告文字**,退回 Phase E 只重跑 `failed_sections`(本场景是
     `--sections` 的唯一合法用途,且仅限一次):

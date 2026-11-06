@@ -59,6 +59,25 @@ PRICING = {
     "text-embedding-3-small": (0.02, 0.0),
     "Doubao-embedding": (0.0, 0.0),
 }
+
+# 模型原生单次输出上限(bmc-llm-relay 模型列表标注)。各阶段脚本的 --max-tokens 默认值是上游
+# 按 claude-sonnet-4-6 调校的(16000/24000)，换成推理型模型后推理 token 也计入 max_tokens，
+# 原值会在正常批量下截断(W44 full 的 03 实体归一首批 50 个即撞 16000)。这里不再人为压低：
+# 表内模型一律按原生上限请求，脚本传入值更大时以脚本为准；表外模型保持脚本传入值。
+# 换模型时在这里补原生上限，不要改各阶段脚本(它们与上游 rc.14 保持一致)。
+MODEL_MAX_OUTPUT_TOKENS = {
+    "DeepSeek-V4.1-Flash": 384000,
+}
+
+
+def effective_max_tokens(model: str, requested: int) -> int:
+    native = MODEL_MAX_OUTPUT_TOKENS.get(model)
+    if native is None:
+        lowered = model.lower()
+        native = next((v for k, v in MODEL_MAX_OUTPUT_TOKENS.items() if k.lower() == lowered), None)
+    return max(requested, native) if native else requested
+
+
 # 企业自有模型（BYOK）不在上表中：可通过 PRICING_OVERRIDE_JSON 环境变量追加单价，
 # 格式同 PRICING（JSON object，value 为 [input_price, output_price]）；未配置时未知模型按 (0.0, 0.0) 计费。
 _pricing_override_raw = os.environ.get("PRICING_OVERRIDE_JSON")
@@ -125,7 +144,7 @@ class Relay:
                 "缺少 bmc-llm-relay(blueai 模型网关)凭据：需要 LLM_RELAY_BASE_URL 与 "
                 "LLM_RELAY_API_KEY。凭据只从环境变量读取，不要写进文件；不回退 ARK_*。")
         self.model = model
-        self.max_tokens = max_tokens
+        self.max_tokens = effective_max_tokens(model, max_tokens)
         self.system = system
         self.temperature = temperature
         self.timeout = timeout
@@ -135,6 +154,9 @@ class Relay:
         self.usage = {"input_tokens": 0, "output_tokens": 0,
                       "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
         self.calls = 0
+        # 推理 token(usage.completion_tokens_details.reasoning_tokens)单独累计，不进 usage，
+        # 避免改变上层成本台账的字段集合；截断报错里带上本次的拆分，便于区分「推理吃预算」与「正文过长」。
+        self.reasoning_tokens = 0
 
     def call(self, user_text: str, extra: str = "") -> str:
         cap = self.max_tokens
@@ -243,10 +265,16 @@ class Relay:
             # OpenAI 兼容协议字段名换算成上层聚合期望的 input/output_tokens
             self.usage["input_tokens"] += usage.get("prompt_tokens", 0) or 0
             self.usage["output_tokens"] += usage.get("completion_tokens", 0) or 0
+            details = usage.get("completion_tokens_details") or {}
+            reasoning = (details.get("reasoning_tokens", 0) or 0) if isinstance(details, dict) else 0
+            self.reasoning_tokens += reasoning
         # 截断必须显式报错。当成解析失败去重试，只会再截断一次。
         if finish_reason == "length":
             raise ValueError(f"输出被 max_tokens={cap} 截断，"
-                             f"需调大 max_tokens 或减小批量")
+                             f"需调大 max_tokens 或减小批量"
+                             f"（completion_tokens={usage.get('completion_tokens', 0) or 0}，"
+                             f"reasoning_tokens={reasoning}，"
+                             f"正文 {sum(len(p) for p in content_parts)} 字符）")
         return "".join(content_parts)
 
     def cost(self) -> float:

@@ -16,8 +16,17 @@ if (!sourcePath || !existsSync(sourcePath)) {
 const css = readFileSync(join(here, "styles.css"), "utf8");
 const js = readFileSync(join(here, "app.js"), "utf8");
 const blocks = JSON.parse(readFileSync(sourcePath, "utf8"));
-const reportDescriptor = `${basename(sourcePath)}\n${blocks.map((block) => String(block.text ?? "")).join("\n")}`;
-const hasMonthlyHint = /monthly|月刊|月报|月度|20\d{2}年\s*\d{1,2}月/iu.test(reportDescriptor);
+// 页头「数据周期」声明。周/月刊只看这里的周期标签：此前扫描文件名+全部正文，正文里出现
+// 「2026年10月车企销量…」即误判月刊(W44)。cleanText 是函数声明，可在此提前调用。
+const introBlocks = blocks.slice(0, blocks.findIndex((block) => /docx-heading1-block/u.test(block.className)));
+const declaration = cleanText(introBlocks.find((block) => /quote_container/u.test(block.className))?.text ?? "");
+const periodMatch = declaration.match(/数据周期\s*[：:]\s*([^（(\n]+)\s*[（(]([^）)\n]+)[）)]/u);
+if (!periodMatch) {
+  throw new Error("Missing report period. Expected 数据周期：<周期标签>（<开始日期> ~ <结束日期>） in the introductory quote.");
+}
+const periodCode = cleanText(periodMatch[1]);
+const hasMonthlyHint = !/^\d{4}-W\d{1,2}$/iu.test(periodCode)
+  && /monthly|月刊|月报|月度|20\d{2}年\s*\d{1,2}月|^20\d{2}[-./]\d{1,2}$/iu.test(periodCode);
 const reportKind = hasMonthlyHint ? "monthly" : "weekly";
 const reportTitle = reportKind === "monthly" ? "社媒热点月刊" : "社媒热点周刊";
 
@@ -769,20 +778,13 @@ function renderBlockRange(items) {
   return `${renderFlow(prelude)}${groups.map((group) => renderSubsection(group)).join("")}`;
 }
 
-const introBlocks = blocks.slice(0, blocks.findIndex((block) => /docx-heading1-block/u.test(block.className)));
-const declaration = cleanText(introBlocks.find((block) => /quote_container/u.test(block.className))?.text ?? "");
 const specialNote = cleanText(introBlocks.find((block) => /^⚠️/u.test(cleanText(block.text)))?.text ?? "");
 const sampleMatch = declaration.match(/数据样本：(\d+)\s*条原始热点\s*\/\s*(\d+)\s*条营销可用（([\d.]+)%）/u);
 const platformMatch = declaration.match(/平台分布：([^\n]+)/u);
-const periodMatch = declaration.match(/数据周期\s*[：:]\s*([^（(\n]+)\s*[（(]([^）)\n]+)[）)]/u);
-if (!periodMatch) {
-  throw new Error("Missing report period. Expected 数据周期：<周期标签>（<开始日期> ~ <结束日期>） in the introductory quote.");
-}
 
 const rawCount = sampleMatch?.[1] ?? "3631";
 const usableCount = sampleMatch?.[2] ?? "1681";
 const usableRate = sampleMatch?.[3] ?? "46.3";
-const periodCode = cleanText(periodMatch[1]);
 const periodRange = cleanText(periodMatch[2]).replace(/\s*~\s*/u, " 至 ");
 const monthlyPeriodMatch = periodCode.match(/(20\d{2})(?:年|[-./])\s*(\d{1,2})(?:月)?/u);
 const displayPeriod = reportKind === "monthly" && monthlyPeriodMatch

@@ -28,6 +28,11 @@ _HC_LABELS: dict[str, str] = {
 }
 
 
+def _report_line(report_doc_url: str) -> str:
+    """HC3 定稿的飞书报告链接(报告建在机器人云空间,终态通知是用户找到它的入口)。"""
+    return f"\n飞书报告：{report_doc_url}" if report_doc_url else ""
+
+
 class JobNotifier:
     """统一的任务通知器，封装 @ 人 + 发消息的完整逻辑。"""
 
@@ -47,25 +52,28 @@ class JobNotifier:
         )
         self._send(job.chat_id, text)
 
-    def notify_done(self, job: PipelineJob, online_url: str = "") -> None:
+    def notify_done(self, job: PipelineJob, online_url: str = "", report_doc_url: str = "") -> None:
         """任务完成。"""
         mention = self._resolve_mention(job)
         body = f"妙搭页面：{online_url}" if online_url else "Pipeline 已完成"
-        text = f"{mention} ✅ **任务完成** · {job.mode}\n{body}\n任务：{job.job_id}"
+        text = (f"{mention} ✅ **任务完成** · {job.mode}\n{body}"
+                f"{_report_line(report_doc_url)}\n任务：{job.job_id}")
         self._send(job.chat_id, text)
 
-    def notify_failed(self, job: PipelineJob, error: str = "") -> None:
+    def notify_failed(self, job: PipelineJob, error: str = "", report_doc_url: str = "") -> None:
         """任务失败。"""
         mention = self._resolve_mention(job)
         body = error[:200] if error else "未知错误"
-        text = f"{mention} ❌ **任务失败** · {job.mode}\n{body}\n任务：{job.job_id}"
+        text = (f"{mention} ❌ **任务失败** · {job.mode}\n{body}"
+                f"{_report_line(report_doc_url)}\n任务：{job.job_id}")
         self._send(job.chat_id, text)
 
-    def notify_stopped(self, job: PipelineJob, reason: str = "") -> None:
+    def notify_stopped(self, job: PipelineJob, reason: str = "", report_doc_url: str = "") -> None:
         """任务中断。"""
         mention = self._resolve_mention(job)
         body = reason[:200] if reason else "Pipeline 中断"
-        text = f"{mention} ⚠️ **任务中断** · {job.mode}\n{body}\n任务：{job.job_id}"
+        text = (f"{mention} ⚠️ **任务中断** · {job.mode}\n{body}"
+                f"{_report_line(report_doc_url)}\n任务：{job.job_id}")
         self._send(job.chat_id, text)
 
     # ---- 内部 ---------------------------------------------------------------

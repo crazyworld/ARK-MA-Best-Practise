@@ -8,7 +8,7 @@
 ## Requirements
 
 ### Requirement: Agent 资源定义
-`coordinator.json` SHALL 声明：名称 `topic6-coordinator`；模型（当前 bmc-llm-relay BYOK：`id=DeepSeek-V4.1-Flash`、`provider=bmc-llm-relay`、`base_url=https://bmc-llm-relay.bluemediagroup.cn/v1/chat/completions`、`protocol=openai_chat_completions`、`token_limits` 256000/200000/56000（按模型原生 256K 上下文））；`system_file=coordinator.system.md`；挂载 6 个自定义 Skill（`topic6-fetch-normalize`、`topic6-annotation`、`topic6-insight`、`topic6-event-registry`、`topic6-web-report`、`miaoda-web-publish`），skill_id/version 以 `${skill_id.<name>}` / `${version.<name>}` 占位由 `create_all.sh` 渲染；工具 `agent_toolset_20260701` + MCP `hot-topics`（`${HOT_TOPICS_MCP_URL}`，`always_allow`）；`multiagent.type=coordinator`，子 Agent 为 `topic6-annotator`、`topic6-validator`、`topic6-insighter` 与 `self`。
+`coordinator.json` SHALL 声明：名称 `topic6-coordinator`；模型（当前 bmc-llm-relay BYOK：`id=DeepSeek-V4.1-Flash`、`provider=bmc-llm-relay`、`base_url=https://bmc-llm-relay.bluemediagroup.cn/v1/chat/completions`、`protocol=openai_chat_completions`、`token_limits` 1024000/1024000/384000（按模型原生规格：上下文 1,024K 只计输入、输出上限 384K，不人为压低））；`system_file=coordinator.system.md`；挂载 6 个自定义 Skill（`topic6-fetch-normalize`、`topic6-annotation`、`topic6-insight`、`topic6-event-registry`、`topic6-web-report`、`miaoda-web-publish`），skill_id/version 以 `${skill_id.<name>}` / `${version.<name>}` 占位由 `create_all.sh` 渲染；工具 `agent_toolset_20260701` + MCP `hot-topics`（`${HOT_TOPICS_MCP_URL}`，`always_allow`）；`multiagent.type=coordinator`，子 Agent 为 `topic6-annotator`、`topic6-validator`、`topic6-insighter` 与 `self`。
 
 #### Scenario: 切换模型
 - **WHEN** 修改 `model.id` 或增加 `model.provider`
