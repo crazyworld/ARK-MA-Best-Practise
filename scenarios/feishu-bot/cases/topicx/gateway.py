@@ -16,9 +16,6 @@ from ..topic5.topic5_runner import (
     Topic5Runner,
 )
 from ..topic6.artifact_sync import Topic6ArtifactSync
-from ..topic6.feishu_doc_publisher import FeishuDocPublisher
-from ..topic6.gateway import _byok_model_headers
-from ..topic6.job_notifier import JobNotifier
 from ..topic6.pipeline_store import PipelineStore as Topic6PipelineStore
 from ..topic6.topic6_hitl import Topic6Hitl, Topic6HitlDeps
 from ..topic6.topic6_runner import (
@@ -194,7 +191,6 @@ def build_gateway(
             task_id, token, session_id, job_id
         )
 
-    topic6_notifier = JobNotifier(sender)
     topic6_runner = Topic6Runner(
         ark,
         sender,
@@ -203,39 +199,26 @@ def build_gateway(
             coordinator_agent_id=config.topic6.coordinator_agent_id,
             environment_id=config.topic6.environment_id,
             memory_store_id=config.topic6.memory_store_id,
-            vault_ids=tuple(
-                v
-                for v in (config.topic6.lark_bot_vault_id, config.topic6.vault_id)
-                if v
-            ),
+            vault_ids=(config.topic6.vault_id,) if config.topic6.vault_id else (),
         ),
         loop=loop,
         lease_validator=validate_lease,
         lease_activator=activate_lease,
-        extra_headers=_byok_model_headers(config.topic6),
-        notifier=topic6_notifier,
-    )
-    artifact_sync = Topic6ArtifactSync(
-        ark,
-        Path(config.topic6.artifact_sync_dir),
-        topic6_store.get_job,
-        poll_interval_sec=config.topic6.artifact_poll_interval_sec,
     )
     topic6_hitl = Topic6Hitl(
-        Topic6HitlDeps(
-            store=topic6_store,
-            runner=topic6_runner,
-            publisher=FeishuDocPublisher(sender, config.topic6.docs_folder_token),
-            artifact_sync=artifact_sync,
-            sync_root=Path(config.topic6.artifact_sync_dir),
-            notifier=topic6_notifier,
-        )
+        Topic6HitlDeps(store=topic6_store, runner=topic6_runner)
     )
     topic6_runner.bind_card_sender(topic6_hitl)
     user_authorization = Topic6UserAuthorization(
         topic6_store,
         ark,
         FeishuOAuth(config.feishu_app_id, config.feishu_app_secret),
+    )
+    artifact_sync = Topic6ArtifactSync(
+        ark,
+        Path(config.topic6.artifact_sync_dir),
+        topic6_store.get_job,
+        poll_interval_sec=config.topic6.artifact_poll_interval_sec,
     )
 
     runner = TopicxRunner(
