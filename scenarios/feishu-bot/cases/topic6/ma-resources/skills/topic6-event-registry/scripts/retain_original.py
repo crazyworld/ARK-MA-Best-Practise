@@ -7,7 +7,12 @@ from f1_extract import unknown_frame
 from relay import read_jsonl, write_jsonl
 
 
-def retain_original(root, window, forced=None, allow_degraded=False):
+def retain_original(root, window, forced=None, allow_degraded=False, uncertain_policy='split'):
+    # MA uncertain-policy=keep：无人值守(review-policy=record)时 non_events 门禁无人复核，未决永远不会解除；
+    # 按上游 split 会把含未决成员的整组拆回原标题(W45 实测 280 条)。keep 对齐客户原版旧链路：组保持合并，
+    # 未决成员只记入 uncertain_kept 审计。人工 forced、NON_EVENT、技术降级规则不变。默认 split=上游语义。
+    if uncertain_policy not in ('split', 'keep'):
+        raise ValueError(f'Unknown uncertain_policy: {uncertain_policy}')
     forced = forced or {}
     previous_path = root / 'out/original_retained.json'
     previous = json.loads(previous_path.read_text(encoding='utf-8')) if previous_path.exists() else {}
@@ -31,7 +36,7 @@ def retain_original(root, window, forced=None, allow_degraded=False):
                if r.get('needs_evidence') or r['eventness'] == 'UNCERTAIN'}
     if any(r['eventness'] == 'NON_EVENT' for r in pending.values()):
         raise ValueError('Unresolved NON_EVENT must be reconsidered before exclusion')
-    result, audit, removed = [], [], set()
+    result, audit, removed, uncertain_kept = [], [], set(), []
     for event in events:
         if event.get('retention_status')=='ORIGINAL_RETAINED' and len(event['member_record_ids'])==1:
             rid=event['member_record_ids'][0]
@@ -39,6 +44,12 @@ def retain_original(root, window, forced=None, allow_degraded=False):
                 raise ValueError('Retained original missing prior audit')
             result.append(event); audit.append(prior_rows[rid]); continue
         affected = sorted(set(event['member_record_ids']) & (set(pending)|set(forced)))
+        if uncertain_policy == 'keep' and affected and not set(affected) & set(forced):
+            uncertain_kept.extend(dict(record_id=rid, title=by_id[rid]['title'], platform=by_id[rid]['platform'],
+                event_id=event['event_id'], event_name=event['event_name'],
+                eventness=judgments[rid]['eventness'], member_count=len(event['member_record_ids']))
+                for rid in affected)
+            affected = []
         if not affected:
             result.append(event)
             continue
@@ -90,5 +101,6 @@ def retain_original(root, window, forced=None, allow_degraded=False):
         retained_count=len(audit), records=audit, removed_relations=previous.get('removed_relations',[])+dropped,
         manual_retained_count=sum(bool(r.get('manual_review_retained')) for r in audit),
         related_records_split_count=sum(not r['unresolved'] and not r.get('manual_review_retained') for r in audit),
-        semantic_accuracy='NOT_MEASURED'))
+        semantic_accuracy='NOT_MEASURED', uncertain_policy=uncertain_policy,
+        uncertain_kept_count=len(uncertain_kept), uncertain_kept=uncertain_kept))
     return audit

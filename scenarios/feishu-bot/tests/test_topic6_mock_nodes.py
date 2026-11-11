@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -224,10 +225,28 @@ def test_e_run_stats(tmp_path, full_tree):
         return files[f"06_洞察/v1/{name}"].read_text("utf-8")
 
     # 以下差异为参照 CC V2.0 的预期口径变化(Obsidian《Topic6 MA 提效优化清单》),mock 是线上快照不改:
-    # E1 无上期时不再输出「环比数据」块;其余内容与快照一致
-    assert read("e1_data.md").rstrip() == want("e1_data.md").replace(
+    # E1 无上期时不再输出「环比数据」块;2026-11-11 起「主要驱动话题」同次数按簇内最高热度分确定性排序
+    # (此前按输入行序),同次数并列项可换位/换选,次数序列与其余列与快照一致
+    got_e1 = read("e1_data.md").rstrip()
+    want_e1 = want("e1_data.md").replace(
         "\n\n**环比数据**：Projects/ 下未找到对应上一自然周日期区间的项目目录，本期是该系列的首次归档"
         "（或上一期尚未跑到 E 阶段）。无可比上期：省略第三句环比，不允许编造任何变化。", "").rstrip()
+
+    def _split_drivers(text: str):
+        rows, counts = [], []
+        for line in text.splitlines():
+            cells = line.split(" | ")
+            if line.startswith("| ") and len(cells) >= 4 and re.search(r"\(\d+次\)", line):
+                rows.append(" | ".join(cells[:3]))
+                counts.append(re.findall(r"\((\d+)次\)", line))
+            else:
+                rows.append(line)
+        return rows, counts
+
+    got_rows, got_counts = _split_drivers(got_e1)
+    want_rows, want_counts = _split_drivers(want_e1)
+    assert got_rows == want_rows
+    assert got_counts == want_counts
     # E2 上周节点改用全量 df:营销不可用的寒露热搜也纳入回顾,列名为「涉及品牌IP候选」
     e2 = json.loads(read("e2_flags.json"))
     assert e2["last_week"]["has_data"] is True

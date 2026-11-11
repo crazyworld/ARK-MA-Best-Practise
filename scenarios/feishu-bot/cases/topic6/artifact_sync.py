@@ -240,11 +240,14 @@ class Topic6ArtifactSync:
                     expected_size = artifact.get("size")
                     expected_hash = str(artifact.get("sha256") or "")
                     basename = PurePosixPath(str(artifact.get("source") or "")).name
+                    # Files API 列表可能不返回 size(212 实测 fingerprint.size=None):size 未知的候选
+                    # 不能被排除，最终以 sha256 定案
                     size_matches = [
                         candidate
                         for candidate in files
                         if (
                             expected_size is None
+                            or candidate.get("fingerprint", {}).get("size") is None
                             or candidate.get("fingerprint", {}).get("size")
                             == expected_size
                         )
@@ -259,8 +262,8 @@ class Topic6ArtifactSync:
                         (
                             candidate
                             for candidate in candidates
-                            if candidate.get("sha256") == expected_hash
-                            or _sha256(job_root / str(candidate["object_path"]))
+                            if (candidate.get("sha256")
+                                or _sha256(job_root / str(candidate["object_path"])))
                             == expected_hash
                         ),
                         None,

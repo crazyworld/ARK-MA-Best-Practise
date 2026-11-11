@@ -44,7 +44,7 @@ Topic6 单元/回归测试 SHALL 放在 `scenarios/feishu-bot/tests/test_topic6_
 - **THEN** 同步更新 gateway-command-routing spec 与 `test_topic6_new_command.py`
 
 ### Requirement: 端到端验证
-涉及 MA 运行时行为（Prompt、Skill 脚本、Session 交互）的变更 SHALL 在单测通过并 `update_ma.sh` 部署、重启 Gateway 后，用飞书发送 `热点周报 smoke`（覆盖 HC1+HC2+HC3 全路径，30 条）或 `热点周报 demo` 完成一次端到端验收；仅影响 Phase F 发布时可先用 `/test_phase_f`、`/test_feishu` 验证。验收后 MUST 用 `tools/session_triage.py <session_id>` 检查时间线、报错、HC 与成本摘要。
+涉及 MA 运行时行为（Prompt、Skill 脚本、Session 交互）的变更 SHALL 在单测通过并 `update_ma.sh` 部署、重启 Gateway 后，用飞书发送 `/start smoke`（覆盖 HC1+HC2+HC3 全路径，30 条）或 `/start demo` 完成一次端到端验收；仅影响 Phase F 发布时可先用 `/test_phase_f`、`/test_feishu` 验证。验收后 MUST 用 `tools/session_triage.py <session_id>` 检查时间线、报错、HC 与成本摘要。
 
 #### Scenario: 修改 Phase E Prompt
 - **WHEN** 新增 E3 v3

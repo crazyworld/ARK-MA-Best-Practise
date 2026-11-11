@@ -64,9 +64,17 @@
 
 ### Requirement: 终态事件处理
 `_consume_events` SHALL 按以下规则处理终态类事件：
-- `user.interrupt` → `mark_stopped("用户在方舟后台手动停止了 Session")`。
+- `user.interrupt`：任务已是 `stopping`(卡片「停止任务」发起)→ 跳过，由 stop_handler 完成不可逆停止；否则(方舟控制台中断，只暂停本轮)→ `mark_failed("用户在方舟后台中断了当前轮次，可发送 /continue 继续")`，`failure_scope=recoverable`。
+- `session.error` 且 `error.retry_status.type == "retrying"`(平台仍在自动重试)→ 继续监听，MUST 先于下面的 provider 重试判断，Gateway 不叠加重试/催促。
 - `session.error` 且错误含 `model_request_failed`，且 `provider_retry_count < 5` → 计数 +1，等待 `min(30·2^(n-1), 300)s`，卡片显示"模型服务暂时不可用，{d}s 后自动重试（n/5）"，然后发送 `"[系统] 模型服务已恢复，请继续执行当前阶段。"` 并置 `provider_retry_pending=True` 继续消费；发送失败 → `mark_failed("自动重试失败：…")`。
-- 其他 `session.error` / `session.status_failed` / `session.status_terminated` → `mark_failed(error[:400])`。
+- 其他 `session.error` 按 `error.retry_status.type` 分流：`terminal` → `mark_failed(error[:400], failure_scope=session)`；`exhausted` 或缺省 → `mark_failed(error[:400], failure_scope=recoverable)`(本轮结束，Session 仍可接收消息)。
+- `session.status_failed` / `session.status_terminated` → `mark_failed(error[:400], failure_scope=session)`。
+- 可恢复只是本地判断：`continue_job` 续跑前 MUST 用 `GET /sessions/{id}` 复核，Session 实际为 `terminated/failed/deleted` 时改判 `failure_scope=session` 并拒绝续跑。
+- `agent.tool_result` 且 `is_error=true`、文本含 `task service unavailable` 或 `sandbox abnormal` → 沙箱故障计数 +1，任一其他工具结果清零。
+
+#### Scenario: 方舟沙箱故障
+- **WHEN** 连续 `SANDBOX_ERROR_STREAK_LIMIT=3` 个工具结果为沙箱故障后 Session idle
+- **THEN** 不再催促，`mark_failed("方舟沙箱暂不可用…平台恢复后发送 /continue 继续")`(recoverable)
 - `span.model_request_end` 且非错误 → 重置 `provider_retry_count`。
 - `session.status_idle`（非 requires_action）：若 `provider_retry_pending` 且 `stop_reason == retries_exhausted`，MUST 吸收该 idle（与上一个 error 属同一次故障，不消耗 nudge 额度）；否则交给 idle 处理。
 
@@ -84,10 +92,11 @@
 1. **HC 结构化 JSON**：`extract_hc_payload` 逐个 `{` 起点 `raw_decode`，取第一个 `hc ∈ HC_KINDS` 的对象。未命中时，若当前 phase 为空/`A`/`B`/`C*`/`D*`/`HC*`/`post-HC*` 且文本不含 `[need_decision]`，用 `detect_hc_intent`（文本含 HCx 且含"等用户/请审核/点击卡片/输出 HC…"等意图词）兜底生成 `build_hc_fallback_payload`。
 2. **Phase H 发布结果**：`extract_final_online_url(last)`；为空且 phase=`H` 时倒序扫描 Session 历史。命中 → `mark_done(online_url)`。
 3. **Phase H 无链接**：`mark_failed("Phase H 妙搭发布失败：Agent idle 但未输出有效 online_url。…")` 并提示 `/continue`。
-4. **`[need_decision]`**：`mark_stopped("Phase X 等待用户裁决…")`，把去掉标记的正文（≤3000 字）发群里，提示 `/continue <选择>`；MUST NOT 催促。
-5. **结构化诊断** `_diagnose_interruption`：Session 启动 <60s 且无任何输出，或最后输出含错误词（error/failed/超时/timeout/quota/rate limit/异常）且 nudge 已用满 → `mark_stopped` + `⚠️ 原因`。
-6. **自动续跑（nudge）**：`idle_nudge_count < MAX_IDLE_NUDGES(3)` 且 phase 不以 HC 开头 → 计数 +1，卡片追加"⚡ Agent 暂停，正在自动恢复（n/3）"，返回催促文本"你在 Phase {phase} 中途停止了，请从当前阶段继续执行。不要重复已完成的步骤，从上次输出之后的下一步继续。"
-7. **超限**：`mark_stopped("Pipeline 在 Phase X 中断（自动续跑 n/3 次后仍未恢复）。…")`。
+4. **`[need_decision]`**：`mark_failed("Phase X 等待用户裁决…")`(recoverable)，把去掉标记的正文（≤3000 字）发群里，提示 `/continue <选择>`；MUST NOT 催促。
+5. **方舟沙箱故障**：沙箱故障计数 ≥3 → `mark_failed`(recoverable)+ 提示平台恢复后继续，MUST NOT 催促。
+6. **结构化诊断** `_diagnose_interruption`：Session 启动 <60s 且无任何输出，或最后输出含错误词（error/failed/超时/timeout/quota/rate limit/异常）且 nudge 已用满 → `mark_failed` + `⚠️ 原因`。
+7. **自动续跑（nudge）**：`idle_nudge_count < MAX_IDLE_NUDGES(3)` 且 phase 不以 HC 开头 → 计数 +1，卡片追加"⚡ Agent 暂停，正在自动恢复（n/3）"，返回催促文本"你在 Phase {phase} 中途停止了，请从当前阶段继续执行。不要重复已完成的步骤，从上次输出之后的下一步继续。"
+8. **超限**：`mark_failed("Pipeline 在 Phase X 中断（自动续跑 n/3 次后仍未恢复）。…")`。
 
 phase 缺省按 `A` 处理。
 
@@ -132,7 +141,7 @@ phase 缺省按 `A` 处理。
 ### Requirement: 续跑、取消与审核恢复
 Runner SHALL 提供以下三个入口并保持语义：
 - `resume_job(job, msg)`：cancel 旧消费任务；若 `current_phase ∈ HC_KINDS` 则改为 `post-HCx`（避免后续 idle 被误判为等人审）；`resume_running`；立即 force patch 运行卡；以 `msg` 为首条消息启动新消费任务。
-- `continue_job`：取会话键最近可续跑任务；非 `done` 时先倒序扫描 Session 历史，若已有合法 `online_url` 则直接 `mark_done` 返回，MUST NOT 再注入"继续"；否则重置 nudge 与 provider 重试额度后 `resume_job`。
+- `continue_job`：用户「回复」了进度卡片时先按 `progress_card_message_id` 定位任务，发送者 MUST 是发起人或 `TOPIC6_ADMIN_OPEN_IDS` 中的管理员，否则回复「仅发起人或管理员可以继续」；未回复卡片或回复的消息不是任何任务的进度卡片时，取会话键(chat/thread/发送者)最近可续跑任务；回复的卡片对应任务已 `done`/`stopped`/`stopping` 时 MUST 直接回复「…不能继续；如需重新生成请发送 `/start`」，MUST NOT 回落到会话键续跑同一用户的其他任务；非 `done` 时先倒序扫描 Session 历史，若已有合法 `online_url` 则直接 `mark_done` 返回，MUST NOT 再注入"继续"；否则重置 nudge 与 provider 重试额度后 `resume_job`。
 - `cancel_active_job`：cancel 消费任务，`mark_failed("cancelled_by_user")`，force patch 失败卡。
 
 #### Scenario: 已发布但被误判失败
@@ -140,9 +149,9 @@ Runner SHALL 提供以下三个入口并保持语义：
 - **THEN** 任务直接置 `done` 并回复发布链接，不向 Session 注入消息
 
 ### Requirement: 网页重新发布（/republish）
-用于 HC3 通过后才在飞书文档补/换营销观察配图。Runner SHALL 提供：
+用于 HC3 通过后才在飞书文档修改正文或补/换营销观察配图。Runner SHALL 提供：
 - `find_republishable_job(chat_id, ref)`：`ref` 为 job_id 或 session_id 时定位该任务，MUST 属于当前会话且已过 HC3（`done`，或最近一次 HC3 决策为 `pass`）；无 `ref` 时取本会话按 `updated_at` 最近的已过 HC3 任务。不满足时抛 `Topic6RunnerError`。
-- `republish_job(job)`：在启动锁内执行；全局已有 `running|wait_hc` 任务、或 Session 状态不是 `idle` 时 MUST 拒绝且不改本地状态。通过后 `resume_running(phase=G)`，发一张新的进度卡并落库其 message_id，在同一 Session 注入 `REPUBLISH_MESSAGE`（自包含：不重跑 A~F、按 Phase G 重新读取飞书文档配图并生成网页、按 Phase H 更新 `status.h.app_id` 同一应用、成功后只输出发布 JSON），旧 Session（切换模型/coordinator 版本前创建、已 `done`）同样适用。
+- `republish_job(job)`：在启动锁内执行；全局已有 `running|wait_hc` 任务、或 Session 状态不是 `idle` 时 MUST 拒绝且不改本地状态。通过后 `resume_running(phase=G)`，发一张新的进度卡并落库其 message_id，在同一 Session 注入 `REPUBLISH_MESSAGE`（自包含：不重跑 A~F、按 Phase G 重新读取飞书文档正文与配图并生成网页、按 Phase H 更新 `status.h.app_id` 同一应用、成功后只输出发布 JSON），旧 Session（切换模型/coordinator 版本前创建、已 `done`）同样适用。
 - 判定本轮完成时，`_find_published_online_url` MUST 只扫描 `/republish` 之前事件数（`history_floor`）之后的消息，历史中的旧 `online_url` 不得把本轮发布失败误判为 `done`。
 
 #### Scenario: 已完成任务补图后重新发布
@@ -156,7 +165,7 @@ Runner SHALL 提供以下三个入口并保持语义：
 ### Requirement: Gateway 重启恢复
 `recover_job` SHALL 只读取 `list_session_events`，回放 agent.message 更新 phase/project_dir，再看最后一个终态类事件（`user.interrupt`、`session.error`、`status_failed`、`status_terminated`、`status_idle`）：
 - 无终态，或终态之后还有事件 → 仅恢复 SSE 订阅（返回 `subscribed`），不发送消息；
-- `user.interrupt` → `stopped`；error/failed/terminated → `failed`；
+- `user.interrupt` → `failed`(recoverable)；error/failed/terminated → `failed`，`failure_scope` 规则同事件流消费；
 - `idle` → `_handle_idle(recovering=True)`；返回 nudge 文本时发送并恢复订阅（`nudged`），发送失败 → `failed("恢复续跑失败：…")`。
 
 单个任务恢复异常 MUST 只记录为 `recovery_error`，不阻塞其他任务。

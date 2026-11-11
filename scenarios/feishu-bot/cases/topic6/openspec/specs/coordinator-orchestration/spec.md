@@ -247,7 +247,7 @@ python /mnt/skills/topic6-insight/scripts/publish_report_to_feishu.py \
 
 主路径为 `lark-cli --as bot`（身份来自 Gateway 注入的 tenant token），MUST NOT 执行 `lark-cli config init`、自行拼 lark-cli 命令、切换路径重试或编排权限步骤；脚本内部在 lark-cli 不可用时自动切换 `feishu_api_fallback`。成功 stdout 为 `{"status":"success","backend":"lark-cli|feishu_api_fallback","doc_url":".../docx/...","warnings":[...]}`。
 
-`warnings`（转移 owner / admin 授权失败）不阻断，原样记录。脚本退出码 1 + `{"status":"failed","error":…}`（含给发起人授 edit 失败）或 `doc_url` 不是 `/docx/` URL 时，Phase F MUST 判失败、不输出 HC3、原文报告 `error`，不得原参数反复重跑，不得用本地 Markdown 路径代替飞书文档。成功后发布 `node=report`（`07_报告/热点报告_*_v{N}.md`），并写回 `status.f.feishu_doc_url`。MUST NOT 执行 `lark-cli auth login`、Device Flow 或降级 `--as user`。
+`warnings`（转移 owner / admin 授权失败）不阻断，MUST 逐条写入 HC3 `issues_detected`（前缀「飞书发布：」）。脚本退出码 1 + `{"status":"failed","error":…}`（含给发起人授 edit 失败）或 `doc_url` 不是 `/docx/` URL 时，Phase F MUST 判失败、不输出 HC3、原文报告 `error`，不得原参数反复重跑，不得用本地 Markdown 路径代替飞书文档。成功后发布 `node=report`（`07_报告/热点报告_*_v{N}.md`），并写回 `status.f.feishu_doc_url`。MUST NOT 执行 `lark-cli auth login`、Device Flow 或降级 `--as user`。
 
 #### Scenario: 发布失败
 - **WHEN** `publish_report_to_feishu.py` 返回 `status=failed`
@@ -270,7 +270,7 @@ Phase F 成功后，Coordinator MAY 委派 `topic6-validator`（task=`hc3`，aud
   "project_dir": "/workspace/Projects/{PROJECT_DIR}",
   "feishu_doc_url": "https://xxx.feishu.cn/docx/xxx",
   "note": "请在飞书文档中审核并按需调整图片,完成后点击卡片按钮",
-  "issues_detected": ["自校验 warn 项逐条，或空数组"],
+  "issues_detected": ["自校验 warn 项逐条 + 飞书发布 warnings 逐条(前缀「飞书发布：」)，或空数组"],
   "validator_verdict": {}
 }
 ```
@@ -282,7 +282,7 @@ Phase F 成功后，Coordinator MAY 委派 `topic6-validator`（task=`hc3`，aud
 - **THEN** 不用本地 md 覆盖，提示用户在文档中修改后点通过
 
 ### Requirement: Phase G 网页生成
-HC3 通过后 Coordinator SHALL 只用固定脚本生成网页（MUST NOT 手工拼 `source.json`）：复制 `topic6-web-report/assets/source/` 到 `08_UI发布/热点报告_{period_label}_web` → `validate-template-assets.mjs` → `fetch_case_images.py --doc {feishu_doc_url}`（失败不阻断）→ `md2source.py <merged_report> source.json --case-images` → `validate-case-image-sources.mjs` → `build-report.mjs` → `validate-rendered-content.mjs`。任一校验失败 Phase G 失败，MUST NOT 通过改 source.json 文本迎合校验。案例配图只来自用户在 HC3 上传到飞书文档"案例 N："之后的图片；缺图渲染"配图待补充"占位，MUST NOT 调生图工具、复用模板 `case-*.jpg` 或搜图，也不因缺图停下；`case_images_missing` 写入 `status.g.case_images_missing`。MUST NOT 执行 `upload-html.mjs`。完成后发布 `node=web`（`08_UI发布/**/index.html` 及引用的静态资源），写回 `status.g.completed=true`、`status.current_phase=h_miaoda_publish` 并立即进入 Phase H。
+HC3 通过后 Coordinator SHALL 只用固定脚本生成网页（MUST NOT 手工拼 `source.json`）：复制 `topic6-web-report/assets/source/` 到 `08_UI发布/热点报告_{period_label}_web` → `validate-template-assets.mjs` → `fetch_case_images.py --doc {feishu_doc_url}`（失败不阻断）→ `fetch_report_md.py --doc {feishu_doc_url} --out report_feishu.md --fallback <merged_report>`（网页正文以飞书定稿为准，回退时写 `status.g.report_source=local_fallback` 与 `report_source_reason` 并提示用户）→ `md2source.py report_feishu.md source.json --case-images` → `validate-case-image-sources.mjs` → `build-report.mjs` → `validate-rendered-content.mjs`。任一校验失败 Phase G 失败，MUST NOT 通过改 source.json 文本迎合校验。案例配图只来自用户在 HC3 上传到飞书文档"案例 N："之后的图片；缺图渲染"配图待补充"占位，MUST NOT 调生图工具、复用模板 `case-*.jpg` 或搜图，也不因缺图停下；`case_images_missing` 写入 `status.g.case_images_missing`。MUST NOT 执行 `upload-html.mjs`。完成后发布 `node=web`（`08_UI发布/**/index.html` 及引用的静态资源），写回 `status.g.completed=true`、`status.current_phase=h_miaoda_publish` 并立即进入 Phase H。
 
 #### Scenario: 无案例配图
 - **WHEN** HC3 期间用户未上传任何图片

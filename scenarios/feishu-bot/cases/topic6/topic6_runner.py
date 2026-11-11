@@ -2,7 +2,7 @@
 
 职责:
 
-  - ``start_job``:接飞书触发词(热点报告/热点周报),创建 MA Session(挂 topic6-coordinator),
+  - ``start_job``:接飞书 `/start [模式]` 命令,创建 MA Session(挂 topic6-coordinator),
     落 ``pipeline_jobs``,启动异步 SSE 消费任务。
   - ``resume_job``:HITL 卡片回调后,把 HC 决策以 ``user.message`` 注入原 MA Session,
     再启一个 SSE 消费任务把 pipeline 从 wait_hc 拉回 running。
@@ -37,6 +37,7 @@ from arkagent.session_state import is_session_resumable, session_status_from_pay
 try:
     from .job_notifier import JobNotifier
     from .pipeline_store import (
+        FAILURE_SCOPE_RECOVERABLE,
         FAILURE_SCOPE_SESSION,
         FAILURE_SCOPE_TASK,
         HC_KINDS,
@@ -53,6 +54,7 @@ try:
 except ImportError:  # pragma: no cover - standalone compatibility
     from job_notifier import JobNotifier
     from pipeline_store import (
+        FAILURE_SCOPE_RECOVERABLE,
         FAILURE_SCOPE_SESSION,
         FAILURE_SCOPE_TASK,
         HC_KINDS,
@@ -69,13 +71,14 @@ except ImportError:  # pragma: no cover - standalone compatibility
 
 log = logging.getLogger("arkagent.topic6.runner")
 
-# 触发词:精确匹配 prompt/00_角色与触发.md;命中即启动 topic6 pipeline。
-TRIGGER_KEYWORDS = ("热点报告", "热点周报")
+# 启动命令:`/start [模式] [周期]`。只认命令，不再按「热点报告/热点周报」子串触发——
+# 普通聊天里提到这两个词(如「W45的热点周报给我开个权限」)曾误启动 full 全流程。
+START_COMMAND_RE = re.compile(r"^/start(?:\s+(.*))?$", re.IGNORECASE | re.DOTALL)
 
-# 模式关键词(用户消息里带就用,不带默认 full)。
+# 模式别名(`/start` 后第一个词精确匹配;不带模式默认 full)。
 MODE_DEMO_KEYWORDS = ("demo", "演示")
-# 旧 test 触发词保留为 full 的兼容别名，但不再作为内部 mode 值。
 MODE_FULL_KEYWORDS = ("full", "完整", "正式")
+# 旧 test 等别名映射到 smoke。
 MODE_SMOKE_KEYWORDS = ("smoke", "冒烟", "冒烟测试", "快速测试", "test", "小样本", "试跑")
 
 # ---- idle 自动续跑 ----
@@ -84,13 +87,15 @@ MODE_SMOKE_KEYWORDS = ("smoke", "冒烟", "冒烟测试", "快速测试", "test"
 MAX_IDLE_NUDGES = 3
 # Agent 需要用户做决定时输出的行首标记（coordinator.system.md R14）；Gateway 不催促。
 NEED_DECISION_MARKER = "[need_decision]"
-# /republish:已过 HC3 的任务只重跑 Phase G(网页)+ H(妙搭),用于 HC3 后补/换营销观察配图。
+# need_decision 收口时写入 last_error 的固定片段；Gateway 据此识别「待裁决」任务(N2 引导)。
+NEED_DECISION_REASON_MARK = "等待用户裁决"
+# /republish:已过 HC3 的任务只重跑 Phase G(网页)+ H(妙搭),用于 HC3 后在飞书文档改正文、补/换营销观察配图。
 # 消息自包含步骤,不依赖 Session 创建时的 coordinator 版本(旧 Session 也能执行)。
 REPUBLISH_MESSAGE = (
-    "[republish] 用户已在 HC3 定稿的飞书文档中补充/替换了营销观察配图，请重新发布网页：\n"
+    "[republish] 用户已在 HC3 定稿的飞书文档中修改了正文和/或补充、替换了营销观察配图，请重新发布网页：\n"
     "1. 不要重跑 Phase A~F，不要修改报告内容和飞书文档。\n"
-    "2. 输出 `[phase] G`，按 Phase G 规定从飞书文档(status.f.feishu_doc_url)重新读取最新配图，"
-    "重新生成并校验网页。\n"
+    "2. 输出 `[phase] G`，按 Phase G 规定从飞书文档(status.f.feishu_doc_url)重新读取最新正文"
+    "(fetch_report_md.py)和配图(fetch_case_images.py)，重新生成并校验网页。\n"
     "3. 输出 `[phase] H`，按 Phase H 规定更新同一个妙搭应用(status.h.app_id)，不要新建应用。\n"
     '4. 成功后最后一条消息只输出发布 JSON：{"phase":"H","release_status":"finished","online_url":"<发布 API 返回的链接>"}'
 )
@@ -127,21 +132,38 @@ def normalize_user_text(text: str, mentioned_bot: bool = False) -> str:
     return normalized
 
 
+def is_start_command(text: str) -> bool:
+    return bool(text) and START_COMMAND_RE.fullmatch(text.strip()) is not None
+
+
 def parse_trigger(text: str) -> Optional[str]:
-    """返回 mode(demo|full|skip_sampling|smoke),不是触发消息返回 None。"""
+    """`/start [模式] [周期]` → mode(demo|full|skip_sampling|smoke)。
+
+    - 不是 `/start` 命令返回 None(普通消息不触发任务)。
+    - `/start` 后第一个词按别名精确匹配模式；没有参数、或第一个词是周期写法
+      (W45 / 09-01到09-14 / 双周 / 继续W45 等，交给 init_project.py 解析)时默认 full。
+    - 第一个词是纯字母但不是已知模式(如 `/start ful`)视为模式写错，返回 None，
+      由调用方用 is_start_command 区分后回复用法提示，避免静默按 full 启动。
+    """
     if not text:
         return None
-    lower = text.strip().lower()
-    if not any(kw in text for kw in TRIGGER_KEYWORDS):
+    match = START_COMMAND_RE.fullmatch(text.strip())
+    if match is None:
         return None
-    if any(kw in lower for kw in MODE_SKIP_SAMPLING_KEYWORDS):
-        return "skip_sampling"
-    if any(kw in lower for kw in MODE_DEMO_KEYWORDS):
-        return "demo"
-    if any(kw in lower for kw in MODE_SMOKE_KEYWORDS):
-        return "smoke"
-    if any(kw in lower for kw in MODE_FULL_KEYWORDS):
+    args = (match.group(1) or "").split()
+    if not args:
         return "full"
+    first = args[0].lower()
+    for mode, aliases in (
+        ("skip_sampling", MODE_SKIP_SAMPLING_KEYWORDS),
+        ("demo", MODE_DEMO_KEYWORDS),
+        ("smoke", MODE_SMOKE_KEYWORDS),
+        ("full", MODE_FULL_KEYWORDS),
+    ):
+        if first in aliases:
+            return mode
+    if re.fullmatch(r"[a-z_\-]+", first):
+        return None
     return "full"
 
 
@@ -198,6 +220,52 @@ def _idle_stop_reason(event: dict) -> str:
     if isinstance(reason, dict):
         reason = reason.get("type")
     return str(reason or "")
+
+
+def _error_retry_status(event: dict) -> str:
+    """session.error 的 error.retry_status.type：retrying | exhausted | terminal | ""。"""
+    error = event.get("error")
+    if not isinstance(error, dict):
+        return ""
+    status = error.get("retry_status")
+    if isinstance(status, dict):
+        status = status.get("type")
+    return str(status or "").strip().lower()
+
+
+def _session_failure_scope(etype: str, event: dict) -> str:
+    """按方舟语义判定失败是否不可恢复，返回 failure_scope。
+
+    只有 Session 真正进入终态(status_failed / status_terminated，或 session.error 的
+    retry_status=terminal)才是 session 级；retry_status=exhausted 表示本轮结束但仍可继续
+    发消息，缺省未知时也按可恢复处理——/continue 前 continue_job 会用 GET /sessions 复核
+    真实状态，真终止时在那里改判 session 级，不会把死 Session 误当活的。
+    """
+    if etype in ("session.status_failed", "session.status_terminated"):
+        return FAILURE_SCOPE_SESSION
+    if etype == "session.error" and _error_retry_status(event) == "terminal":
+        return FAILURE_SCOPE_SESSION
+    return FAILURE_SCOPE_RECOVERABLE
+
+
+# 方舟沙箱故障(平台侧)：工具结果的固定错误文本。连续出现即判定沙箱不可用，
+# 不再自动续跑(续跑只会让 Agent 反复探测、白耗上下文)。
+_SANDBOX_ERROR_MARKERS = ("task service unavailable", "sandbox abnormal")
+SANDBOX_ERROR_STREAK_LIMIT = 3
+
+# /continue 回复了进度卡片、但卡片对应任务已不可续跑时的提示(不回落到会话键查找)。
+_UNRESUMABLE_CARD_HINTS = {
+    STATUS_DONE: "已完成",
+    STATUS_STOPPED: "已停止",
+    STATUS_STOPPING: "正在停止",
+}
+
+
+def _is_sandbox_tool_error(event: dict) -> bool:
+    if event.get("type") != "agent.tool_result" or event.get("is_error") is not True:
+        return False
+    text = event_text(event).lower()
+    return any(marker in text for marker in _SANDBOX_ERROR_MARKERS)
 
 
 def validate_hc_payload(payload: dict) -> Optional[str]:
@@ -258,9 +326,13 @@ class _ProgressState:
     # provider 重试已发出唤醒消息、尚未看到其后的 idle：紧随 session.error 的
     # retries_exhausted idle 属于同一次故障，不能再走 nudge（否则一次故障吃两份额度）。
     provider_retry_pending: bool = False
+    # 连续出现方舟沙箱故障的工具结果条数；任一正常工具结果清零。
+    sandbox_error_streak: int = 0
     # 只在该下标之后的 Session 事件里找 Phase H online_url:/republish 前的旧链接不能把
     # 本轮发布失败误判为完成。
     history_floor: int = 0
+    # 终态已调度过程关键文件归档（同一终态多次 patch 只归档一次；/continue 新一轮重建 state）
+    process_files_scheduled: bool = False
 
     def push_tool_line(self, line: str) -> None:
         if len(self.tool_lines) == self.tool_lines.maxlen:
@@ -315,6 +387,34 @@ class Topic6Runner:
 
     def bind_card_sender(self, sender: "Topic6CardSenderProtocol") -> None:
         self._card_sender = sender
+
+    def bind_process_files(self, delivery, artifact_sync) -> None:
+        """终态时归档过程关键文件到飞书（由 gateway 装配时注入）。"""
+        self._process_files = delivery
+        self._process_artifact_sync = artifact_sync
+
+    async def _deliver_process_files(self, job_id: str) -> None:
+        """终态：先补一次产物同步，再归档关键文件；有新上传才 @ 发起人。失败只记日志。"""
+        delivery = getattr(self, "_process_files", None)
+        if delivery is None or not getattr(delivery, "enabled", False):
+            return
+        job = self._store.get_job(job_id)
+        if job is None:
+            return
+        sync = getattr(self, "_process_artifact_sync", None)
+        try:
+            if sync is not None and job.ma_session_id:
+                await sync.sync_once(job.job_id, job.ma_session_id)
+            result = await asyncio.get_running_loop().run_in_executor(None, delivery.deliver, job)
+        except Exception as err:  # noqa: BLE001 - 归档失败不影响终态
+            log.warning("topic6 terminal process files delivery failed job=%s: %s", job_id, err)
+            return
+        if result.get("uploaded") and result.get("folder_url") and self._notifier is not None:
+            try:
+                self._notifier.notify_process_files(
+                    job, result["folder_url"], int(result["uploaded"]) + int(result.get("skipped") or 0))
+            except Exception as err:  # noqa: BLE001
+                log.warning("topic6 process files notification failed job=%s: %s", job_id, err)
 
     # ---- 入口 --------------------------------------------------------------
 
@@ -576,7 +676,14 @@ class Topic6Runner:
         self._active_streams[job.ma_session_id] = task
 
     async def continue_job(
-        self, chat_id: str, thread_id: str, user_open_id: str, message: str = "继续"
+        self,
+        chat_id: str,
+        thread_id: str,
+        user_open_id: str,
+        message: str = "继续",
+        *,
+        card_message_id: str = "",
+        admin_open_ids: tuple[str, ...] = (),
     ) -> Optional[PipelineJob]:
         """/continue 续跑:把一条 user.message 注入最近一个可续跑的 Session,重订 SSE。
 
@@ -588,9 +695,26 @@ class Topic6Runner:
         主场景:卡片已显示“执行失败，可重试”,但 MA Session 仍是 idle/running。
         真正 failed/terminated 的 Session 不允许继续。
         """
-        job = self._store.get_resumable_job_by_session_key(
-            chat_id, thread_id, user_open_id
-        )
+        job = None
+        if card_message_id:
+            # 回复了进度卡片：按卡片精确定位，只允许发起人或管理员续跑(与卡片按钮口径一致)。
+            # 卡片对应的任务已不可续跑时直接提示，不回落会话键——否则会续跑同一用户的另一个任务。
+            job = self._store.get_job_by_progress_card(chat_id, card_message_id)
+            if job is not None:
+                if user_open_id not in {job.user_open_id, *admin_open_ids}:
+                    raise Topic6RunnerError(
+                        f"任务 {job.job_id} 由其他人发起，仅发起人或管理员可以继续。"
+                    )
+                unresumable = _UNRESUMABLE_CARD_HINTS.get(job.status)
+                if unresumable:
+                    raise Topic6RunnerError(
+                        f"你回复的卡片对应任务 {job.job_id} {unresumable}，不能继续；"
+                        "如需重新生成请发送 `/start`。"
+                    )
+        if job is None:
+            job = self._store.get_resumable_job_by_session_key(
+                chat_id, thread_id, user_open_id
+            )
         if job is None:
             return None
         # Phase H 已在 Session 历史里交付过 online_url（如 Gateway 当时误判失败）：
@@ -827,12 +951,12 @@ class Topic6Runner:
         terminal = events[last_terminal_index]
         terminal_type = terminal.get("type") or ""
         if terminal_type == "user.interrupt":
-            reason = "用户在方舟后台手动停止了 Session"
-            self._store.mark_stopped(job.job_id, reason)
+            reason = "用户在方舟后台中断了当前轮次，可发送 /continue 继续"
+            self._store.mark_failed(job.job_id, reason)
             await self._render_and_patch(
-                job.job_id, status=STATUS_STOPPED, error=reason, force=True
+                job.job_id, status=STATUS_FAILED, error=reason, force=True
             )
-            return "stopped"
+            return "failed"
         if terminal_type in {
             "session.error",
             "session.status_failed",
@@ -846,7 +970,7 @@ class Topic6Runner:
             self._store.mark_failed(
                 job.job_id,
                 error[:400],
-                failure_scope=FAILURE_SCOPE_SESSION,
+                failure_scope=_session_failure_scope(terminal_type, terminal),
             )
             await self._render_and_patch(
                 job.job_id, status=STATUS_FAILED, error=error[:400], force=True
@@ -1011,14 +1135,24 @@ class Topic6Runner:
                     )
                     _ok_state.provider_retry_count = 0
 
+            if etype == "agent.tool_result":
+                _sb_state = self._progress.get(job_id)
+                if _sb_state is not None:
+                    if _is_sandbox_tool_error(event):
+                        _sb_state.sandbox_error_streak += 1
+                    else:
+                        _sb_state.sandbox_error_streak = 0
+
             if etype == "user.interrupt":
                 current = self._store.get_job(job_id)
                 if current and current.status == STATUS_STOPPING:
                     continue
-                reason = "用户在方舟后台手动停止了 Session"
-                self._store.mark_stopped(job_id, reason)
+                # 方舟控制台的 interrupt 只是暂停本轮，Session 仍可继续；不可逆停止只来自
+                # 卡片「停止任务」(先置 stopping，上面已跳过)。记为可恢复失败，允许 /continue。
+                reason = "用户在方舟后台中断了当前轮次，可发送 /continue 继续"
+                self._store.mark_failed(job_id, reason)
                 await self._render_and_patch(
-                    job_id, status=STATUS_STOPPED, error=reason, force=True
+                    job_id, status=STATUS_FAILED, error=reason, force=True
                 )
                 return True
 
@@ -1033,6 +1167,15 @@ class Topic6Runner:
                     if etype == "session.status_terminated"
                     else "session_failed"
                 )
+                # retry_status=retrying:服务端仍在自动重试，继续监听，不收口。
+                # 必须先于下面的 provider 重试判断：平台自己在重试时 Gateway 不能再叠加
+                # 一次「等待 + 催促」(双重重试会多吃一份额度并打乱 Agent 当前轮次)。
+                if etype == "session.error" and _error_retry_status(event) == "retrying":
+                    log.warning(
+                        "topic6 session.error retrying job=%s: %s", job_id, error[:200],
+                    )
+                    continue
+
                 # model_request_failed_error 是 provider 侧临时问题（速率限制/超载），
                 # 不是 session 的永久终态。延迟后自动重试，避免频繁请求加剧速率限制。
                 if etype == "session.error" and "model_request_failed" in error:
@@ -1080,15 +1223,16 @@ class Topic6Runner:
                         # 重试成功——不 return，继续 SSE 消费循环
                         continue
 
-                # 非 provider 错误，或重试次数耗尽——走终态
+                # 非 provider 错误，或重试次数耗尽——走终态；是否可恢复按方舟语义判定
+                scope = _session_failure_scope(etype, event)
                 log.error(
-                    "topic6 session terminal job=%s etype=%s error=%s",
-                    job_id, etype, error[:400],
+                    "topic6 session terminal job=%s etype=%s scope=%s error=%s",
+                    job_id, etype, scope, error[:400],
                 )
                 self._store.mark_failed(
                     job_id,
                     error[:400],
-                    failure_scope=FAILURE_SCOPE_SESSION,
+                    failure_scope=scope,
                 )
                 await self._render_and_patch(
                     job_id, status=STATUS_FAILED, error=error[:400], force=True
@@ -1292,7 +1436,7 @@ class Topic6Runner:
         # 标记可恢复 failed 并把报告原文发群里，用户用 `/continue <选择>` 续跑。
         # stopped 专指用户确认的不可逆停止，/continue 不会恢复。
         if NEED_DECISION_MARKER in last:
-            reason = f"Phase {phase} 等待用户裁决（Agent 已停下给出选项）"
+            reason = f"Phase {phase} {NEED_DECISION_REASON_MARK}（Agent 已停下给出选项）"
             log.warning("topic6 need_decision job=%s phase=%s", job_id, phase)
             self._store.mark_failed(job_id, reason)
             await self._render_and_patch(
@@ -1306,6 +1450,27 @@ class Topic6Runner:
                 f"⏸️ 需要你裁决（job={job_id}）：\n{report}\n\n"
                 f"请回复 `/continue <你的选择>` 继续，例如 `/continue A`。",
             )
+            return None
+
+        # 方舟沙箱故障(平台侧)：工具连续返回 task service unavailable / sandbox abnormal。
+        # 催促只会让 Agent 反复探测、白耗上下文；直接收口为可恢复失败，平台恢复后 /continue。
+        _sb = self._progress.get(job_id)
+        if _sb is not None and _sb.sandbox_error_streak >= SANDBOX_ERROR_STREAK_LIMIT:
+            reason = (
+                f"方舟沙箱暂不可用（平台侧故障，连续 {_sb.sandbox_error_streak} 次工具调用返回"
+                f" task service unavailable / sandbox abnormal），Pipeline 停在 Phase {phase}。"
+                "已完成的产物与审核记录保持不变；平台恢复后发送 /continue 继续。"
+            )[:400]
+            log.error(
+                "topic6 sandbox unavailable job=%s phase=%s streak=%d",
+                job_id, phase, _sb.sandbox_error_streak,
+            )
+            _sb.sandbox_error_streak = 0
+            self._store.mark_failed(job_id, reason)
+            await self._render_and_patch(
+                job_id, status=STATUS_FAILED, error=reason, force=True
+            )
+            await self._reply_async_by_job(job_id, f"⚠️ {reason}")
             return None
 
         # P0-1 第三优先级：结构化诊断（在 HC + Phase H 之后，nudge 之前）
@@ -1509,6 +1674,10 @@ class Topic6Runner:
             return
         elapsed_sec = int(time.time() - state.started_at_wall)
         terminal = status in (STATUS_DONE, STATUS_FAILED, STATUS_STOPPED)
+        if terminal and not state.process_files_scheduled:
+            # 后台归档过程关键文件，不阻塞卡片/SSE，也不受卡片 patch 失败影响；每个终态只调度一次
+            state.process_files_scheduled = True
+            asyncio.get_running_loop().create_task(self._deliver_process_files(job_id))
         report_doc_url = self._report_doc_url(job_id) if terminal else ""
         card = build_progress_card(
             job=job,

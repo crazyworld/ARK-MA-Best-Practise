@@ -1,7 +1,7 @@
 # gateway-command-routing Specification
 
 ## Purpose
-飞书入站消息与卡片回调的入口：过滤、去重、鉴权、命令分发、触发词解析与 Gateway 组件装配。
+飞书入站消息与卡片回调的入口：过滤、去重、鉴权、命令分发、启动命令解析与 Gateway 组件装配。
 
 源码：`gateway.py`（`Topic6Gateway`、`build_gateway`、`_byok_model_headers`）、`config.py`（`load_case_config`）、`topic6_runner.py`（`normalize_user_text`、`parse_trigger`）、`env.example`。
 
@@ -49,21 +49,22 @@
 当 `AUTHORIZED_OPEN_IDS` 非空且发送者不在其中时，系统 SHALL 回复"当前用户未授权。请联系管理员把你的 open_id 加入白名单。"并结束处理，MUST NOT 进入任何命令分支。
 
 #### Scenario: 非白名单用户触发
-- **WHEN** 白名单为 `ou_a`，`ou_b` 发送"热点周报 demo"
+- **WHEN** 白名单为 `ou_a`，`ou_b` 发送"/start demo"
 - **THEN** 回复未授权提示，不创建 Session
 
 ### Requirement: 命令分发顺序
 文本 MUST 先经 `normalize_user_text` 去除开头的 `@xxx`，再按以下固定顺序匹配，命中即返回：
 
 1. `/new` → 取消当前会话键的活跃任务（见 session-runner）；取消后停止该 job 的产物同步并做一次最终 `sync_once`
-2. `/continue` 或 `/resume` [补充消息]（正则 `^/(?:continue|resume)(?:\s+(.*))?$`，忽略大小写）→ 注入补充消息，缺省为"继续"；若任务已因历史 `online_url` 收口为 `done`，回复发布链接
+2. `/continue` 或 `/resume` [补充消息]（正则 `^/(?:continue|resume)(?:\s+(.*))?$`，忽略大小写）→ 注入补充消息，缺省为"继续"；回复进度卡片时按卡片定位任务(仅发起人或 `TOPIC6_ADMIN_OPEN_IDS` 管理员)；若任务已因历史 `online_url` 收口为 `done`，回复发布链接
 3. `/republish [job_id|session_id]`（正则 `^/republish(?:\s+(\S+))?$`，忽略大小写）→ 在原 Session 里只重跑 Phase G+H（见 session-runner「网页重新发布」）；无参数时取本会话最近一个已过 HC3 的任务；`Topic6RunnerError` 以 `[/republish] <原因>` 原文回复；成功后启动该 job 的产物同步
 4. `/log [session_id]` → 列出 Session 事件摘要（>4000 字截断）；无参数时取**全局**最新活跃任务，没有则取最近一条任务的 Session
 5. `/test_feishu` → 用 tenant token 在 Drive 建文件夹/表格/上传文件后删除，返回各步结果
 6. `/test_phase_f` → 以子进程运行 `publish_report_to_feishu.py` 的 mock 数据（超时 120s，剔除 `LARKSUITE_CLI_*` 环境变量）验证 fallback 链路
 7. HC 备注正文（`hitl.handle_remark_message`）
-8. 触发词（`parse_trigger`）
-9. 以上都不命中 → 回复用法提示（列出 demo/smoke/full/skip_sampling、/continue、/republish、/new、/log）
+8. 单个字母(如 `A`)且本会话(或回复的进度卡片)有 `等待用户裁决` 的失败任务 → 回复「请发送 `/continue A` 确认」，MUST NOT 自动执行裁决；没有待裁决任务时按第 10 条处理
+9. 启动命令 `/start [模式] [周期]`（`parse_trigger`）；`/start` 后模式写错时回复「无法识别的模式」+ 用法提示
+10. 以上都不命中 → 回复用法提示（列出 /start 各模式、/continue、/republish、/new、/log）
 
 新增命令 MUST 插入此顺序并更新用法提示文案。
 
@@ -79,24 +80,33 @@
 - **WHEN** 用户刚点了"备注"按钮，随后发送含"热点周报"的文字
 - **THEN** 该文字作为 HC 备注处理，不启动新任务
 
-### Requirement: 触发词与模式解析
-`parse_trigger(text)` SHALL 在文本包含 `热点报告` 或 `热点周报` 时返回模式，否则返回 `None`。模式按以下优先级在小写文本中匹配：
+### Requirement: 启动命令与模式解析
+`parse_trigger(text)` SHALL 只在文本整句匹配 `^/start(?:\s+(.*))?$`（忽略大小写）时返回模式，否则返回 `None`——消息中出现「热点报告/热点周报」MUST NOT 启动任务。`/start` 后第一个词按别名**精确**匹配模式：
 
-| 优先级 | mode | 关键词 |
-|---|---|---|
-| 1 | `skip_sampling` | `skip_sampling` `skip-sampling` `跳过采样` `跳过抽样` |
-| 2 | `demo` | `demo` `演示` |
-| 3 | `smoke` | `smoke` `冒烟` `冒烟测试` `快速测试` `test` `小样本` `试跑` |
-| 4 | `full` | `full` `完整` `正式` |
-| 5 | `full` | 无模式词（默认） |
+| mode | 别名 |
+|---|---|
+| `skip_sampling` | `skip_sampling` `skip-sampling` `跳过采样` `跳过抽样` |
+| `demo` | `demo` `演示` |
+| `smoke` | `smoke` `冒烟` `冒烟测试` `快速测试` `test` `小样本` `试跑` |
+| `full` | `full` `完整` `正式` |
+
+无参数、或第一个词是周期写法（`W45`、`09-01到09-14`、`双周`、`继续W45`，由 `init_project.py` 解析）时返回 `full`；第一个词是纯字母但不是已知模式时返回 `None`，Gateway 用 `is_start_command` 识别后回复「无法识别的模式」+ 用法提示，MUST NOT 按 full 启动。
 
 #### Scenario: 默认模式
-- **WHEN** 文本为"热点周报"
+- **WHEN** 文本为"/start"
 - **THEN** 返回 `full`
 
 #### Scenario: 兼容旧 test
-- **WHEN** 文本为"热点周报 test"
+- **WHEN** 文本为"/start test"
 - **THEN** 返回 `smoke`
+
+#### Scenario: 提到关键词不触发
+- **WHEN** 文本为"<链接> 给我开个访问权限. W45的热点周报"
+- **THEN** 返回 `None`，回复用法提示，不创建 Session
+
+#### Scenario: 模式写错
+- **WHEN** 文本为"/start ful"
+- **THEN** 回复「[/start] 无法识别的模式。」+ 用法提示，不创建 Session
 
 ### Requirement: 启动前凭据就绪
 触发命中后，系统 SHALL：`TOPIC6_SKIP_MIAODA_OAUTH` 为真时以空用户 Vault 启动并记录 warning；否则调用 `_ensure_user_authorized` 获取用户 Vault（见 credential-management）。随后 MUST 调用 `_wait_bot_vault_ready`（最长 30s），再调用 `runner.start_job`，成功后启动该 job 的产物同步。`Topic6RunnerError` / `UserAuthorizationRequired` MUST 以原文回复用户。

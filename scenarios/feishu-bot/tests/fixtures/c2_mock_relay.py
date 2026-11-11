@@ -48,13 +48,16 @@ def f1(user: str) -> dict:
     for rec in payload["records"]:
         title = rec.get("title") or rec.get("clean_title") or ""
         non_event = "教程" in title
+        # 「如何看待」观点类标题:模拟真实 F1 常见的 UNCERTAIN + needs_evidence(W45 后会友期)
+        uncertain = "如何看待" in title
         rows.append({
             "record_id": rec["record_id"],
-            "eventness": "NON_EVENT" if non_event else "EVENT",
-            "reason_code": "GENERIC_KNOWLEDGE" if non_event else "SPECIFIC_STATE_CHANGE",
+            "eventness": "NON_EVENT" if non_event else ("UNCERTAIN" if uncertain else "EVENT"),
+            "reason_code": ("GENERIC_KNOWLEDGE" if non_event else
+                            "INSUFFICIENT_INFO" if uncertain else "SPECIFIC_STATE_CHANGE"),
             "confidence": 0.9,
             "exclusion_supported": non_event,
-            "needs_evidence": False,
+            "needs_evidence": uncertain,
             "frame": None if non_event else {
                 "actor": [{"name": group_of(title), "type": "ORG"}],
                 "action": "发布", "object": group_of(title), "event_type": "发布",
@@ -95,10 +98,40 @@ def archive(user: str) -> dict:
     return {"events": events, "singletons": singletons, "relations": []}
 
 
+def _lines(user: str) -> list[tuple[str, str]]:
+    return [tuple(l.split("\t", 1)) for l in user.splitlines() if "\t" in l]
+
+
+def legacy(user: str) -> dict | None:
+    """legacy 前端(原版 00/01/02 分开调用)。判定口径与 f1() 一致,便于两种前端结果可比。"""
+    if user.startswith("清洗以下"):
+        bump("clean")
+        return {"records": [{"record_id": r, "clean_title": t, "ops": ["NONE"]} for r, t in _lines(user)]}
+    if user.startswith("判定以下"):
+        bump("eventness")
+        rows = []
+        for r, t in _lines(user):
+            ne, unc = "教程" in t, "如何看待" in t
+            rows.append({"record_id": r, "eventness": "NON_EVENT" if ne else ("UNCERTAIN" if unc else "EVENT"),
+                         "underlying_event": "", "confidence": 0.9,
+                         "reason_code": "GENERIC_KNOWLEDGE" if ne else
+                                        ("INSUFFICIENT_INFO" if unc else "SPECIFIC_STATE_CHANGE")})
+        return {"records": rows}
+    if user.startswith("抽取以下"):
+        bump("frames")
+        return {"frames": [{"record_id": r, "actor": [{"name": group_of(t), "type": "ORG"}], "action": "发布",
+                            "object": group_of(t), "event_type": "发布", "parent_hint": None, "stage": None,
+                            "time": None, "location": None, "key_facts": {}} for r, t in _lines(user)]}
+    return None
+
+
 def respond(system: str, user: str) -> dict:
     if user.lstrip().startswith("{") and '"records"' in user[:200]:
         bump("f1")
         return f1(user)
+    old = legacy(user)
+    if old is not None:
+        return old
     if "待判定的实体名" in user:
         bump("entities")
         return entities(user)

@@ -209,8 +209,54 @@ function normalizeSourceLinkText(value) {
   return cleanText(value).replace(/^[•·-]\s*/u, "").trim();
 }
 
+const PLATFORM_BY_HOST = [
+  [/(^|\.)(weibo\.com|weibo\.cn)$/u, "微博"],
+  [/(^|\.)(douyin\.com|iesdouyin\.com)$/u, "抖音"],
+  [/(^|\.)(bilibili\.com|b23\.tv)$/u, "B站"],
+  [/(^|\.)zhihu\.com$/u, "知乎"]
+];
+
+function platformOfHref(href) {
+  let host = "";
+  try { host = new URL(href).hostname; } catch { return ""; }
+  return PLATFORM_BY_HOST.find(([pattern]) => pattern.test(host))?.[1] ?? "";
+}
+
+// 同一 block 内同一锚文本可能对应多个 href(同一标题在抖音/微博各上榜一次)。
+// 旧实现以文本为 Map key,后写覆盖前写,两行都渲染成最后一个链接(W45 成都蓉城致歉)。
+// 改为 文本 → 候选列表:优先按行内声明的平台匹配 href 域名,其次按出现顺序取未用过的,
+// 都没有时退回该文本的首个 href(单一链接时与旧行为完全一致)。
+class SourceLinkIndex {
+  constructor(links = []) {
+    this.byText = new Map();
+    for (const { text, href } of links) {
+      const key = normalizeSourceLinkText(text);
+      if (!key || !href) continue;
+      if (!this.byText.has(key)) this.byText.set(key, []);
+      this.byText.get(key).push({ href, platform: platformOfHref(href), used: false });
+    }
+  }
+  topics() { return [...this.byText.keys()]; }
+  has(topic) { return this.byText.has(topic); }
+  resolve(topic, platform = "") {
+    const candidates = this.byText.get(topic);
+    if (!candidates?.length) return "";
+    const byPlatform = platform
+      ? candidates.find((c) => !c.used && c.platform === platform) ?? candidates.find((c) => c.platform === platform)
+      : undefined;
+    const pick = byPlatform ?? candidates.find((c) => !c.used) ?? candidates[0];
+    pick.used = true;
+    return pick.href;
+  }
+}
+
 function blockSourceLinks(block) {
-  return new Map((block.links ?? []).map(({ text, href }) => [normalizeSourceLinkText(text), href]));
+  return new SourceLinkIndex(block.links ?? []);
+}
+
+function resolveSourceLink(sourceLinks, topic, platform) {
+  if (sourceLinks instanceof SourceLinkIndex) return sourceLinks.resolve(topic, platform);
+  return sourceLinks?.get?.(topic) ?? "";
 }
 
 function renderSourceLinkedText(value, sourceLinks = exactSourceLinks) {
@@ -229,7 +275,7 @@ function renderSourceLinkedText(value, sourceLinks = exactSourceLinks) {
     头条: `https://so.toutiao.com/search?keyword=${encodeURIComponent(topic)}`,
     百度: `https://www.baidu.com/s?wd=${encodeURIComponent(topic)}`
   };
-  const href = sourceLinks.get(topic) ?? exactSourceLinks.get(topic) ?? (platform ? fallbackLinks[platform] : "");
+  const href = resolveSourceLink(sourceLinks, topic, platform) || exactSourceLinks.get(topic) || (platform ? fallbackLinks[platform] : "");
   if (!href) return escapeHTML(cleaned);
   return `<a class="source-link" href="${escapeHTML(href)}" target="_blank" rel="noopener noreferrer">${escapeHTML(topic)}</a>${match ? escapeHTML(match[2]) : ""}`;
 }
@@ -260,22 +306,27 @@ function renderNarrativeText(value) {
 
 function renderListItem(value, sourceLinks) {
   const text = cleanText(value).replace(/^[•·-]\s*/u, "");
-  const targets = [...(sourceLinks ?? new Map()).entries()]
-    .filter(([topic]) => topic && text.includes(topic))
-    .sort((a, b) => b[0].length - a[0].length);
+  const allTopics = sourceLinks instanceof SourceLinkIndex ? sourceLinks.topics() : [...(sourceLinks ?? new Map()).keys()];
+  const targets = allTopics
+    .filter((topic) => topic && text.includes(topic))
+    .sort((a, b) => b.length - a.length);
   if (!targets.length) return renderEmphasizedLine(text);
-  // bullet 内按 block.links 的「文本→href」逐段包链接,其余文本保持原强调渲染
+  // bullet 内按 block.links 的「文本→href」逐段包链接,其余文本保持原强调渲染;
+  // 同一文本出现多次时按其后紧跟的平台标注(「（抖音 · 90 分）」)取对应链接
   let output = "";
   let cursor = 0;
   while (cursor < text.length) {
     let next = null;
-    for (const [topic, href] of targets) {
+    for (const topic of targets) {
       const at = text.indexOf(topic, cursor);
-      if (at >= 0 && (!next || at < next.at)) next = { at, topic, href };
+      if (at >= 0 && (!next || at < next.at)) next = { at, topic };
     }
     if (!next) break;
+    const after = text.slice(next.at + next.topic.length);
+    const platform = after.match(/^\s*[（(·]\s*(微博|抖音|B站|知乎|快手|头条|百度)/u)?.[1] ?? "";
+    const href = resolveSourceLink(sourceLinks, next.topic, platform);
     output += renderEmphasizedLine(text.slice(cursor, next.at));
-    output += `<a class="source-link" href="${escapeHTML(next.href)}" target="_blank" rel="noopener noreferrer">${escapeHTML(next.topic)}</a>`;
+    output += `<a class="source-link" href="${escapeHTML(href)}" target="_blank" rel="noopener noreferrer">${escapeHTML(next.topic)}</a>`;
     cursor = next.at + next.topic.length;
   }
   return output + renderEmphasizedLine(text.slice(cursor));

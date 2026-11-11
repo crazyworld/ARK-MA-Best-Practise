@@ -1525,8 +1525,8 @@ def test_coordinator_uses_cross_platform_c2_flow_and_merge_contract():
 
     required_steps = [
         "run_topic6_c2.py",
-        "`run_c2.py run --mode cross-platform --frontend fused`",
-        "F1 融合抽取",
+        "`run_c2.py run --mode cross-platform --frontend legacy --member-review off`",
+        "聚簇语义对齐客户原版 00→09",
         "`--review-policy record`",
         "`--degraded-policy accept`",
         "c2_event_result_r{N}.xlsx",

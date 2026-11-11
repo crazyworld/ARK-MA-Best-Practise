@@ -523,6 +523,37 @@ class PipelineStore:
             ).fetchall()
         return [self._row_to_job(row) for row in rows]
 
+    def get_job_by_progress_card(
+        self, chat_id: str, card_message_id: str
+    ) -> Optional[PipelineJob]:
+        """按进度卡片 message_id 定位任务(任意状态；用户「回复」该卡片时用)。
+
+        不按发送者/话题过滤——管理员回复他人卡片、或回复不在原话题时也能定位；
+        是否可续跑、是否有权限由调用方判断。卡片已对应终态任务时调用方据此直接提示，
+        不再回落到会话键查找(避免续跑同一用户的另一个任务)。
+        """
+        if not card_message_id:
+            return None
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT * FROM pipeline_jobs
+                WHERE chat_id = ? AND progress_card_message_id = ?
+                ORDER BY updated_at DESC LIMIT 1
+                """,
+                (chat_id, card_message_id),
+            ).fetchone()
+        return self._row_to_job(row) if row else None
+
+    def get_resumable_job_by_progress_card(
+        self, chat_id: str, card_message_id: str
+    ) -> Optional[PipelineJob]:
+        """按进度卡片定位可续跑任务(running/wait_hc/failed，与会话键口径一致)。"""
+        job = self.get_job_by_progress_card(chat_id, card_message_id)
+        if job is None or job.status not in (STATUS_RUNNING, STATUS_WAIT_HC, STATUS_FAILED):
+            return None
+        return job
+
     def get_job_by_ma_session(self, ma_session_id: str) -> Optional[PipelineJob]:
         with self._lock:
             row = self._conn.execute(

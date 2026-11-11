@@ -55,7 +55,7 @@ Skill `topic6-fetch-normalize`（Phase A+B + 抽样）：从 hot-topics MCP 拉�
 - **THEN** 抽出 30 条，与 seed 42 的结果不同
 
 ### Requirement: 参考数据
-`references/平台热度基准_2026.json` 与 `references/marketing_calendar_2026.csv` SHALL 为与客户原始文件 SHA-256 一致的原样迁入文件；修改它们属于业务口径变更，MUST 同步 `CUSTOMER_TO_MA_FILE_MAPPING.md` 与 `TOPIC6_CHANGELOG.md`。2026-11-03 起日历在客户原始 212 行基础上追加 7 个补充节点（冬奥会、迎财神、高考、世界杯、暑期档、开学季、亚运会，对齐 CC V2.0），由 `topic6-annotation/references/marketing_calendar/` 的 generator 与 supplement 生成。`marketing_calendar_2026.csv` 同时被 Phase E 的 E2 使用。
+`references/平台热度基准_2026.json` 与 `references/marketing_calendar_2026.csv` SHALL 为与客户原始文件 SHA-256 一致的原样迁入文件；修改它们属于业务口径变更，MUST 同步 `CUSTOMER_TO_MA_FILE_MAPPING.md` 与 `TOPIC6_CHANGELOG.md`。2026-11-03 起日历在客户原始 212 行基础上追加 7 个补充节点（冬奥会、迎财神、高考、世界杯、暑期档、开学季、亚运会，对齐 CC V2.0），由 `topic6-annotation/references/marketing_calendar/` 的 generator 与 supplement 生成。2026-11-10 再补 4 个电商节点（年货节、618预售启动、99大促、双11预售启动），并把 618/双11/双12 大促类型改为「电商大促」，节点集合与类型和客户 V2 E2 实际使用的 `2026年营销节点_byday.md`（223 个）一致。`marketing_calendar_2026.csv` 同时被 Phase E 的 E2 使用。
 
 #### Scenario: 更新年度基准
 - **WHEN** 需要 2027 年热度基准

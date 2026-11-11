@@ -45,10 +45,10 @@ Memory 工具暂时不可用时记录 warning 后继续,不得据此猜测 Promp
      然后 `end_turn`;用户 `/continue <字母>` 后,取 stdout `resolutions[<字母>]`:
      为参数数组时把它**原样追加**到上一次命令(`--text`/`--mode` 不变)重新调用;
      为 `null` 时停止或请用户补充信息。禁止把选项文字拼进 `--text`(脚本不解析,会再次 ambiguous)
-6. 创建或确认目录后,立即输出一行
+8. 创建或确认目录后,立即输出一行
    `[project_dir] /workspace/Projects/{PROJECT_DIR}`。该标记供 Gateway 把真实路径写入
    `pipeline_jobs.project_dir`;必须使用绝对路径,不得输出目录名或其他根目录
-7. 进入 Phase A
+9. 进入 Phase A
 
 ## 三、路径映射
 
@@ -101,7 +101,8 @@ python /mnt/skills/topic6-annotation/scripts/publish_node_artifacts.py \
 - 两个脚本都会写回 `status.ab`(A:周次/行数;B:`completed`,放行低分时附 `low_max_accepted`);标准化成功时 stdout 末行
   `{"status":"ok","summary":{...}}` 即 A+B 摘要，可直接转述，不得自行读 xlsx 统计
 - 关卡通过后发布 `node=fetch_normalize`: `01_原始数据/hot_topics_skill_raw.json`、
-  `01_原始数据/hot_topics_raw.xlsx`、`02_标准化/hot_topics_normalized.xlsx`
+  `01_原始数据/hot_topics_raw.xlsx`、`02_标准化/hot_topics_normalized.xlsx`,并以 `--optional-include`
+  附带 `01_原始数据/data_quality_report.json`
 
 ### 抽样(full / smoke / demo 模式)
 
@@ -201,7 +202,7 @@ Coordinator 后台执行完整 C2。必须先发出 5 个委派，再立刻启�
   禁止切换模型、修改 batch size 或删除 checkpoint。第二次仍失败则本阶段失败，
   如实回报错误并停止。`--demo-fast` 用一次批量事件归并直接生成 C2 两列结果。该快速
   路径仅用于 50 条样本的流程演示，不得用于 full/skip_sampling 或正式业务结论。
-- 单入口内部调用 C2 3.0.0-rc.14 统一入口 `run_c2.py run --mode cross-platform --frontend fused`：F1 融合抽取（00 清洗+01 事件性+02 Frame 一次调用，两平台并行）→ 合流 → 03 实体∥04 向量 → 05→06→07→x2→x3 → 原热点保留 → 09 registry → x4 → finalize。审核门禁不停等（`--review-policy record`），待审项写入 `c2_status.quality.review_pending`；07 技术降级不阻断（`--degraded-policy accept`），条数见 `c2_status.quality.degraded_count`。Agent 不得直接调用 `run_c2.py` 或编号脚本。
+- 单入口内部调用 C2 3.0.0-rc.14 统一入口 `run_c2.py run --mode cross-platform --frontend legacy --member-review off`：00 清洗（两平台并行）→ 01 事件性 → 02 Frame → 合流 → 03 实体∥04 向量 → 05→06→07 → 原热点保留 → 09 registry → x4 → finalize（聚簇语义对齐客户原版 00→09，不跑 x2/x3）。审核门禁不停等（`--review-policy record`），待审项写入 `c2_status.quality.review_pending`；07 技术降级不阻断（`--degraded-policy accept`），条数见 `c2_status.quality.degraded_count`；事件性未决成员不拆散所在合并组（`--uncertain-policy keep`）。Agent 不得直接调用 `run_c2.py` 或编号脚本。
 - C2 Chat 模型读取 `$C2_CHAT_MODEL_ID`，默认 `DeepSeek-V4.1-Flash`；Embedding 模型读取 `$EMBEDDING_MODEL_ID`，默认 `Doubao-embedding`。与 DataHub 的 `DeepSeek-V4-Flash` 是不同通道，不得互换。
 - 等待 R1~R5 的同一时期，用短时检查器等待 C2 完成（与 wait_datahub_batch.py 同模式）：
   ```bash
@@ -210,8 +211,8 @@ Coordinator 后台执行完整 C2。必须先发出 5 个委派，再立刻启�
   ```
   调用 bash 工具时必须显式设置 `timeout=115`。返回 `running` 时**原参数再次调用**；
   返回 `done` 时 C2 已完成；返回 `failed` 时停止。
-  **禁止用 `sleep`、`while` 循环、`tail --pid` 或手动读 `c2_status.json` 替代此脚本。**
-  若 Session 恢复，可再次调用 `run_topic6_c2.py` 同一入口，run_c2 按阶段 checkpoint 续跑（已完成批次不重复计费）。
+  **禁止用 `sleep`、`while` 循环、`tail --pid`、`task_get`、读取 `.bash_bg` 或手动读 `c2_status.json` 替代此脚本。**
+  若 Session 恢复，再次调用上面的 `launch_c2_background.py` 同一入口（已在跑返回 `already_running`），run_c2 按阶段 checkpoint 续跑（已完成批次不重复计费）。
 - 入口完成后直接产出 `04_标注/C2_事件归档/c2_event_result_r{N}.xlsx`，供 `merge_annotations.py` 消费。
 - 入口内部已含：07 覆盖缺失重试 3 次、x3 ID 反馈重试 2 次、整体失败退避 15s 后 checkpoint 续跑 1 次；
   09 registry（`--window` 由脚本从 `run_config.period.period_label` 推导）写出
@@ -225,8 +226,10 @@ Coordinator 后台执行完整 C2。必须先发出 5 个委派，再立刻启�
 
 六路均结束(R1~R5 为 `complete|degraded` 且 C2 `done`)后发布 R1~R5 中已完成各路的 `*_r{N}.xlsx` 与 `*_completion_meta.json`;
 发布 `node=c2`: `04_标注/C2_事件归档/c2_event_result_r{N}.xlsx`、
-`c2_run/c2_status.json`,并以 `--optional-include` 附带
-`c2_run/work/skipped_edges.jsonl`。不得发布整个 `c2_run` 工作目录。
+`c2_run/c2_status.json`,并以 `--optional-include` 附带 C2 诊断文件
+`04_标注/C2_事件归档/c2_run/engine/out/c2_quality.json`、`04_标注/C2_事件归档/c2_run/engine/out/original_retained.json`、
+`04_标注/C2_事件归档/c2_run/engine/out/01_eventness.csv` 与 `c2_run/work/skipped_edges.jsonl`。不得发布整个 `c2_run` 工作目录。
+(Gateway 在 HC 发卡前与任务终态时,把各节点已发布文件中的关键文件归档到飞书 job 文件夹/「过程数据」,Agent 无需操作。)
 
 ### Phase D · 合并
 
@@ -409,6 +412,8 @@ C→D 全量合并关卡通过后,在输出 HC2 payload 之前,委派子 Agent `
     --project-dir "{project_dir}" --mode {demo|skip_sampling} \
     --publish-date "{publish_date}" --version {N}
   ```
+  `{publish_date}` = `run_config.period.date_end` + 1 天(报告发布日,E2 上周/本周窗口锚点),
+  **不是运行当天**。拿不准时可省略该参数，脚本会从 `run_config.period.date_end` 自动推导
 - 脚本自带前置校验：非 demo 模式下 `status.hc2_passed != true` 直接退出 1(先回 HC2,不得绕过);
   输出文件 ≤ 100 bytes 视为该版块失败；成功/失败都会写回 `status.e_insights`
   (round_version、e1_file~e4_file、failed_sections)
@@ -451,7 +456,8 @@ C→D 全量合并关卡通过后,在输出 HC2 payload 之前,委派子 Agent `
   执行 `lark-cli config init`**；lark-cli 不可用时脚本内部自动切换 Open API fallback，
   Agent 不得自行拼 lark-cli 命令、重试另一条路径或编排权限步骤。
   成功时 stdout 为 JSON `{"status":"success","backend":"lark-cli|feishu_api_fallback","doc_url":".../docx/...","warnings":[...]}`；
-  `warnings`（转移 owner / admin 授权失败）不阻断，原样记录即可。
+  `warnings`（转移 owner / admin 授权失败）不阻断，但 MUST 逐条原文写入 HC3 `issues_detected`
+  (前缀「飞书发布：」),让审核人看到哪些 admin 未获授权、需手动分享。
 - 失败时脚本返回退出码 1 + JSON `{"status":"failed","error":"..."}`（含给发起人授 edit 失败）→ Phase F 失败，不输出 HC3；把 `error` 原文报告给用户，不要原参数反复重跑
 - `pipeline_f.py` 成功后发布 `node=report`,`--include "07_报告/热点报告_*_v{N}.md"`
 - 将脚本输出的 `doc_url` 写入 run_config.yaml 的 `status.f.feishu_doc_url`
@@ -491,7 +497,7 @@ Phase F 飞书文档发布成功后,在输出 HC3 payload 之前,委派子 Agent
   "project_dir": "/workspace/Projects/{PROJECT_DIR}",
   "feishu_doc_url": "https://xxx.feishu.cn/docx/xxx",
   "note": "请在飞书文档中审核并按需调整图片,完成后点击卡片按钮",
-  "issues_detected": ["自校验 warn 项逐条，或空数组"],
+  "issues_detected": ["自校验 warn 项逐条 + 飞书发布 warnings 逐条(前缀「飞书发布：」)，或空数组"],
   "validator_verdict": {}
 }
 ```
@@ -518,8 +524,12 @@ Phase F 飞书文档发布成功后,在输出 HC3 payload 之前,委派子 Agent
   node "$WEB/scripts/validate-template-assets.mjs"
   # 1) 下载用户在 HC3 手工上传到飞书文档的案例配图 → case-<N>.<ext>(失败/无图都不阻断)
   python "$WEB/scripts/fetch_case_images.py" --doc "{status.f.feishu_doc_url}" --out "$OUT/case_images" || true
-  # 2) 报告 md → source.json;营销观察案例统一为左文右图卡片,有图挂图、缺图渲染「配图待补充」占位
-  python "$WEB/scripts/md2source.py" "$project_dir/{status.f.merged_report_file}" "$OUT/source.json" --case-images "$OUT/case_images"
+  # 2) 读取 HC3 定稿飞书文档正文(用户在飞书里改的文字/表格以飞书为准);读取失败或还原不完整时
+  #    脚本自动回退本地 merged_report_file 并在 stdout 给出 source/reason(不阻断)
+  python "$WEB/scripts/fetch_report_md.py" --doc "{status.f.feishu_doc_url}" --out "$OUT/report_feishu.md" \
+    --fallback "$project_dir/{status.f.merged_report_file}"
+  # 3) 报告 md → source.json;营销观察案例统一为左文右图卡片,有图挂图、缺图渲染「配图待补充」占位
+  python "$WEB/scripts/md2source.py" "$OUT/report_feishu.md" "$OUT/source.json" --case-images "$OUT/case_images"
   node "$WEB/scripts/validate-case-image-sources.mjs" "$OUT/source.json"
   node "$OUT/build-report.mjs" "$OUT/source.json" "$OUT/index.html"
   node "$WEB/scripts/validate-rendered-content.mjs" "$OUT/source.json" "$OUT/index.html"
@@ -528,6 +538,10 @@ Phase F 飞书文档发布成功后,在输出 HC3 payload 之前,委派子 Agent
   「案例 N：」标题之后的图片。缺图案例由模板渲染「配图待补充」占位,流程照常进入 Phase H;
   严禁调用生图工具、复用模板 `case-*.jpg`、搜图替代,也不因缺图停下向用户索图。
   `md2source.py` 输出的 `case_images_missing` 写入 `status.g.case_images_missing`
+- **网页正文以飞书定稿为准**:`fetch_report_md.py` 输出的 `source`(`feishu`|`local_fallback`)写入
+  `status.g.report_source`;为 `local_fallback` 时把 `reason` 写入 `status.g.report_source_reason`,
+  并在 Phase G 结束时(进入 Phase H 之前)单独输出一行提示「网页基于本地稿生成,HC3 在飞书文档中的文字修改未进入网页:{reason}」。
+  不得手工改写 `report_feishu.md`,不得因回退而停下
 - 上述校验任一失败即 Phase G 失败,报告原文错误;不得通过改 source.json 文本去迎合校验
 - 产物保留在项目 `08_UI发布/` 下；校验通过后用统一脚本发布 `node=web`,
   `--include "08_UI发布/**/index.html"` 及页面实际引用的本地静态资源
@@ -574,7 +588,7 @@ Phase F 飞书文档发布成功后,在输出 HC3 payload 之前,委派子 Agent
 
 | 规则 | 摘要 |
 |---|---|
-| R01 | 触发词精确匹配「热点报告/热点周报」 |
+| R01 | 任务只由 Gateway 的 `/start [模式]` 命令启动；mode 以首条消息中的 `mode=` 为准，用户原始消息仅用于周期解析 |
 | R02 | full/smoke 走 HC1→HC2→HC3（smoke 用 30 条数据走完整路径）；demo 走 HC1→HC3、明确跳过全量与 HC2；skip_sampling 走 HC2→HC3 |
 | R03 | 每个 LLM 任务完成后立即调 cost_tracker |
 | R04 | 所有路径基于 `/workspace` / `/mnt/*`,不硬编码绝对路径外的固定盘符 |

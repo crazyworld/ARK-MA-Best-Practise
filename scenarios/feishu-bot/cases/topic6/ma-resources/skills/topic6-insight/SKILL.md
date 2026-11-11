@@ -27,7 +27,7 @@ topic6-insight/
 ├── 02_洞察/                    Prompt 目录
 │   ├── _shared/role_style.md   共享角色/风格,拼在每个版块 prompt 前
 │   ├── E1_行业话题/v3.md
-│   ├── E2_营销节点/v7.md
+│   ├── E2_营销节点/v8.md
 │   ├── E3_平台新鲜事/
 │   │   ├── v6.md               分平台撰写 prompt(每平台一次调用)
 │   │   ├── _tagging/v3.md      热点词打标(主体是否明确/是否可借势)
@@ -37,7 +37,7 @@ topic6-insight/
 │       ├── _curation/v3.md     营销观察/消费洞察草稿枚举
 │       ├── _arbitration/v3.md  跨板块归属仲裁 + 同池去重
 │       ├── _writing_coop_risk/v4.md          A 组撰写(合作动态+舆情风险)
-│       └── _writing_marketing_consumer/v1.md B 组撰写(营销观察+消费洞察)
+│       └── _writing_marketing_consumer/v2.md B 组撰写(营销观察+消费洞察)
 │       (v6.md 等旧版保留供回退,E4 主路径不再读取)
 └── references/
     ├── E3_统计口径说明.md
@@ -73,7 +73,7 @@ E3/E4 为分步路由（参照 CC V2.0），所有子调用共用同一个并发
 
 关键参数:
 - `--project-dir`: 项目目录(绝对路径,或相对 `/workspace`)
-- `--publish-date`: 报告发布日,影响 E2 节点窗口判断
+- `--publish-date`: 报告发布日,影响 E2 节点窗口判断;缺省 = `run_config.period.date_end` + 1 天(不是运行当天)
 - `--model`: bmc-llm-relay 模型 ID(默认 `DeepSeek-V4.1-Flash`,大小写与网关 `/v1/models` 一致)
 - `--version N`: 强制指定洞察版本(默认自增)
 - `--sections e1,e2`: 只跑指定版块

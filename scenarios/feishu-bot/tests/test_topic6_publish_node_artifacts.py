@@ -126,3 +126,55 @@ def test_publish_rejects_escape_and_missing_patterns(tmp_path: Path):
             projects_root=projects_root,
             output_root=tmp_path / "outputs",
         )
+
+
+def test_glob_skips_hidden_temp_files(tmp_path: Path):
+    """W45：`*_r1.xlsx` 曾把重提临时输入 `.c0_retry_input_r1.xlsx` 一起发布。"""
+    projects_root = tmp_path / "Projects"
+    project = projects_root / "W45"
+    task_dir = project / "04_标注/C0_基础事实"
+    task_dir.mkdir(parents=True)
+    (task_dir / "c0_postprocess_r1.xlsx").write_bytes(b"ok")
+    (task_dir / "c0_result_raw_r1.xlsx").write_bytes(b"ok")
+    (task_dir / ".c0_retry_input_r1.xlsx").write_bytes(b"tmp")
+    (task_dir / ".c0_prepared_r1.xlsx").write_bytes(b"tmp")
+
+    result = publisher.publish(
+        project_dir=project, node="c0", run_id="1",
+        includes=["04_标注/C0_基础事实/*_r1.xlsx"],
+        projects_root=projects_root, output_root=tmp_path / "outputs",
+    )
+    outputs = sorted(f["output"] for f in result["files"])
+    assert outputs == ["W45/04_标注/C0_基础事实/c0_postprocess_r1.xlsx",
+                       "W45/04_标注/C0_基础事实/c0_result_raw_r1.xlsx"]
+
+
+def test_directory_include_skips_hidden_entries_but_keeps_normal(tmp_path: Path):
+    projects_root = tmp_path / "Projects"
+    project = projects_root / "W45"
+    web = project / "08_UI发布/热点报告_2026-W45_web"
+    (web / ".cache").mkdir(parents=True)
+    (web / "index.html").write_text("<html></html>", encoding="utf-8")
+    (web / "report_feishu.md").write_text("# x", encoding="utf-8")
+    (web / ".cache" / "x.bin").write_bytes(b"x")
+    (web / ".DS_Store").write_bytes(b"x")
+
+    result = publisher.publish(
+        project_dir=project, node="web", run_id="1",
+        includes=["08_UI发布/热点报告_2026-W45_web"],
+        projects_root=projects_root, output_root=tmp_path / "outputs",
+    )
+    names = sorted(Path(f["output"]).name for f in result["files"])
+    assert names == ["index.html", "report_feishu.md"]
+
+
+def test_only_hidden_matches_is_still_a_missing_include(tmp_path: Path):
+    projects_root = tmp_path / "Projects"
+    project = projects_root / "W45"
+    d = project / "04_标注/C0"
+    d.mkdir(parents=True)
+    (d / ".tmp_r1.xlsx").write_bytes(b"x")
+    with pytest.raises(FileNotFoundError):
+        publisher.publish(project_dir=project, node="c0", run_id="1",
+                          includes=["04_标注/C0/*_r1.xlsx"], projects_root=projects_root,
+                          output_root=tmp_path / "outputs")

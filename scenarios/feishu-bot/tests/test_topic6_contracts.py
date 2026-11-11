@@ -32,21 +32,51 @@ validate_hc_payload = runner_mod.validate_hc_payload
 
 
 def test_parse_trigger_supports_four_current_modes():
-    assert parse_trigger("热点周报 demo") == "demo"
-    assert parse_trigger("热点报告 演示") == "demo"
-    assert parse_trigger("热点周报 full") == "full"
-    assert parse_trigger("热点周报 smoke") == "smoke"
-    assert parse_trigger("热点周报 冒烟测试") == "smoke"
-    assert parse_trigger("热点周报 test") == "smoke"
-    assert parse_trigger("热点周报 skip_sampling") == "skip_sampling"
-    assert parse_trigger("热点周报 跳过采样") == "skip_sampling"
+    assert parse_trigger("/start demo") == "demo"
+    assert parse_trigger("/start 演示") == "demo"
+    assert parse_trigger("/start full") == "full"
+    assert parse_trigger("/start smoke") == "smoke"
+    assert parse_trigger("/start 冒烟测试") == "smoke"
+    assert parse_trigger("/start test") == "smoke"
+    assert parse_trigger("/start skip_sampling") == "skip_sampling"
+    assert parse_trigger("/start skip-sampling") == "skip_sampling"
+    assert parse_trigger("/start 跳过采样") == "skip_sampling"
+    assert parse_trigger("/START Demo") == "demo"
+
+
+def test_start_without_mode_defaults_to_full_and_keeps_period_text():
+    assert parse_trigger("/start") == "full"
+    # 周期写法交给 init_project.py 解析，模式缺省 full
+    for text in ("/start W45", "/start 09-01到09-14", "/start 双周", "/start 继续W45"):
+        assert parse_trigger(text) == "full", text
+    assert parse_trigger("/start demo W45") == "demo"
+
+
+def test_keyword_mentions_no_longer_start_pipeline():
+    """W45：「<妙搭链接> 给我开个访问权限. W45的热点周报」曾按子串命中触发词，误启动 full。"""
+    for text in (
+        "https://bluefocus.feishu.cn/page/Oa22 给我开个访问权限. W45的热点周报",
+        "热点周报 full",
+        "热点报告",
+        "帮我看下热点周报 demo 的结果",
+        "/started",
+        "请 /start full",
+    ):
+        assert parse_trigger(text) is None, text
+        assert not runner_mod.is_start_command(text), text
+
+
+def test_unknown_start_mode_is_rejected_not_defaulted():
+    assert parse_trigger("/start ful") is None
+    assert runner_mod.is_start_command("/start ful")
 
 
 def test_group_mention_is_removed_before_command_and_trigger_parsing():
     assert normalize_user_text("@热点周报助手 /new", mentioned_bot=True) == "/new"
     assert normalize_user_text(
-        "@热点周报助手 热点周报 demo", mentioned_bot=True
-    ) == "热点周报 demo"
+        "@热点周报助手 /start demo", mentioned_bot=True
+    ) == "/start demo"
+    assert parse_trigger(normalize_user_text("@热点周报助手 /start demo", True)) == "demo"
     assert parse_trigger(normalize_user_text("@热点周报助手 /new", True)) is None
 
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 01_统计 · E2 营销节点
-统计口径唯一权威。02_洞察/E2_营销节点/v7.md 不重复。
+统计口径唯一权威。02_洞察/E2_营销节点/v8.md 不重复。
 """
 
 from __future__ import annotations
@@ -204,15 +204,12 @@ def _load_node_calendar_full() -> dict[str, date]:
     return {name: node_date for node_date, name, _node_type in _load_calendar_rows()}
 
 
-def _build_last_week_table(bucket_df: pd.DataFrame, unverified_nodes: set[str]) -> tuple[bool, str | None]:
+def _build_last_week_table(bucket_df: pd.DataFrame) -> tuple[bool, str | None]:
     """按"提取节点"分组产出"上周节点回顾"汇总表markdown。
     返回 (has_data, data_md)；bucket_df 为空时 has_data=False。
 
-    unverified_nodes（2026-10-09新增）：日历里查不到锚点日期、按"保守归入上周"兜底
-    处理的节点名集合（见 prep_e2_nodes() 的 _classify()）——这类节点没有真正做过
-    时间校验，只是假定它属于上周，不能悄悄跟真正验证过的节点显示得一样"理所当然"，
-    在节点名后面加"（锚点未核实）"标注，让这份不确定性在最终报告里可见，不是只停留
-    在开发日志的stderr警告里。
+    只接收已按锚点日期校验落在上周窗口的节点(2026-11-11 起日历查不到锚点的节点
+    不进入报告，不再以「（锚点未核实）」标注展示，见 prep_e2_nodes 的 _classify)。
 
     "涉及品牌IP"列 2026-10-09改名"涉及品牌IP候选"：这一列此前直接当最终展示值用，
     但V1→V2把"涉及品牌"和"关键实体"（人物）两个字段合并成了"商业实体"一个字段后，
@@ -247,9 +244,8 @@ def _build_last_week_table(bucket_df: pd.DataFrame, unverified_nodes: set[str]) 
         rep_rows = _pick_representative_titles(grp, n=n_rep)
         具体热搜 = _render_titles_with_links(rep_rows, show_platform=True)
 
-        显示节点名 = f"{node}（锚点未核实）" if node in unverified_nodes else node
         rows.append({
-            "节点": 显示节点名,
+            "节点": node,
             "热点总计": 热搜条数,
             "热度值": fmt_score(最高分),
             "涉及品牌IP候选": 涉及品牌IP候选,
@@ -307,14 +303,17 @@ def prep_e2_nodes(df_y: pd.DataFrame, pub_date: date) -> dict:
         unknown_nodes = sorted(n for n, d in node_dist.items() if d is None)
         if unknown_nodes:
             print(
-                f"[e2_nodes] ⚠️ 日历里查不到以下节点的锚点日期，已归入'上周节点回顾'（可能是"
-                f"命名对不上日历或自定义节点，建议核对）：{unknown_nodes}",
+                f"[e2_nodes] ⚠️ 日历里查不到以下节点的锚点日期，不进入报告（只展示确定性节点；"
+                f"若属命名对不上，请在 marketing_calendar_2026.csv 补一行）：{unknown_nodes}",
                 file=sys.stderr,
             )
 
         def _classify(node: str) -> str | None:
             dist = node_dist[node]
-            if dist is None or -7 <= dist <= -1:
+            # 2026-11-11:查不到锚点日期的节点不再「保守归入上周」——报告只给确定性内容
+            if dist is None:
+                return None
+            if -7 <= dist <= -1:
                 return "last_week"
             if 0 <= dist <= UPCOMING_SIGNAL_MAX_DIST:
                 return "upcoming"  # 还没发生、且在30天远距离上限内，折叠进预告补充信号
@@ -322,10 +321,7 @@ def prep_e2_nodes(df_y: pd.DataFrame, pub_date: date) -> dict:
 
         exploded["_bucket"] = exploded["提取节点"].map(_classify)
 
-        unverified_nodes = {n for n, d in node_dist.items() if d is None}
-        has_lw, md_lw = _build_last_week_table(
-            exploded[exploded["_bucket"] == "last_week"], unverified_nodes
-        )
+        has_lw, md_lw = _build_last_week_table(exploded[exploded["_bucket"] == "last_week"])
         result["last_week"] = {"has_data": has_lw, "data_md": md_lw, "empty_text": "上周无节点。"}
 
         upcoming_df = exploded[exploded["_bucket"] == "upcoming"]

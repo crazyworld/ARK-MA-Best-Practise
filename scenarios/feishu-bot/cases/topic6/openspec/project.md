@@ -85,7 +85,7 @@ openspec show <capability> --type spec      # 只读要改的那份 spec，而�
 openspec new change <change-id>             # 起变更（或手动建 openspec/changes/<id>/）
 #   proposal.md / design.md(跨层时必写) / tasks.md / specs/<capability>/spec.md(ADDED|MODIFIED|REMOVED)
 openspec validate <change-id> --strict --no-interactive
-#   实施 → ./run_tests.sh → ./update_ma.sh → 重启 Gateway → 飞书「热点周报 smoke」
+#   实施 → ./run_tests.sh → ./update_ma.sh → 重启 Gateway → 飞书「/start smoke」
 openspec archive <change-id> --yes          # 把 delta 合并回 openspec/specs/
 ```
 

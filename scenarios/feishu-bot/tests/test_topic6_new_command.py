@@ -279,7 +279,8 @@ def test_start_job_serializes_simultaneous_triggers(loop, tmp_path):
     assert max_active_calls == 1
 
 
-def test_backend_user_interrupt_marks_job_stopped(loop, tmp_path):
+def test_backend_user_interrupt_marks_job_recoverable(loop, tmp_path):
+    """方舟控制台 interrupt 只是暂停本轮(Session 回到 idle)，任务应可 /continue，不是不可逆 stopped。"""
     runner, store = _make_runner(tmp_path, loop)
     job = store.create_job(
         chat_id="c1",
@@ -300,8 +301,9 @@ def test_backend_user_interrupt_marks_job_stopped(loop, tmp_path):
     loop.run_until_complete(runner._consume_events(job.job_id, _events()))
 
     reloaded = store.get_job(job.job_id)
-    assert reloaded.status == STATUS_STOPPED
-    assert reloaded.last_error == "用户在方舟后台手动停止了 Session"
+    assert reloaded.status == STATUS_FAILED
+    assert reloaded.failure_scope == "recoverable"
+    assert "/continue" in reloaded.last_error
 
 
 def test_idle_without_hc_or_final_url_is_not_marked_done(loop, tmp_path):

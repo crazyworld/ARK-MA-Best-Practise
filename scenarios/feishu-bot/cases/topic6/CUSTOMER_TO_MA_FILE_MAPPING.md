@@ -43,7 +43,7 @@
 | `scripts/log1p_p1p99_normalize.py` | `topic6/skill/fetch-normalize/pipeline_ab.py` | 拆分重写 | 提取 Phase B；保留 log1p + P1/P99 核心算法 |
 | `scripts/sample_500.py` | `topic6/skill/fetch-normalize/sample_500.py` | 适配迁入 | 改为 `--project-dir` 和 MA 工作区路径 |
 | `references/平台热度基准_2026.json` | `topic6/skill/fetch-normalize/references/平台热度基准_2026.json` | 原样迁入 | SHA-256 一致 |
-| `references/marketing_calendar_2026.csv` | `topic6/skill/fetch-normalize/references/marketing_calendar_2026.csv` | 原样迁入 | SHA-256 一致 |
+| `references/marketing_calendar_2026.csv` | `topic6/skill/fetch-normalize/references/marketing_calendar_2026.csv` | 适配迁入 | 2026-11-10 按客户 V2 E2 实际使用的 `references/2026年营销节点_byday.md` 补齐 4 个电商节点（年货节/618预售启动/99大促/双11预售启动），618/双11/双12 大促类型改为「电商大促」；节点集合与客户 md 一致（223），保持 BOM+CRLF |
 
 ## 三、`topic6-annotation` 对应表
 
@@ -101,11 +101,11 @@ MA 根目录：`ma-resources/skills/topic6-event-registry/`
 | `references/*.md`（其余 8 个）、`MANIFEST.json`、`examples/synthetic.csv` | 同名文件 | 原样迁入(去 CRLF) | MANIFEST 记录上游哈希，适配文件不匹配属预期 |
 | `scripts/relay.py` | 同名文件 | 适配迁入 | 传输层保留 MA（bmc-llm-relay 流式 + watchdog + 多模态 embedding）；run_batches 版本缓存、Embedder 校验/原子落盘对齐 rc.14；`MODEL_MAX_OUTPUT_TOKENS` 按模型原生输出上限请求（上游默认按 Sonnet 调校），截断报错附 reasoning_tokens（2026-11-06） |
 | `scripts/03_normalize_entities.py` | 同名文件 | 适配迁入 | 截断先原样重试、仍截断对半拆，串行累积注册表（同 07 `archive_split`；2026-11-06 W44 full 阻断修复） |
-| `scripts/run_c2.py` | 同名文件 | 适配迁入 | 新增 `--review-policy`/`--degraded-policy`/`--front-workers`（默认上游语义）；x2 透传 `--model`；端点读 `LLM_RELAY_BASE_URL` |
-| `scripts/retain_original.py`、`x2_confidence_filter.py` | 同名文件 | 适配迁入 | `allow_degraded` 参数；恢复 `--model` 覆盖 |
+| `scripts/run_c2.py` | 同名文件 | 适配迁入 | 新增 `--review-policy`/`--degraded-policy`/`--uncertain-policy`/`--member-review`/`--front-workers`（默认上游语义）；x2 透传 `--model`；端点读 `LLM_RELAY_BASE_URL` |
+| `scripts/retain_original.py`、`x2_confidence_filter.py` | 同名文件 | 适配迁入 | `allow_degraded`、`uncertain_policy`（keep=未决成员不拆组，对齐原版旧链路）参数；恢复 `--model` 覆盖 |
 | `scripts/run_ev.py`、`04_build_embeddings.py`、`check_environment.py` | 同名文件 | 适配迁入 | `ANTHROPIC_*` → `LLM_RELAY_*` |
 | `scripts/f1_extract.py`、`c2_runtime.py`、`c2_quality.py`、`front_evidence.py`、`link_registry.py`、`review_revision.py`、`verify_package.py`、`00~11_*.py`（03 除外）、`x0~x4_*.py`、`eventlib.py` | 同名文件 | 原样迁入(去 CRLF) | rc.14 主体 |
-| `scripts/run_topic6_c2.py`、`launch_c2_background.py`、`wait_c2_complete.py` | 无 | MA 新增 | Topic6 封装：调用 `run_c2.py run --mode cross-platform --frontend fused` |
+| `scripts/run_topic6_c2.py`、`launch_c2_background.py`、`wait_c2_complete.py` | 无 | MA 新增 | Topic6 封装：调用 `run_c2.py run --mode cross-platform --frontend legacy --member-review off`（聚簇对齐原版 00→09，保留跨平台合并） |
 | `scripts/__pycache__/` | 客户侧缓存 | 未迁移 | Python 缓存，不属于源码 |
 
 ## 五、`topic6-insight` 对应表
@@ -126,7 +126,7 @@ MA 根目录：`ma-resources/skills/topic6-event-registry/`
 | `02_洞察/E3_平台新鲜事/v1.md` | 客户侧同路径文件 | 原样迁入 | 当前活跃版 |
 | `02_洞察/E4_营销发现/v6.md`、`_tagging/v1.md` | 客户侧同路径文件 | 原样迁入 | 归档保留(回退用) |
 | `02_洞察/E1_行业话题/v3.md`、`E2_营销节点/v7.md`、`E3_平台新鲜事/v6.md` + `_tagging/v3.md` + `_insight_draft/v1.md`、`E4_营销发现/_tagging/v5.md` + `_curation/v3.md` + `_arbitration/v3.md` + `_writing_coop_risk/v4.md` + `_writing_marketing_consumer/v1.md` | 客户 V2.0 bundle 同路径文件 | 原样迁入(去 CRLF) | 2026-11-03 活跃版 |
-| `references/E3_统计口径说明.md`、`综合热度指数算法说明.md` | 客户侧 `01_统计/references/` 下同名文件 | 原样迁入并移动 | 从统计子目录提升到 Skill 的 `references/` |
+| `references/E3_统计口径说明.md`、`综合热度指数算法说明.md` | 客户侧 `01_统计/references/` 下同名文件 | 原样迁入并移动 | 从统计子目录提升到 Skill 的 `references/`；2026-11-10 改为客户 2026-10-13 校正版（v2 口径，此前误迁 09-15 旧版）。`综合热度指数算法说明.md` SHA-256 一致；`E3_统计口径说明.md` 仅打标 Prompt 版本号一处注记 |
 
 ## 六、`topic6-web-report` 对应表
 
@@ -141,6 +141,8 @@ MA 根目录：`ma-resources/skills/topic6-web-report/`
 | `artifact-template.json` | 同名文件 | 原样迁入 | SHA-256 一致 |
 | `CLAUDE.md` | 同名文件 | 适配迁入 | 删除 snapshot 上传指令，Topic6 网页只走妙搭（2026-11-06） |
 | `references/document-image-extraction.md`、`html-snapshot-upload.md` | 同名文件 | 原样迁入 | SHA-256 一致 |
+| `scripts/md2source.py`、`fetch_case_images.py` | 客户 `pipeline_g.py`（SourceJsonBuilder / download_case_images） | MA 重写 | 报告 md → source.json 确定性转换；HC3 飞书文档案例配图下载 |
+| `scripts/fetch_report_md.py` | 客户 `pipeline_g.py::fetch_feishu_markdown` | MA 新增（2026-11-10） | 网页正文以 HC3 定稿飞书文档为准：tenant token 读 docx blocks 还原 Markdown；读取失败/还原不完整时回退本地合并报告 |
 | `scripts/upload-html.mjs`、`validate-case-image-sources.mjs`、`validate-rendered-content.mjs`、`validate-template-assets.mjs` | 同名文件 | 原样迁入 | 4 个脚本 SHA-256 一致 |
 | `assets/preview.png` | 同名文件 | 原样迁入 | SHA-256 一致 |
 | `assets/source/app.js`、`index.html`、`source.example.json` | 同名文件 | 原样迁入 | 3 个模板源码文件 SHA-256 一致 |
@@ -212,8 +214,17 @@ Prompt 仅把客户侧 `Agent.Producer/.claude/skills/...` 引用适配为 MA �
 | `topic6/tool/datahub/契约.md` | 未直接迁入 | 契约落实在 `datahub_annotate.py` 和环境变量配置中 |
 | `topic6/tool/hot-topics-mcp/契约.md` | 未直接迁入 | MCP 定义落实在 `coordinator.json` |
 | `topic6/tool/lark-cli/契约.md` | 未直接迁入 | 发布职责由 Coordinator 与飞书接入层承担 |
-| `topic6/tool/web-report/md2source.py`、`README.md` | 未迁移 | MA 网页 Skill 直接按 `source.example.json` 构造 `source.json` |
+| `topic6/tool/web-report/README.md` | 未迁移 | `md2source.py` 已以 MA 版重写在 `topic6-web-report/scripts/`（见第六节） |
 | `topic6/其他相关引用/authorized_users.json`、`permission_registry.json`、`permission-model.md`、`topic_registry.json`、`根_CLAUDE.md` | 未迁移 | 权限、Topic 路由和会话隔离由 Gateway/MA 资源配置承担 |
+| `agent/skill/scripts/pipeline_g.py`、`publish_miaoda.py` | 拆分重写 | Phase G 由 Coordinator 固定命令序列（`fetch_case_images.py` → `fetch_report_md.py` → `md2source.py` → 构建/校验）承担；妙搭发布独立为 Phase H（`miaoda-web-publish`），失败为阻塞 |
+| `agent/skill/scripts/feishu_push_hc.py`、`feishu_pullback.py` | 由 Gateway 替代 | HC1/HC2 宽表推飞书在线表格与通过后回读改由 `feishu_doc_publisher.py` + `topic6_hitl._reread_edited_sheet` 承担；健康度摘要不推 docx（仅卡片展示） |
+| `agent/skill/scripts/pipeline_deliver.py`、`config/delivery_manifest.yaml`、`config/delivery_root.json` | 由 Gateway 替代（2026-11-11） | 不迁 7 子夹与按人大根；`process_files.py` 把关键节点文件（白名单、最新轮次）传到 job 文件夹/「过程数据」，发起人授权 + 终态 @ 通知；宽表仍为 HC 在线表格，报告仍由 Phase F 发布 |
+| `agent/skill/scripts/preflight_check.py` | 未迁移 | 环境检查由 `TOPIC6_DEBUG_QUICKSTART.md` 清单、Gateway `/test_phase_f` 探测与 Coordinator 启动 Prompt 预检承担 |
+| `agent/skill/scripts/run_logger.py` | 未迁移 | 阶段状态由 `pipeline_store.py`、进度卡片与 `tools/session_triage.py` 承担 |
+| `agent/skill/scripts/pipeline_ab.py`、`fetch_and_clean.py`、`normalize.py` | 拆分重写 | 由 `fetch_hot_topics.py` + `log1p_p1p99_normalize.py` 承担 |
+| `agent/skill/scripts/pipeline_e4_agent_steps.py` | 合并重写 | E4 分步逻辑并入 `pipeline_e.py`（脚本内直连） |
+| `agent/KS/KS_*.md`（4 个） | 未直接迁入 | 判定口径与报告结构由 `topic6-annotation/ks/*`、当前生效 Prompt 与统计脚本承载 |
+| `agent/LM/错误案例库.md` E5~E17 | 摘要迁入 | `memory/topic6/错误案例库.md` 按 MA 适配摘要收录；E11/E12 标注不适用 |
 | 所有 `.DS_Store`、`__pycache__/` | 未迁移/忽略 | 本地系统或解释器缓存，不属于源码 |
 
 ## 十、维护规则

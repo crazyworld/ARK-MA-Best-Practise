@@ -524,7 +524,6 @@ async def test_gateway_skip_oauth_starts_without_user_vault():
 async def test_continue_command_passes_trailing_text_to_runner():
     calls = []
     replies = []
-    keepalive_calls = []
     sync_calls = []
 
     class Store:
@@ -560,10 +559,8 @@ async def test_continue_command_passes_trailing_text_to_runner():
         None,
         artifact_sync=ArtifactSync(),
     )
-    gateway._start_token_keepalive = (  # type: ignore[method-assign]
-        lambda job, vault_id: keepalive_calls.append((job.job_id, vault_id))
-    )
-
+    # 不再注入私有方法：真实 Gateway 必须能独立完成 /continue（曾因调用已删除的
+    # _start_token_keepalive 抛 AttributeError，导致 artifact_sync 与确认回复都被跳过）。
     await gateway._process(
         replace(_message(), text="/continue 请优先检查异常热点")
     )
@@ -573,8 +570,10 @@ async def test_continue_command_passes_trailing_text_to_runner():
         "thread_id": "",
         "user_open_id": "ou-scanned",
         "message": "请优先检查异常热点",
+        "card_message_id": "",
+        "admin_open_ids": (),
     }]
-    assert keepalive_calls == [("job-1", "vault-1")]
+    assert not hasattr(gateway, "_start_token_keepalive")
     assert sync_calls == [("job-1", None)]
     assert "补充消息已注入" in replies[0]
 
@@ -664,6 +663,6 @@ def _message() -> IncomingMessage:
         user_open_id="ou-scanned",
         user_name="扫码用户",
         tenant_key="tenant-1",
-        text="热点周报 demo",
+        text="/start demo",
         mentioned_bot=False,
     )

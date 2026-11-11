@@ -8,18 +8,18 @@ Skill `topic6-event-registry`（C2 事件归档）：把四平台热搜标题清
 ## Requirements
 
 ### Requirement: Topic6 封装入口
-Topic6 SHALL 只通过 `run_topic6_c2.py --project-dir --mode {demo|full|skip_sampling} --run-id N [--input] [--chat-model] [--embedding-model] [--x2-verdict off|opus|sonnet(默认)] [--demo-fast]` 运行 C2，产出 `04_标注/C2_事件归档/c2_event_result_r{N}.xlsx`（供 `merge_annotations.py` 读取"事件簇名"）与 `c2_run/c2_status.json`。封装内部 SHALL 调用 `run_c2.py run --mode cross-platform --frontend fused --review-policy record --degraded-policy accept --execute`，引擎目录 `c2_run/engine/`。固定拓扑：F1 融合（00+01+02 一次调用，原标题锁定，`--front-workers 2` 两平台并行）→ front_merge → front_pending → EV（03 实体 ∥ 04 向量）→ 05 → 06 → 07（覆盖缺失重试 3 次）→ x2 → x3 → retain_original → 09 registry → x4 → finalize。同一项目 MUST 通过 `.c2_runner.lock` 文件锁保证单实例运行。
+Topic6 SHALL 只通过 `run_topic6_c2.py --project-dir --mode {demo|full|skip_sampling} --run-id N [--input] [--chat-model] [--embedding-model] [--x2-verdict off|opus|sonnet(默认)] [--demo-fast]` 运行 C2，产出 `04_标注/C2_事件归档/c2_event_result_r{N}.xlsx`（供 `merge_annotations.py` 读取"事件簇名"）与 `c2_run/c2_status.json`。封装内部 SHALL 调用 `run_c2.py run --mode cross-platform --frontend legacy --member-review off --review-policy record --degraded-policy accept --uncertain-policy keep --execute`，引擎目录 `c2_run/engine/`。固定拓扑：00 清洗（每平台一次，`--front-workers 2` 两平台并行）→ front_merge → 01 事件性 → 02 Frame → front_pending → EV（03 实体 ∥ 04 向量）→ 05 → 06 → 07（覆盖缺失重试 3 次）→ retain_original → 09 registry → x4 → finalize。聚簇语义 SHALL 对齐客户原版 ada_topic6_v2_261110 `c2_run_all_platforms.py`（00→09 直跑，无 x2/x3、无未决拆簇）；MA 改进项（跨平台合并 + top_k=60、并行、checkpoint、03 截断拆批、降级不阻断）保留。同一项目 MUST 通过 `.c2_runner.lock` 文件锁保证单实例运行。
 
 #### Scenario: 输入只有三个平台
 - **WHEN** 输入中无知乎记录
 - **THEN** run_c2 只为三个平台建 F1 节点，`skipped_platforms` 记录知乎
 
-#### Scenario: F1 融合
+#### Scenario: legacy 前端对齐原版
 - **WHEN** 四平台各 11 条输入
-- **THEN** 前端共 4 次模型调用（每平台一次），不再分别调用 00/01/02
+- **THEN** 00 清洗每平台一次（共 4 次），01/02 各一次；x2/x3 不发起模型调用
 
 ### Requirement: 无人值守门禁与降级
-`run_c2.py` 的 MA 开关 SHALL 默认保持上游语义（`--review-policy strict`、`--degraded-policy block`），Topic6 封装显式传 `record`/`accept`。record 模式下四道门禁（cleaning、non_events、member_verdicts、event_names）只写 `review_requests/*.json` 并汇总到 `c2_quality.review_pending`，`review_completion=DEFERRED_TO_CALLER`，MUST NOT 返回 WAITING_REVIEW 停等；accept 模式下 07 块级降级/03 实体漏返继续产出，`degraded_ids` 保留在 `c2_quality`。`c2_status.quality` SHALL 汇总 `coverage_status`、`degraded_count`、`review_pending`，Coordinator 在 HC1 `issues_detected` 中注明。
+`run_c2.py` 的 MA 开关 SHALL 默认保持上游语义（`--review-policy strict`、`--degraded-policy block`、`--uncertain-policy split`、`--member-review on`），Topic6 封装显式传 `record`/`accept`/`keep`/`off`。keep 模式下（无人复核，UNCERTAIN/needs_evidence 永远未决）retain_original MUST NOT 因未决成员把合并组拆回原标题，未决成员 SHALL 记入 `original_retained.json.uncertain_kept` 与 `c2_quality.uncertain_kept_count`；人工 forced 保留、NON_EVENT 排除、技术降级规则不变（对齐客户原版旧链路，W45 实测 split 把 280 条拆成单条）。record 模式下四道门禁（cleaning、non_events、member_verdicts、event_names）只写 `review_requests/*.json` 并汇总到 `c2_quality.review_pending`，`review_completion=DEFERRED_TO_CALLER`，MUST NOT 返回 WAITING_REVIEW 停等；accept 模式下 07 块级降级/03 实体漏返继续产出，`degraded_ids` 保留在 `c2_quality`。`c2_status.quality` SHALL 汇总 `coverage_status`、`degraded_count`、`review_pending`，Coordinator 在 HC1 `issues_detected` 中注明。
 
 #### Scenario: 非事件门禁
 - **WHEN** F1 判出 NON_EVENT 记录
@@ -34,7 +34,7 @@ run_c2 SHALL 以输入/配置/代码哈希绑定的阶段 checkpoint（`engine/s
 
 #### Scenario: 进程被杀后重跑
 - **WHEN** 07 阶段中途进程被杀，原命令重跑
-- **THEN** F1/EV/05/06 checkpoint 命中，07 已完成块走缓存
+- **THEN** 前端/EV/05/06 checkpoint 命中，07 已完成块走缓存
 
 #### Scenario: 同签名重跑
 - **WHEN** C2 已完成，状态被置为 failed 后原命令重跑

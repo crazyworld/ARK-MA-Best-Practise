@@ -12,6 +12,11 @@ MA 适配点（其余文件与上游一致，`MANIFEST.json` 记录的是上游�
   `--degraded-policy accept`（07/03 技术降级不阻断）、`--front-workers`（跨平台 F1 同时运行的平台数，默认 1 = 上游串行）；
   x2 模型裁定透传 `--model`；端点指纹读 `LLM_RELAY_BASE_URL`。默认值保持上游语义。
 - `scripts/retain_original.py`：`allow_degraded` 参数配合 degraded-policy。
+  2026-11-11：`uncertain_policy`（`split` 默认=上游 / `keep`=MA）+ `run_c2.py --uncertain-policy`、`run_topic6_c2.py` 传 keep。
+  W45 实测 record 模式下 non_events 无人复核，280 条因未决成员被整组拆回原标题（《后会友期》36 条全成单条）；
+  keep 时组保持合并，未决成员记入 `uncertain_kept` 审计，`c2_quality` 增 `uncertain_policy`/`uncertain_kept_count`。
+- `scripts/run_c2.py`：2026-11-11 `--member-review {on默认|off}`；off 跳过 x2/x3（`c2_quality.member_review`）。
+  `run_topic6_c2.py` 改为 `--frontend legacy --member-review off`：聚簇语义对齐客户原版 `c2_run_all_platforms.py`（00→09 直跑）。
 - `scripts/x2_confidence_filter.py`：恢复 `--model` 覆盖（relay 未开通 Claude）。
 - `scripts/04_build_embeddings.py`、`run_ev.py`、`check_environment.py`：`ANTHROPIC_*` → `LLM_RELAY_*`。
 - `scripts/run_topic6_c2.py`：改为调用 `run_c2.py run --mode cross-platform --frontend fused`；结果契约、

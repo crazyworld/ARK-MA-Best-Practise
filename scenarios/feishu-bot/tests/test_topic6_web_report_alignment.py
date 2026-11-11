@@ -430,3 +430,61 @@ def test_web_report_docs_do_not_instruct_snapshot_upload(rel):
                 "upload the finished HTML snapshot", "Publish every finished report HTML"):
         assert bad not in text, (rel, bad)
     assert (WEB / "scripts" / "upload-html.mjs").exists()  # 文件保留，只是不在流程中引用
+
+
+# ---------------------------------------------------------------- P1-1 同 block 同标题跨平台链接不塌缩
+
+DY = "https://www.douyin.com/search/%E6%88%90%E9%83%BD%E8%93%89%E5%9F%8E%E8%87%B4%E6%AD%89"
+WB = "https://s.weibo.com/weibo?q=%E6%88%90%E9%83%BD%E8%93%89%E5%9F%8E%E8%87%B4%E6%AD%89"
+_BODY = "正文足够长，满足最少字数要求的一段洞察文字内容。"
+_HEAD = (
+    "# 社媒热点周刊 · 2026-W45\n\n> 数据范围：微博、知乎、抖音、B站\n"
+    "> 数据周期：2026-W45（2026-11-02 ~ 2026-11-08）\n\n"
+    f"# 一、行业及热门话题\n\n{_BODY}\n\n# 二、营销节点\n\n{_BODY}\n\n"
+    f"# 三、平台新鲜事\n\n### 微博\n\n{_BODY}\n\n# 四、营销发现\n\n"
+)
+
+
+def _build_md(tmp_path: Path, md: str) -> str:
+    report = tmp_path / "rep.md"
+    report.write_text(md, encoding="utf-8")
+    return _build(tmp_path, report)[1]
+
+
+def _anchors(html: str) -> list[tuple[str, str]]:
+    """返回 [(href 域名, 锚点后紧跟的平台)]，只取「成都蓉城致歉」锚点。"""
+    pairs = re.findall(r'href="(https://[^"]+)"[^>]*>成都蓉城致歉</a>\s*(?:·|（)\s*(\S{2})', html)
+    return [(h.split("/")[2], p) for h, p in pairs]
+
+
+def test_same_title_two_platforms_in_risk_table_keep_both_links(tmp_path):
+    """W45：E4 舆情表一格内同标题抖音/微博各一条，旧实现两行都渲染成微博链接 → validate 失败。"""
+    md = _HEAD + (
+        "### 舆情风险\n\n**机构/赛事争议**\n\n| 风险事件 | 具体热搜 | 风险影响 |\n| --- | --- | --- |\n"
+        f"| 成都蓉城致歉 | - [成都蓉城致歉]({DY}) · 抖音 · 100.0 分<br>- [成都蓉城致歉]({WB}) · 微博 · 87.2 分 | 影响说明 |\n"
+    )
+    html = _build_md(tmp_path, md)  # _build 内已断言 validate-rendered-content 通过
+    assert _anchors(html) == [("www.douyin.com", "抖音"), ("s.weibo.com", "微博")]
+
+
+def test_same_title_two_platforms_in_case_and_insight_bullets(tmp_path):
+    md = _HEAD + (
+        "### 营销观察\n\n#### 案例 1：成都蓉城致歉（抖音 · 100.0分）\n"
+        f"- 原始热点：[成都蓉城致歉]({DY})（抖音 · 100.0分）、[成都蓉城致歉]({WB})（微博 · 87.2分）\n"
+        "- 营销发现：说明文字。\n- [配图：待补充]\n\n"
+        "### 消费洞察\n\n#### 洞察 1：标题\n- 群体：某群体\n"
+        f"- 触发事件：[成都蓉城致歉]({DY})（抖音 · 100.0分）、[成都蓉城致歉]({WB})（微博 · 87.2分）\n"
+        "- 行为反应：反应\n- 营销发现：发现\n"
+    )
+    html = _build_md(tmp_path, md)
+    got = _anchors(html)
+    assert got and all((host == "www.douyin.com") == (plat == "抖音") for host, plat in got), got
+    assert DY.replace("&", "&amp;") in html and WB in html
+
+
+def test_template_example_html_unchanged_by_link_index(tmp_path):
+    """干净性：模板示例（无同标题跨平台）构建结果与锚点数量不变，且每个 source 链接都被渲染。"""
+    blocks = json.loads(EXAMPLE.read_text(encoding="utf-8"))
+    html = _build_example_variant(tmp_path, lambda b: None)
+    hrefs = {l["href"] for b in blocks for l in (b.get("links") or [])}
+    assert hrefs and all(h.replace("&", "&amp;") in html or h in html for h in hrefs)

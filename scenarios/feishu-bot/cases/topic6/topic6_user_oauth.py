@@ -292,7 +292,7 @@ class Topic6UserAuthorization:
             except Exception as error:
                 raise UserAuthorizationRequired(
                     "当前飞书账号的妙搭授权已失效，需要重新扫码授权。"
-                    "请重新发送触发词，按提示完成授权。"
+                    "请重新发送 `/start`（或刚才的命令），按提示完成授权。"
                 ) from error
             scopes = tuple(current["scopes"])
             # 先落库新 refresh_token（旧的已失效），expires_at 暂记为待重试。

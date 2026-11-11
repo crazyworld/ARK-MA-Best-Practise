@@ -219,7 +219,10 @@ def _rank_top5_events(p: pd.DataFrame) -> pd.DataFrame:
     rows_agg = []
     for event_name, grp in p.groupby("事件簇名"):
         热点总计 = len(grp)
+        # 「热度值」展示列仍为簇内最高分(口径不变);第二排序改为簇内平均分
+        # (加和/热点数量,2026-11-11 业务口径),作为最后一列「平均热度值」展示排序锚点
         最高分 = grp["标准化热度分"].max()
+        平均分 = grp["标准化热度分"].mean()
         行业 = grp["行业归属"].dropna().iloc[0] if grp["行业归属"].notna().any() else "—"
         # 行业归属是C0标注层明确定义的多值字段（"|"分隔，如"游戏|音乐"），直接拼进
         # markdown表格会被解析成列分隔符导致整行错位（2026-10-14真实数据实测命中：
@@ -230,17 +233,18 @@ def _rank_top5_events(p: pd.DataFrame) -> pd.DataFrame:
             "事件簇名": event_name,
             "热点总计": 热点总计,
             "最高标准化分": 最高分,
+            "平均标准化分": 平均分,
             "行业归属": 行业,
             "_grp": grp,
         })
     agg = pd.DataFrame(rows_agg) if rows_agg else pd.DataFrame(
-        columns=["事件簇名", "热点总计", "最高标准化分", "行业归属", "_grp"]
+        columns=["事件簇名", "热点总计", "最高标准化分", "平均标准化分", "行业归属", "_grp"]
     )
 
-    # 过滤单条独立话题（热点总计<2），再按"热点总计降序，同数按最高标准化分降序"排序取TOP5
+    # 过滤单条独立话题（热点总计<2），再按"热点总计降序，同数按平均标准化分降序"排序取TOP5
     agg = agg[agg["热点总计"] >= 2]
     agg = agg.sort_values(
-        ["热点总计", "最高标准化分"], ascending=[False, False]
+        ["热点总计", "平均标准化分"], ascending=[False, False]
     ).head(5).reset_index(drop=True)
     return agg
 
@@ -254,10 +258,12 @@ def prep_e3_platforms(df_y: pd.DataFrame) -> str:
 
     热门事件TOPN（按事件簇名分组，2026-09-15更新；排序/过滤口径2026-10-14抽到
     _rank_top5_events()，本函数不重复实现）
-       列：排名 | 事件名称 | 行业 | 热点总计 | 热度值 | 具体热搜
+       列：排名 | 事件名称 | 行业 | 热点总计 | 热度值 | 具体热搜 | 平均热度值
        口径：
          - 先过滤：热点总计（事件簇内热搜条数）≥2 的事件簇才纳入候选（单条独立话题不展示）
-         - 排序：热点总计降序，相同再按最高标准化分降序
+         - 排序：热点总计降序，相同再按簇内平均标准化分降序（2026-11-11 由最高分改为平均分）
+         - 热度值：簇内最高标准化分（口径不变）
+         - 平均热度值（最后一列，2026-11-11新增）：簇内标准化热度分平均值，即第二排序锚点
          - 取TOP5，候选不足5个则标题按实际数量写"TOP N"
          - 具体热搜：事件簇内标准化分最高的title，固定最多3条，
            格式"- [标题](链接)"（不带平台标签，本表已按平台分组），<br>换行
@@ -302,13 +308,14 @@ def prep_e3_platforms(df_y: pd.DataFrame) -> str:
             plines.append(f"{pname} 上周热门事件均为单条独立话题（热点总计<2），不展示热门事件榜单。")
         else:
             plines.append(f"### {pname} · 热门事件 TOP {len(agg)}\n")
-            plines.append("| 排名 | 事件名称 | 行业 | 热点总计 | 热度值 | 具体热搜 |")
-            plines.append("|---|---|---|---|---|---|")
+            plines.append("| 排名 | 事件名称 | 行业 | 热点总计 | 热度值 | 具体热搜 | 平均热度值 |")
+            plines.append("|---|---|---|---|---|---|---|")
             for i, r in agg.iterrows():
                 具体热搜 = top_titles_relevant_str(r["_grp"], r["事件簇名"], n=3, show_platform=False)
                 plines.append(
                     f"| {i+1} | {r['事件簇名']} | {r['行业归属']} | {int(r['热点总计'])} "
-                    f"| {fmt_score(r['最高标准化分'], suffix='')} | {具体热搜} |"
+                    f"| {fmt_score(r['最高标准化分'], suffix='')} | {具体热搜} "
+                    f"| {fmt_score(r['平均标准化分'], suffix='')} |"
                 )
 
         # 平台热点词TOP3已移出本函数（2026-09-20，见函数docstring），

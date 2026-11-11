@@ -251,22 +251,24 @@ class Pipeline:
             current = self.node("archive", current,
                 lambda d: ["07_block_archive.py", "--run-dir", d, "--model", cfg["chat_model"], "--concurrency", cfg["max_requests"]],
                 action=archive_coverage)
+            # MA member-review=off：对齐客户原版 c2_run_all_platforms（00→09 直跑，无 x2 置信度筛查 / x3 双向复核）
+            member_review = cfg.get('member_review', 'on') == 'on'
             extra = file_hash(member_verdict) if member_verdict else None
             def member_before(d):
                 if member_verdict:
                     (d / "out").mkdir(exist_ok=True)
                     shutil.copyfile(member_verdict, d / "out/x2_待裁定_边界带.csv")
-            current = self.node("members", current,
+            current = current if not member_review else self.node("members", current,
                 lambda d: ["x2_confidence_filter.py", "--run-dir", d, "--verdict", cfg["verdict"],
                            "--concurrency", cfg["max_requests"], *(["--apply-verdict"] if member_verdict else []),
                            *(["--model", cfg["chat_model"]] if cfg["verdict"] != "off" else [])],
                 extra=extra, before=member_before,
                 tolerate=lambda code, d: self.record_reviews and code == 3)
             x2_status = current / "out/x2_status.json"
-            if x2_status.exists() and read(x2_status).get("status") == "WAITING_REVIEW":
+            if member_review and x2_status.exists() and read(x2_status).get("status") == "WAITING_REVIEW":
                 self.pending_reviews.append({"gate": "member_verdicts", "request": str(x2_status),
                                              "pending_ids": read(x2_status).get("pending_ids", [])})
-            for direction in ("merge", "split"):
+            for direction in (("merge", "split") if member_review else ()):
                 current = self.script("review_" + direction, current, "x3_review_bidirectional.py", "--only", direction,
                                       "--model", cfg["chat_model"], "--concurrency", cfg["max_requests"])
         else:
@@ -278,7 +280,8 @@ class Pipeline:
             current = self.node("empty_events", current, action=empty)
         from retain_original import retain_original
         current = self.node('retain_original', current,
-                            action=lambda d: retain_original(d, cfg['window'], allow_degraded=self.accept_degraded))
+                            action=lambda d: retain_original(d, cfg['window'], allow_degraded=self.accept_degraded,
+                                                             uncertain_policy=cfg.get('uncertain_policy', 'split')))
         if cfg["previous_registry"]:
             current = self.script("window_link", current, "link_registry.py", "--prev-registry", initial / "work/previous_registry.jsonl",
                                   "--window", cfg["window"], "--model", cfg["chat_model"], "--concurrency", cfg["max_requests"])
@@ -337,7 +340,12 @@ class Pipeline:
             retention_report = read(d / 'out/original_retained.json')
             quality['original_retained_count'] = len(retained)
             quality['unresolved_count'] = retention_report['unresolved_count']
-            quality['related_records_split_count'] = len(retained) - retention_report['unresolved_count']
+            # keep 策略下未决成员不拆组(retained 不含它们)，连带拆分数不能用 retained-unresolved 推算
+            quality['related_records_split_count'] = retention_report.get('related_records_split_count',
+                len(retained) - retention_report['unresolved_count'])
+            quality['uncertain_policy'] = retention_report.get('uncertain_policy', 'split')
+            quality['uncertain_kept_count'] = retention_report.get('uncertain_kept_count', 0)
+            quality['member_review'] = cfg.get('member_review', 'on')
             atomic_json(d / "out/c2_quality.json", quality)
             atomic_json(d / "out/c2_provenance.json", {"version": VERSION, "input_sha256": cfg["source_sha256"],
                         "mode": cfg["mode"], "frontend": cfg["frontend"], "chat_model": cfg["chat_model"],
@@ -496,6 +504,11 @@ def main():
                          help="MA: record = 门禁不停，审核项写入 c2_quality.review_pending 交调用方 HC")
     command.add_argument("--degraded-policy", choices=["block", "accept"], default="block",
                          help="MA: accept = 07/03 技术降级不阻断输出，降级明细保留在 c2_quality")
+    command.add_argument("--uncertain-policy", choices=["split", "keep"], default="split",
+                         help="MA: keep = 无人复核时含 UNCERTAIN 成员的合并组不拆回原标题，未决成员记入 "
+                              "original_retained.json.uncertain_kept（默认 split = 上游 rc.12 语义）")
+    command.add_argument("--member-review", choices=["on", "off"], default="on",
+                         help="MA: off = 跳过 x2 置信度筛查与 x3 双向复核，对齐客户原版 00→09 直跑（默认 on = 上游 rc.14）")
     resume = sub.add_parser("resume")
     resume.add_argument("--run-dir", type=Path, required=True)
     resume.add_argument("--member-verdict", type=Path)

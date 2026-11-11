@@ -1,8 +1,8 @@
 """Topic6 C2 rc.14 升级回归测试（离线 mock relay，零付费调用）。
 
 覆盖：
-- MA 封装 run_topic6_c2.py → run_c2.py（cross-platform + fused）端到端跑通，结果契约不变；
-- F1 融合：每平台 1 次调用覆盖 00/01/02（提速核心）；
+- MA 封装 run_topic6_c2.py → run_c2.py（cross-platform + legacy + member-review off）端到端跑通，结果契约不变；
+- 聚簇对齐客户原版 00→09：legacy 前端 00/01/02 分开调用，不跑 x2/x3；
 - 审核门禁 record 模式不停等，待审项进 c2_status.quality.review_pending；
 - 同签名重跑零模型调用（checkpoint + 内容寻址缓存）；
 - relay.py 保留 MA 传输层（LLM_RELAY_*，不读 ANTHROPIC_*），合入 rc.14 校验；
@@ -96,7 +96,10 @@ def test_rc14_cross_platform_end_to_end_keeps_result_contract(tmp_path, relay_se
     assert sorted(named["一级事件名"].value_counts().tolist()) == [8] * 5
 
     stats = _stats(relay_server)
-    assert stats.get("f1") == 4, stats          # F1 融合：每平台一次，覆盖 00/01/02
+    # 2026-11-11 聚簇链路对齐客户原版：legacy 前端（00 每平台一次 + 01/02 各一次），不跑 x2/x3
+    assert stats.get("f1", 0) == 0, stats
+    assert stats.get("clean") == 4 and stats.get("eventness") == 1 and stats.get("frames") == 1, stats
+    assert not {"x2", "x3_merge", "x3_split"} & set(stats), stats
     assert stats.get("entities") == 1 and stats.get("embeddings") == 1
     assert stats.get("unknown", 0) == 0
 
@@ -147,7 +150,7 @@ def test_run_c2_ma_switches_default_to_upstream_semantics():
     assert 'choices=["strict", "record"], default="strict"' in text
     assert 'choices=["block", "accept"], default="block"' in text
     wrapper = (SCRIPTS / "run_topic6_c2.py").read_text(encoding="utf-8")
-    for flag in ('"--mode", "cross-platform"', '"--frontend", "fused"',
+    for flag in ('"--mode", "cross-platform"', '"--frontend", "legacy"', '"--member-review", "off"',
                  '"--review-policy", "record"', '"--degraded-policy", "accept"'):
         assert flag in wrapper, flag
     assert 'or "DeepSeek-V4.1-Flash"' in wrapper

@@ -27,6 +27,17 @@ Topic6 SHALL 只用 `md2source.py <report.md> <source.json> [--case-images <dir>
 - **WHEN** 段落含 `[某热搜](https://weibo.com/x)`
 - **THEN** 正文文本为"某热搜"，`links` 含 `{text, href}`
 
+### Requirement: 网页正文来源
+`fetch_report_md.py --doc <docx URL|document_id> --out <md> --fallback <本地合并报告 md>` SHALL 用与 `fetch_case_images.py` 相同的 tenant token 读取 HC3 定稿飞书文档完整 blocks 树，按导入方向的逆规则还原为 Markdown（heading→`#`、整段加粗→`**…**`、bullet/ordered、quote_container→`>`、table→Markdown 表格（多段 `<br>`、`|` 转义）、divider→`---`、链接→`[文本](url)`（URL 解码一次）；图片块跳过、grid/callout 等容器递归子块），供 `md2source.py` 解析。还原结果无「一、/二、…」章节、章节数少于本地报告、或本地有表格/链接而还原后为 0 时，以及读取失败时，MUST 回退 `--fallback` 并输出 `{"status":"success","source":"local_fallback","reason":…}`；两者都不可用时退出 1。不打印 token。
+
+#### Scenario: HC3 期间用户在飞书里改了文字
+- **WHEN** 用户在 HC3 定稿文档中改写某段洞察并点通过
+- **THEN** 网页 source.json 含改写后的文字，`source=feishu`
+
+#### Scenario: 飞书读取失败
+- **WHEN** tenant token 不可用或接口报错
+- **THEN** 使用本地合并报告生成网页，`source=local_fallback`，Phase G 不阻断
+
 ### Requirement: 案例配图来源
 `fetch_case_images.py --doc <docx URL|document_id> --out <dir>` SHALL 用 tenant token（`LARKSUITE_CLI_TENANT_ACCESS_TOKEN` 优先，否则 `LARK_APP_ID`+`LARK_APP_SECRET` 现换）读取文档完整 blocks 树，对每个 `案例 N：` 标题，下载其后、下一个标题前的第一张图片块为 `case-N.<ext>`；无图案例记入 `missing` 不报错。输出 `{"status":"success","cases","downloaded","missing"}`，不打印 token。配图 MUST 只来自源文档：MUST NOT 调用生图工具、搜图、复用模板 `case-*.jpg`，最终 HTML MUST NOT 含 `blob:` URL。Topic6 中缺图渲染"配图待补充"占位并继续（SKILL.md Workflow 第 4 步"取不到图就停"对 Topic6 不适用）。
 

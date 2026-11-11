@@ -527,6 +527,12 @@ class TopicxRunner:
             ):
                 return
         if task.business_session_id and text:
+            if task.scenario == "topic6":
+                # Topic6 走 relay，BYOK Header 按请求生效，必须经 Runner 唯一入口发送。
+                await self._topic6_runner._send_message(  # noqa: SLF001
+                    task.business_session_id, text
+                )
+                return
             await self._ark.send_message(task.business_session_id, text)
 
     def _topic5_job(self, task: TaskRun):

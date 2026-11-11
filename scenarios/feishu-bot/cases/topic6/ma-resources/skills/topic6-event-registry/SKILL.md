@@ -18,15 +18,19 @@ python /mnt/skills/topic6-event-registry/scripts/launch_c2_background.py --proje
 python /mnt/skills/topic6-event-registry/scripts/wait_c2_complete.py --project-dir <项目> --run-id N --wait-seconds 105
 ```
 
-`run_topic6_c2.py` 把可用子集转成 input.csv，调用 `run_c2.py run --mode cross-platform --frontend fused`，
+`run_topic6_c2.py` 把可用子集转成 input.csv，调用 `run_c2.py run --mode cross-platform --frontend legacy --member-review off`，
 产出 `04_标注/C2_事件归档/c2_event_result_r{N}.xlsx`（row_id + 一级事件名，契约不变）。MA 适配点：
 
 - **模型通道**：`relay.py` 走 bmc-llm-relay（`LLM_RELAY_BASE_URL/LLM_RELAY_API_KEY`，OpenAI 兼容流式 + 整体时限），
   不读 `ANTHROPIC_*`，不回退 `ARK_*`。Chat 默认 `$C2_CHAT_MODEL_ID`（DeepSeek-V4.1-Flash），Embedding `$EMBEDDING_MODEL_ID`。
 - **无人值守**：`--review-policy record` 让四道审核门禁只落 `review_requests/*.json` 并汇总进
-  `out/c2_quality.json.review_pending`，由 HC1/HC2 人工复核，不返回 WAITING_REVIEW；成员边界带由模型裁定（x2 `--verdict` + `--model`）。
+  `out/c2_quality.json.review_pending`，由 HC1/HC2 人工复核，不返回 WAITING_REVIEW。
 - **降级不阻断**：`--degraded-policy accept` 让 07 块级降级 / 03 实体漏返继续产出，明细保留在 `c2_quality.degraded_ids`。
-- **提速**：F1 融合（00+01+02 一次调用）、F1 两平台并行（`--front-workers 2 × --max-requests 8` = 16 路）、03∥04 并行；run_c2 阶段级 checkpoint
+- **未决不拆组**：`--uncertain-policy keep`。无人复核时 UNCERTAIN/needs_evidence 不会被解除，上游 rc.12 会把含未决成员的整组拆回原标题；
+  keep 让组保持合并，未决成员记入 `original_retained.json.uncertain_kept`（对齐客户原版旧链路；人工 forced/NON_EVENT/降级规则不变）。
+- **聚簇对齐原版**：客户原版 `c2_run_all_platforms.py` 逐平台 00→09 直跑。MA 用 `--frontend legacy`（00/01/02 分开调用，00 模型清洗标题）、
+  `--member-review off`（不跑 x2 置信度筛查、x3 双向复核）、`--uncertain-policy keep`（不做未决拆簇）对齐；改进项保留：跨平台合并 + top_k=60。
+- **提速**：前端两平台并行（`--front-workers 2 × --max-requests 8` = 16 路）、03∥04 并行；run_c2 阶段级 checkpoint
   + 内容寻址缓存，同签名重跑只补失败节点。
 - **未启用**：按需原文补证（`supplement` / `--supplement-bundle`，需数说凭据），代码随包保留。
 - 下文 rc.14 原文中的 `ANTHROPIC_*`、`~/.claude/skills`、Claude 模型名均为上游 CC 环境说明，MA 以本节为准。

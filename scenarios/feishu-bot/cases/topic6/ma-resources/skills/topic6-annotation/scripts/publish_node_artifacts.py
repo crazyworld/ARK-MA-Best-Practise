@@ -39,6 +39,14 @@ def _validated_project(project_dir: Path, projects_root: Path) -> Path:
     return project
 
 
+def _is_hidden(path: Path, project: Path) -> bool:
+    try:
+        parts = path.relative_to(project).parts
+    except ValueError:
+        parts = path.parts
+    return any(part.startswith(".") for part in parts)
+
+
 def _iter_files(
     project: Path, patterns: Sequence[str], optional_patterns: Sequence[str] = ()
 ) -> list[Path]:
@@ -49,7 +57,9 @@ def _iter_files(
     ]:
         if Path(pattern).is_absolute() or ".." in Path(pattern).parts:
             raise ValueError(f"include must be a project-relative path or glob: {pattern}")
-        matches = list(project.glob(pattern))
+        # Path.glob 的 `*` 会匹配点开头的隐藏文件(如 .c0_retry_input_r1.xlsx 这类重提临时输入)，
+        # 而节点产物约定不发布临时文件；任一路径段以 `.` 开头即视为隐藏/临时，跳过。
+        matches = [m for m in project.glob(pattern) if not _is_hidden(m, project)]
         if not matches and required:
             raise FileNotFoundError(f"include matched no files: {pattern}")
         for match in matches:
@@ -57,6 +67,8 @@ def _iter_files(
                 raise ValueError(f"symlink outputs are not publishable: {match}")
             candidates = match.rglob("*") if match.is_dir() else (match,)
             for candidate in candidates:
+                if _is_hidden(candidate, project):
+                    continue
                 if candidate.is_symlink():
                     raise ValueError(f"symlink outputs are not publishable: {candidate}")
                 if not candidate.is_file():

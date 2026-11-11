@@ -1,7 +1,7 @@
-"""topic6 case 的 Gateway:飞书触发词 → 长任务 Runner + HITL 卡片回调。
+"""topic6 case 的 Gateway:飞书 `/start` 命令 → 长任务 Runner + HITL 卡片回调。
 
 只处理 topic6 场景的入站消息与卡片回调;不涉及数字员工的 /new /role /remember 指令。
-非触发词消息(以及未鉴权用户)给出用法提示。
+非命令消息(以及未鉴权用户)给出用法提示。
 """
 from __future__ import annotations
 
@@ -25,9 +25,11 @@ from arkagent.store import GatewayStore
 try:
     from .artifact_sync import Topic6ArtifactSync
     from .feishu_doc_publisher import FeishuDocPublisher
+    from .process_files import ProcessFileDelivery
     from .job_notifier import JobNotifier
     from .pipeline_store import (
         STATUS_DONE,
+        STATUS_FAILED,
         STATUS_RUNNING,
         STATUS_WAIT_HC,
         PipelineJob,
@@ -37,7 +39,9 @@ try:
     from .topic6_runner import (
         Topic6Config as RunnerConfig,
         Topic6Runner,
+        NEED_DECISION_REASON_MARK,
         Topic6RunnerError,
+        is_start_command,
         normalize_user_text,
         parse_trigger,
     )
@@ -50,9 +54,11 @@ try:
 except ImportError:  # pragma: no cover - standalone compatibility
     from artifact_sync import Topic6ArtifactSync
     from feishu_doc_publisher import FeishuDocPublisher
+    from process_files import ProcessFileDelivery
     from job_notifier import JobNotifier
     from pipeline_store import (
         STATUS_DONE,
+        STATUS_FAILED,
         STATUS_RUNNING,
         STATUS_WAIT_HC,
         PipelineJob,
@@ -62,7 +68,9 @@ except ImportError:  # pragma: no cover - standalone compatibility
     from topic6_runner import (
         Topic6Config as RunnerConfig,
         Topic6Runner,
+        NEED_DECISION_REASON_MARK,
         Topic6RunnerError,
+        is_start_command,
         normalize_user_text,
         parse_trigger,
     )
@@ -80,11 +88,19 @@ TOKEN_REFRESH_INTERVAL_S = 60.0
 BOT_TOKEN_REFRESH_MARGIN_S = 1800.0
 BOT_VAULT_NAME_HINT = "topic6-bot"
 BOT_VAULT_READY_TIMEOUT_S = 30.0
-# in-chat 授权等待扫码的最大秒数；超过后取消 poll，用户需重新发送触发词。
+# in-chat 授权等待扫码的最大秒数；超过后取消 poll，用户需重新发送命令。
 IN_CHAT_AUTH_TIMEOUT_S = 300.0
+START_USAGE = (
+    "当前 Bot 仅启用 topic6 场景。发送 `/start [模式]` 启动热点周报:"
+    "`/start` 或 `/start full`(先 500 条校准再跑全量)、`/start demo`(50 条出报告)、"
+    "`/start smoke`(30 条全流程冒烟测试,含 HC1+HC2+HC3)、`/start skip_sampling`(跳过 500 条采样,直接跑全量);"
+    "模式后可带周期,如 `/start full W45`;"
+    "发送 /continue 续跑最近一次任务;发送 /republish 在飞书文档修改正文或补图后重新发布网页;"
+    "发送 /new 可取消当前任务;发送 /log 查看当前任务日志，或 /log <session_id> 查看指定 Session 日志。"
+)
 CONTINUE_COMMAND_RE = re.compile(r"^/(?:continue|resume)(?:\s+(.*))?$", re.IGNORECASE)
 LOG_COMMAND_RE = re.compile(r"^/log(?:\s+(\S+))?$", re.IGNORECASE)
-# /republish [job_id|session_id]:HC3 后补/换配图,只重跑 Phase G+H(网页+妙搭)
+# /republish [job_id|session_id]:HC3 后在飞书文档改正文/补换配图,只重跑 Phase G+H(网页+妙搭)
 REPUBLISH_COMMAND_RE = re.compile(r"^/republish(?:\s+(\S+))?$", re.IGNORECASE)
 TEST_FEISHU_COMMAND_RE = re.compile(r"^/test_feishu$", re.IGNORECASE)
 TEST_PHASE_F_COMMAND_RE = re.compile(r"^/test_phase_f$", re.IGNORECASE)
@@ -195,7 +211,7 @@ class Topic6Gateway:
                 if cancelled is None:
                     await self._reply(
                         message.chat_id,
-                        "[/new] 收到。当前会话没有活跃任务,可发送「热点周报 demo」「热点周报 full」「热点周报 smoke」或「热点周报 skip_sampling」开新一轮。",
+                        "[/new] 收到。当前会话没有活跃任务,可发送 `/start [demo|full|smoke|skip_sampling]` 开新一轮。",
                     )
                 else:
                     if self._artifact_sync is not None:
@@ -212,7 +228,7 @@ class Topic6Gateway:
                             )
                     await self._reply(
                         message.chat_id,
-                        f"[/new] 已取消当前任务 job_id={cancelled.job_id}(状态置为 failed:cancelled_by_user)。可再发触发词开新一轮。",
+                        f"[/new] 已取消当前任务 job_id={cancelled.job_id}(状态置为 failed:cancelled_by_user)。可再发 `/start` 开新一轮。",
                     )
                 self._store.complete_event(message.event_id, "completed")
                 return
@@ -225,16 +241,23 @@ class Topic6Gateway:
                     user_vault_id = await self._ensure_user_authorized(
                         message.chat_id, message.user_open_id
                     )
-                resumed = await self._runner.continue_job(
-                    chat_id=message.chat_id,
-                    thread_id=message.thread_id,
-                    user_open_id=message.user_open_id,
-                    message=continuation_message,
-                )
+                try:
+                    resumed = await self._runner.continue_job(
+                        chat_id=message.chat_id,
+                        thread_id=message.thread_id,
+                        user_open_id=message.user_open_id,
+                        message=continuation_message,
+                        card_message_id=getattr(message, "reply_to_message_id", "") or "",
+                        admin_open_ids=tuple(getattr(self._config, "admin_open_ids", ()) or ()),
+                    )
+                except Topic6RunnerError as error:
+                    await self._reply(message.chat_id, f"[/continue] {error}")
+                    self._store.complete_event(message.event_id, "completed")
+                    return
                 if resumed is None:
                     await self._reply(
                         message.chat_id,
-                        "[/continue] 当前会话没有可续跑的任务。若要开新一轮，请发送「热点周报 demo」「热点周报 full」「热点周报 smoke」或「热点周报 skip_sampling」。",
+                        "[/continue] 当前会话没有可续跑的任务。若要开新一轮，请发送 `/start [demo|full|smoke|skip_sampling]`。",
                     )
                 else:
                     if getattr(resumed, "status", "") == STATUS_DONE:
@@ -245,8 +268,7 @@ class Topic6Gateway:
                         )
                         self._store.complete_event(message.event_id, "completed")
                         return
-                    if user_vault_id:
-                        self._start_token_keepalive(resumed, user_vault_id)
+                    # 用户 token 由常驻 start_token_refresher 统一刷新，不再按任务保活。
                     if self._artifact_sync is not None:
                         self._artifact_sync.start(resumed, self._loop)
                     message_hint = (
@@ -296,12 +318,24 @@ class Topic6Gateway:
                 self._store.complete_event(message.event_id, "completed")
                 return
 
+            # 待裁决任务时只回复了选项字母(如「A」)：提示正确命令，不自动执行裁决。
+            if re.fullmatch(r"[A-Za-z]", text):
+                pending = self._pending_decision_job(message)
+                if pending is not None:
+                    await self._reply(
+                        message.chat_id,
+                        f"检测到待裁决任务 job={pending.job_id}（Phase {pending.current_phase}）。"
+                        f"如选择 {text.upper()}，请发送 `/continue {text.upper()}` 确认。",
+                    )
+                    self._store.complete_event(message.event_id, "completed")
+                    return
+
             mode = parse_trigger(text)
             if mode is None:
-                await self._reply(
-                    message.chat_id,
-                    "当前 Bot 仅启用 topic6 场景。发送「热点周报 demo」(50 条出报告)、「热点周报 smoke」(30 条全流程冒烟测试,含 HC1+HC2+HC3)、「热点周报 full」(先 500 条校准再跑全量)或「热点周报 skip_sampling」(跳过 500 条采样,直接跑全量)触发;发送 /continue 续跑最近一次任务;发送 /republish 在补充营销观察配图后重新发布网页;发送 /new 可取消当前任务;发送 /log 查看当前任务日志，或 /log <session_id> 查看指定 Session 日志。",
-                )
+                usage = START_USAGE
+                if is_start_command(text):
+                    usage = "[/start] 无法识别的模式。" + START_USAGE
+                await self._reply(message.chat_id, usage)
                 self._store.complete_event(message.event_id, "completed")
                 return
 
@@ -343,6 +377,23 @@ class Topic6Gateway:
                 f"❌ 执行异常{phase_hint}：{reason}{session_hint}\n"
                 f"建议：发送 /continue 尝试恢复，或 /new 取消当前任务重新开始。",
             )
+
+    def _pending_decision_job(self, message: IncomingMessage):
+        """本会话中由 [need_decision] 停下、等待 /continue <选项> 的任务；没有返回 None。"""
+        store = self._pipeline_store
+        if store is None:
+            return None
+        card_id = getattr(message, "reply_to_message_id", "") or ""
+        job = store.get_resumable_job_by_progress_card(message.chat_id, card_id) if card_id else None
+        if job is None:
+            job = store.get_resumable_job_by_session_key(
+                message.chat_id, message.thread_id, message.user_open_id
+            )
+        if job is None or job.status != STATUS_FAILED:
+            return None
+        if NEED_DECISION_REASON_MARK not in (job.last_error or ""):
+            return None
+        return job
 
     async def _handle_test_phase_f(self, chat_id: str, user_open_id: str) -> None:
         """模拟沙箱环境测试 Phase F 飞书发布脚本。
@@ -557,7 +608,7 @@ class Topic6Gateway:
             self._artifact_sync.start(job, self._loop)
         await self._reply(
             chat_id,
-            f"[/republish] 已开始重新发布网页 job_id={job.job_id}:从飞书文档重新读取配图 → "
+            f"[/republish] 已开始重新发布网页 job_id={job.job_id}:从飞书文档重新读取正文与配图 → "
             "生成网页 → 更新同一个妙搭应用。进度见新的进度卡片。",
         )
 
@@ -708,7 +759,7 @@ class Topic6Gateway:
                 return await asyncio.shield(existing)
             except (asyncio.CancelledError, Exception) as error:
                 raise UserAuthorizationRequired(
-                    f"飞书授权失败：{error!s}。请重新发送触发词再试。"
+                    f"飞书授权失败：{error!s}。请重新发送刚才的命令再试。"
                 ) from error
 
         # ---- 发起新的 in-chat Device Flow ----
@@ -721,11 +772,11 @@ class Topic6Gateway:
         except asyncio.TimeoutError:
             task.cancel()
             raise UserAuthorizationRequired(
-                "授权链接已超时（5 分钟），请重新发送触发词获取新的授权链接。"
+                "授权链接已超时（5 分钟），请重新发送刚才的命令获取新的授权链接。"
             )
         except Exception as error:
             raise UserAuthorizationRequired(
-                f"飞书授权失败：{error!s}。请重新发送触发词再试。"
+                f"飞书授权失败：{error!s}。请重新发送刚才的命令再试。"
             ) from error
         finally:
             if self._pending_authorizations.get(user_open_id) is task:
@@ -915,6 +966,8 @@ def build_gateway(config: Topic6Config, ark, sender, loop: asyncio.AbstractEvent
         pipeline_store.get_job,
         poll_interval_sec=config.artifact_poll_interval_sec,
     )
+    # 过程关键文件 → 飞书 job 文件夹/过程数据（HC 发卡前 + 任务终态）
+    process_files = ProcessFileDelivery(sender, publisher, pipeline_store, Path(config.artifact_sync_dir))
     # 注入 notifier 到 hitl（runner 已通过构造函数注入）
     hitl = Topic6Hitl(Topic6HitlDeps(
         store=pipeline_store,
@@ -923,8 +976,10 @@ def build_gateway(config: Topic6Config, ark, sender, loop: asyncio.AbstractEvent
         artifact_sync=artifact_sync,
         sync_root=Path(config.artifact_sync_dir),
         notifier=notifier,
+        process_files=process_files,
     ))
     runner.bind_card_sender(hitl)
+    runner.bind_process_files(process_files, artifact_sync)
 
     async def reply(chat_id: str, text: str) -> None:
         await loop.run_in_executor(None, sender.send_to_chat, chat_id, text)

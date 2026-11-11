@@ -76,6 +76,13 @@ class JobNotifier:
                 f"{_report_line(report_doc_url)}\n任务：{job.job_id}")
         self._send(job.chat_id, text)
 
+    def notify_process_files(self, job: PipelineJob, folder_url: str, file_count: int) -> None:
+        """过程关键文件已归档到飞书，告诉发起人去哪里找（排查问题用）。"""
+        mention = self._resolve_mention(job)
+        text = (f"{mention} 📁 **过程数据已归档**（{file_count} 个关键节点文件，用于排查问题）\n"
+                f"飞书文件夹：{folder_url}\n任务：{job.job_id}")
+        self._send(job.chat_id, text)
+
     # ---- 内部 ---------------------------------------------------------------
 
     def _resolve_mention(self, job: PipelineJob) -> str:

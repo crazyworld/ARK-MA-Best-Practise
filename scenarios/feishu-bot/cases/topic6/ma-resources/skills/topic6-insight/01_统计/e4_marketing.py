@@ -145,7 +145,7 @@ def prep_e4_marketing(df_y: pd.DataFrame) -> str:
             "|---|---|---|---|---|---|",
         ]
         for _, r in co.iterrows():
-            desc = str(safe_field(r, "合作动态说明", "")).replace("\n", " ")[:60]
+            desc = str(safe_field(r, "合作动态说明", "")).replace("\n", " ")
             lines.append(
                 f"| {r['事件簇名']} | {safe_field(r, '商业实体')} | {safe_field(r, '行业归属')} "
                 f"| {fmt_score(r['标准化热度分'])} | {_title_with_link(r)} | {desc} |"
@@ -165,7 +165,7 @@ def prep_e4_marketing(df_y: pd.DataFrame) -> str:
             "|---|---|---|---|---|",
         ]
         for event, top, grp_sorted in risk_events:
-            desc = str(safe_field(top, "风险判断说明", "")).replace("\n", " ")[:80]
+            desc = str(safe_field(top, "风险判断说明", "")).replace("\n", " ")
             lines.append(
                 f"| {event} | {safe_field(top, '行业归属')} "
                 f"| {fmt_score(top['标准化热度分'])} | {_titles_platform_score(grp_sorted, n=3)} | {desc} |"
@@ -186,7 +186,7 @@ def prep_e4_marketing(df_y: pd.DataFrame) -> str:
             "|---|---|---|---|---|---|",
         ]
         for _, r in creative.iterrows():
-            desc = str(safe_field(r, "营销发现说明", "")).replace("\n", " ")[:80]
+            desc = str(safe_field(r, "营销发现说明", "")).replace("\n", " ")
             lines.append(
                 f"| {r['事件簇名']} | {safe_field(r, '平台')} | {safe_field(r, '行业归属')} "
                 f"| {fmt_score(r['标准化热度分'])} | {_title_with_link(r)} | {desc} |"
@@ -210,7 +210,7 @@ def prep_e4_marketing(df_y: pd.DataFrame) -> str:
             "|---|---|---|---|---|---|---|",
         ]
         for _, r in cons.iterrows():
-            desc = str(safe_field(r, "消费者行为说明", "")).replace("\n", " ")[:80]
+            desc = str(safe_field(r, "消费者行为说明", "")).replace("\n", " ")
             lines.append(
                 f"| {r['事件簇名']} | {safe_field(r, '平台')} | {safe_field(r, '行业归属')} "
                 f"| {fmt_score(r['标准化热度分'])} | {_title_with_link(r)} | {safe_field(r, '商业实体')} | {desc} |"
@@ -264,7 +264,7 @@ def prep_e4_candidates(df_y: pd.DataFrame) -> dict:
             "行业": safe_field(top, "行业归属"),
             "热度分": fmt_score(top["标准化热度分"]),
             "具体热搜": titles,
-            "风险判断说明": str(safe_field(top, "风险判断说明", "")).replace("\n", " ")[:80],
+            "风险判断说明": str(safe_field(top, "风险判断说明", "")).replace("\n", " "),
         })
 
     co = _select_cooperation_events(df_y, n=20)
@@ -276,7 +276,7 @@ def prep_e4_candidates(df_y: pd.DataFrame) -> dict:
             "热度分": fmt_score(r["标准化热度分"]),
             "代表热搜标题": safe_field(r, "热点标题", ""),
             "代表热搜链接": safe_field(r, "链接", ""),
-            "合作动态说明": str(safe_field(r, "合作动态说明", "")).replace("\n", " ")[:60],
+            "合作动态说明": str(safe_field(r, "合作动态说明", "")).replace("\n", " "),
         })
 
     creative = _select_creative_events(df_y, n=15)
@@ -288,7 +288,7 @@ def prep_e4_candidates(df_y: pd.DataFrame) -> dict:
             "热度分": fmt_score(r["标准化热度分"]),
             "代表热搜标题": safe_field(r, "热点标题", ""),
             "代表热搜链接": safe_field(r, "链接", ""),
-            "营销发现说明": str(safe_field(r, "营销发现说明", "")).replace("\n", " ")[:80],
+            "营销发现说明": str(safe_field(r, "营销发现说明", "")).replace("\n", " "),
         })
 
     cons = _select_consumer_events(df_y, n=20)
@@ -301,7 +301,7 @@ def prep_e4_candidates(df_y: pd.DataFrame) -> dict:
             "代表热搜标题": safe_field(r, "热点标题", ""),
             "代表热搜链接": safe_field(r, "链接", ""),
             "商业实体": safe_field(r, "商业实体"),
-            "消费者行为说明": str(safe_field(r, "消费者行为说明", "")).replace("\n", " ")[:80],
+            "消费者行为说明": str(safe_field(r, "消费者行为说明", "")).replace("\n", " "),
         })
 
     return result

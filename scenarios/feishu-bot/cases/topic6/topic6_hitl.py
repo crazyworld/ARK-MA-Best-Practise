@@ -529,6 +529,7 @@ class Topic6HitlDeps:
     artifact_sync: Optional["Topic6ArtifactSync"] = None
     sync_root: Optional[Path] = None
     notifier: Optional["JobNotifier"] = None
+    process_files: Optional["ProcessFileDelivery"] = None
 
 
 class Topic6Hitl(Topic6CardSenderProtocol):
@@ -547,6 +548,13 @@ class Topic6Hitl(Topic6CardSenderProtocol):
         self._artifact_sync = deps.artifact_sync
         self._sync_root = deps.sync_root
         self._notifier = deps.notifier
+        self._process_files = deps.process_files
+
+    async def _deliver_process_files(self, job: PipelineJob) -> None:
+        try:
+            await asyncio.get_event_loop().run_in_executor(None, self._process_files.deliver, job)
+        except Exception as err:  # noqa: BLE001 - 归档失败不影响审核
+            log.warning("topic6 process files delivery failed job=%s: %s", job.job_id, err)
 
     # ---- SendHcCard(runner → hitl)----------------------------------------
 
@@ -615,6 +623,9 @@ class Topic6Hitl(Topic6CardSenderProtocol):
                         "topic6 publish_hc_artifacts empty after %d attempts job=%s hc=%s",
                         _max_sync_attempts, _job.job_id, _hc_kind,
                     )
+                # 过程关键文件归档（刚同步过，直接用本地文件）：后台执行，不推迟发卡；失败只记日志
+                if self._process_files is not None and self._process_files.enabled:
+                    asyncio.get_event_loop().create_task(self._deliver_process_files(_job))
 
         if published_urls:
             # 落库 token/type/url，审核通过后据此回读用户在线修改

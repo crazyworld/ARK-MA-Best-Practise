@@ -1061,6 +1061,37 @@ class FeishuSender:
                     f"HTTP {resp.status_code} code={code}: {resp.text[:200]}"
                 )
 
+    def upload_file(self, folder_token: str, file_path: str, file_name: str) -> str:
+        """上传本地文件到云空间文件夹（原文件，不转在线文档），返回 file_token。
+
+        走 `POST /open-apis/drive/v1/files/upload_all`（单次上传上限 20MB）。
+        """
+        import requests as _requests
+
+        path = os.fspath(file_path)
+        size = os.path.getsize(path)
+        if size > 20 * 1024 * 1024:
+            raise RuntimeError(f"飞书 upload_all 单文件上限 20MB，实际 {size} 字节: {file_name}")
+        access_token = self._get_tenant_access_token()
+        with open(path, "rb") as handle:
+            resp = _requests.post(
+                "https://open.feishu.cn/open-apis/drive/v1/files/upload_all",
+                headers={"Authorization": f"Bearer {access_token}"},
+                data={"file_name": file_name, "parent_type": "explorer",
+                      "parent_node": folder_token, "size": str(size)},
+                files={"file": (file_name, handle)},
+                timeout=120,
+            )
+        if resp.status_code != 200:
+            raise RuntimeError(f"飞书上传文件 HTTP {resp.status_code}: {resp.text[:300]}")
+        data = resp.json()
+        if data.get("code") != 0:
+            raise RuntimeError(f"飞书上传文件失败 code={data.get('code')}: {data.get('msg', '')[:200]}")
+        file_token = str((data.get("data") or {}).get("file_token") or "")
+        if not file_token:
+            raise RuntimeError(f"飞书上传文件成功但未返回 file_token: {data}")
+        return file_token
+
     def delete_drive_file(self, token: str, file_type: str) -> None:
         """删除云空间文件（DELETE /drive/v1/files/{token}?type=...），只用于清理本应用自建的产物。"""
         import requests as _requests

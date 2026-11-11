@@ -14,7 +14,7 @@ import io
 import json
 import re
 import sys
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -34,6 +34,45 @@ from e3_platforms import (
     prep_e3_event_fulltext,
 )
 from e4_marketing import prep_e4_marketing, prep_e4_candidates
+
+
+def resolve_publish_date(proj: Path, explicit: str | None) -> date:
+    """报告发布日 = run_config.period.date_end + 1 天（对齐客户 V2 E_insights.md:291）。
+
+    E2 上周回顾/本周预告窗口都以发布日为锚点，取值必须确定，不能随运行当天漂移：
+    - 显式 --publish-date：优先采用；与推导值不一致时打 WARN（保留人工覆盖口子）
+    - 未传：读 run_config.yaml 的 period.date_end 推导
+    - run_config 缺失/字段不全：退回今天并打 WARN（兼容独立调试，不阻断）
+    """
+    derived: date | None = None
+    cfg_path = proj / "run_config.yaml"
+    if cfg_path.exists():
+        try:
+            import yaml
+
+            cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+            end_s = (cfg.get("period") or {}).get("date_end")
+            if end_s:
+                derived = date.fromisoformat(str(end_s)) + timedelta(days=1)
+        except Exception as error:  # noqa: BLE001 - 读不到配置时走兜底
+            print(f"[run_stats] ⚠️ 读取 run_config.period 失败：{error}", file=sys.stderr)
+
+    if explicit:
+        chosen = date.fromisoformat(explicit)
+        if derived and chosen != derived:
+            print(
+                f"[run_stats] ⚠️ --publish-date={chosen} 与 period.date_end+1={derived} 不一致，"
+                "按显式参数执行（E2 窗口以此为锚点）",
+                file=sys.stderr,
+            )
+        return chosen
+    if derived:
+        return derived
+    print(
+        "[run_stats] ⚠️ 未传 --publish-date 且 run_config.period.date_end 缺失，退回今天",
+        file=sys.stderr,
+    )
+    return date.today()
 
 
 def _latest_run_id(directory: Path, glob_pattern: str) -> int | None:
@@ -79,7 +118,7 @@ def main():
         default="skip_sampling",
     )
     parser.add_argument("--publish-date", default=None,
-                        help="报告发布日 YYYY-MM-DD（默认今天）")
+                        help="报告发布日 YYYY-MM-DD（默认 run_config.period.date_end+1）")
     parser.add_argument("--run-id", type=int, default=None,
                         help="宽表版本号（不传时自动取已存在的最新一轮）")
     parser.add_argument("--out-dir", default=None,
@@ -93,9 +132,7 @@ def main():
         print(f"[run_stats] ❌ 项目目录不存在：{proj}", file=sys.stderr)
         sys.exit(1)
 
-    pub_date = (
-        date.fromisoformat(args.publish_date) if args.publish_date else date.today()
-    )
+    pub_date = resolve_publish_date(proj, args.publish_date)
     print(f"[run_stats] 发布日：{pub_date}")
 
     merge_dir = proj / "05_合并"

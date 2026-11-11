@@ -11,6 +11,120 @@
 
 ---
 
+## 2026-11-11
+
+### W45 业务验收问题修复（Q1 / Q2 / Q4 / Q5）+ Gateway 小修（R3 / R4）
+
+- **Q2 事件簇归类：同一事件未合并、驱动话题出现整句长标题**（job_fe11fa6b2761）
+  - 现象：《后会友期》66 条（营销可用 36 条）全部成单条簇，影视综艺驱动话题缺失该节目；「三甲医院推荐患者去三乙医院」知乎/微博两条未合并，
+    医疗健康驱动话题为 3 条 1 次长标题。本期 1095 条可用中仅 199 条（18%）进入 ≥2 成员簇（客户原版 W43 为 48%）。
+  - 根因：MA 以 `--review-policy record` 无人值守运行 rc.14，non_events 门禁不停等、无人复核，UNCERTAIN/needs_evidence 永不解除；
+    `retain_original.py` 把含未决成员的整组拆回原标题（本期 `original_retained_count=280`）。客户原版（ada_topic6_v2_261110，`c2_run_all_platforms.py::_run_stages_once`）逐平台直接调 vendor 00→09 脚本，
+    不经 run_c2.py、不调用 retain_original（vendor 代码与 1030 bundle 一致；W43 实跑产物 149 条 UNCERTAIN 中 78 条正常入簇）。
+  - 修复：`run_c2.py --uncertain-policy {split|keep}`（默认 split=上游），`run_topic6_c2.py` 传 keep：组不因未决成员拆散，未决成员记入
+    `original_retained.json.uncertain_kept` / `c2_quality.uncertain_kept_count`；人工 forced、NON_EVENT 排除、技术降级规则不变。
+    E1「主要驱动话题」同次数时按簇内最高热度分、再按事件名确定性排序（此前同次数顺序随输入行序）。
+  - **聚簇链路整体对齐原版（除改进点）**：逐段对比原版 00→09 后，MA 封装再改两处——`--frontend legacy`（00 清洗 / 01 事件性 / 02 Frame
+    分开调用，00 由模型清洗标题，与原版同口径；此前 F1 融合锁定原标题不清洗）、`run_c2.py --member-review off`（新增，默认 on=上游；跳过原版没有的
+    x2 置信度筛查与 x3 双向复核）。保留的改进：跨平台合并 + top_k=60、平台并行与 03∥04 并行、阶段 checkpoint、03 截断拆批、DeepSeek、降级不阻断。
+    代价：前端调用由每平台 1 次变为 00 每平台 1 次 + 01/02 全量各 1 轮，C2 耗时预计上升，需 212 实测；x3 省掉后部分抵消。
+  - 测试：`test_topic6_c2_uncertain_policy.py`（含离线 mock 端到端；去掉 keep 时端到端用例失败）、`test_topic6_c2_rc14.py`（legacy 调用计数、无 x2/x3）、
+    `test_topic6_report_rule_fixes.py`。mock relay 支持 legacy 三段 prompt。
+    mock relay 新增「如何看待」→ UNCERTAIN。**需 update_ma.sh**；真实合并率需 212 实跑确认。
+- **E4 说明字段不再程序截断**：`e4_marketing.py` 去掉合作动态说明 [:60]、风险判断/营销发现/消费者行为说明 [:80]（原版同样截断），
+  字数只由写作 Prompt 约束；Q5 放宽输出字数后，输入截断会让模型凑字。输入 token 略增。
+- **过程关键文件归档到飞书（新需求）**：新增 `process_files.py`。Gateway 在 HC 发卡前（后台）和任务终态时，从 artifact_sync 已同步的
+  节点发布清单中挑白名单关键文件，上传到 job 文件夹（与 HC 宽表同一个 `{项目名}_{job_id前12位}`）下的「过程数据」子文件夹，原文件上传
+  （`upload_all`，单文件 ≤20MB），文件名为相对路径以 `__` 拼接；同类文件只取最新轮次，按 sha256 幂等，失败只记 warning。
+  白名单：数据质量报告、标准化表、C0 合并（营销可用打标）、可用子集、C2 结果/c2_status/c2_quality/original_retained/01_eventness、
+  健康度摘要、E1~E4 统计输入、E2 节点判定、E3 词频审计、E4 仲裁审计、Phase E 执行报告。不传原始抓取、抽样、单路原始标注、
+  宽表（已是 HC 在线表格）、报告（已是飞书文档）、checkpoint、洞察草稿。发起人对 job 文件夹授予 edit；任务在 HC 前失败也会建文件夹；
+  终态有新上传时 @ 发起人附文件夹链接。W45 实测选中 13 个文件 2.1MB（补发布 C2 诊断后约 17 个）。
+  coordinator `node=c2` 以 optional 附带 c2_quality/original_retained/01_eventness，`node=fetch_normalize` 附带 data_quality_report。
+- **artifact_sync 物化修复（排查时发现）**：Files API 列表不返回 size，index 中 `fingerprint.size=None`，按 size 过滤候选导致
+  212 上 job_fe11fa6b2761 已下载 92 个对象、0 个物化到项目目录（HC 宽表靠 `.objects` 兜底才找得到）。改为 size 未知时不排除、
+  以 sha256 定案并复用 index 中已存的 sha256；用 212 真实 index 回放，物化 57 个文件。
+- **Q1 E3 热门事件 TOPN 排序**：第一排序事件簇热点数量，第二排序由簇内最高分改为簇内平均标准化热度分；「热度值」列口径不变（最高分），
+  表格末列新增「平均热度值」。E3 Prompt v7（只补输入列说明）。
+- **Q4 「锚点未核实」**：日历查不到锚点日期的节点不再进入「上周节点」，只在 stderr 记录；E2 Prompt v8 删除保留该标注的规则。
+- **Q5 字数**：E4 B 组撰写 v2——「营销发现」100-120 字（营销观察案例卡与消费洞察洞察卡两处）、消费洞察「行为反应」80-100 字（信息不足不得编造凑字数）。
+- **R3**：`session.error` 的 `retry_status=retrying` 判断提前到 provider 重试之前，平台重试期间 Gateway 不叠加重试/催促。
+- **R4**：回复已完成/已停止/正在停止任务的进度卡片发 `/continue` 时直接提示，不再回落续跑同一用户的其他任务；沙箱故障文案去掉 topic6 入口不存在的按钮。
+- 影响文件：`process_files.py`（新）、`artifact_sync.py`、`gateway.py`、`topic6_hitl.py`、`job_notifier.py`、`arkagent/feishu.py`（upload_file）、
+  `topic6-insight/01_统计/e4_marketing.py`、`topic6-event-registry/scripts/{retain_original,run_c2,run_topic6_c2}.py`、`topic6-insight/01_统计/{e1_industry,e2_nodes,e3_platforms}.py`、
+  `topic6-insight/02_洞察/{E2_营销节点/v8,E3_平台新鲜事/v7,E4_营销发现/_writing_marketing_consumer/v2}.md`、`topic6_runner.py`、`pipeline_store.py`、
+  openspec（session-runner / skill-insight / skill-event-registry）、版本状态/version_mapping/ks 口径文档。
+
+### W45 实跑问题修复（P1-1 / N1 / N2 / N3 / N5 / N6）
+
+详见 Obsidian `MA_ADA_DEV/review/topic6_W45_session问题复盘_2026-11-09.md`。N4(妙搭访问权限)按原版设计不改。
+
+- **P1-1 网页同名链接塌缩**
+  - 现象：W45 Phase G `Missing rendered source link: https://www.douyin.com/search/...成都蓉城致歉`。
+  - 根因：`build-report.mjs::blockSourceLinks` 以链接文字为 Map key，同一 block 内抖音/微博同名标题后者覆盖前者（客户 V2 模板同样存在）。
+  - 修复：`SourceLinkIndex`(文字 → 候选列表)，按行内平台标注匹配域名，否则取未用过的链接。120 条链接的样例新旧输出字节一致。
+  - 文件：`topic6-web-report/assets/source/build-report.mjs`；测试 `test_topic6_web_report_alignment.py`。**需 update_ma.sh**。
+- **N1 `/continue` 报 `_start_token_keepalive` 不存在**
+  - 根因：`febc60a` 删除每任务保活方法时漏删 gateway 调用点；测试注入同名方法掩盖了问题。
+  - 修复：删除调用点(token 由常驻 `start_token_refresher` 刷新)；新增 AST 守卫 `test_topic6_self_method_integrity.py`。
+- **N2 待裁决时单发「A」只得到帮助文案**
+  - 修复：仅当本会话/所回复卡片存在「等待用户裁决」的失败任务且消息为单个字母时，提示 `/continue A`，不自动执行。
+- **N3 「…W45的热点周报」误触发 full**
+  - 根因：`parse_trigger` 按子串包含「热点报告/热点周报」触发。
+  - 修复：改为 `/start [模式] [周期]` 命令，缺省 full，模式写错回用法；提到关键词不再触发。README/QUICKSTART/spec/提示词同步。
+- **N5 可恢复 Session 被判死、他人无法 `/continue`**
+  - 根因：① `session.error` 不看 `retry_status` 一律记 session 级失败；② 方舟控制台 interrupt 记为不可逆 stopped；
+    ③ `/continue` 按 (chat, 发送者, thread) 精确匹配，袁杰松发起的任务吕玉新回复卡片也找不到；④ 沙箱故障期间仍连续 nudge 3 次(input 1.13M→2.08M)。
+  - 修复：`retrying` 继续监听、`terminal`/status_failed/terminated 为 session 级、其余可恢复(`continue_job` 仍以 GET /sessions 复核)；
+    控制台 interrupt 记可恢复失败(卡片停止按钮流程不变)；回复进度卡片 `/continue` 按卡片定位，限发起人或 `TOPIC6_ADMIN_OPEN_IDS`；
+    连续 3 次沙箱故障停止 nudge，可恢复失败并提示平台恢复后继续。`get_resumable_job_by_session_key` 不改(topic5 在用)。
+  - 已真正终止的 Session 从断点新开续跑列入二期。
+- **N6 隐藏临时文件被当作节点产物发布**
+  - 根因：`Path.glob("*_r1.xlsx")` 匹配 `.c0_retry_input_r1.xlsx`。
+  - 修复：`publish_node_artifacts.py` 跳过任一路径段以 `.` 开头的文件/目录；全部 include 规则无点开头产物。**需 update_ma.sh**。
+
+## 2026-11-10
+
+### 客户 V2 对照复核：补齐 4 处确认遗漏（不改变节点结构与交付结构）
+
+逐文件 + 逐功能点对照客户 V2（`ada_topic6_v2_261110`）后，二次复核确认以下为真实遗漏。
+CHANGELOG 2026-11-04「未纳入」清单中的业务决策项（周期 4 周回溯、交付目录 6 子夹、G/H 非阻塞、A-2.5 退出码 3）不在本次范围。
+
+- **网页正文以 HC3 定稿飞书文档为准（FX03）**
+  - 触发现象：HC3 阶段用户可在飞书文档里改文字、表格和配图。`/republish` 只重新读取配图，正文仍取本地
+    `status.f.merged_report_file`，飞书里改的文字不会进网页；与 coordinator「用户在飞书文档里直接改过的内容以飞书为准」自相矛盾。
+  - 根因：迁移时客户 `pipeline_g.py::fetch_feishu_markdown` 只移植了配图下载部分（`fetch_case_images.py`）。
+  - 修复：新增 `topic6-web-report/scripts/fetch_report_md.py`，复用 `fetch_case_images.py` 的 tenant token 与 blocks 读取，
+    把文档块逆向还原为 Markdown 后交给 `md2source.py`（后续构建/校验链不变）。读取失败、无章节、章节少于本地、
+    或本地有表格/链接而还原后为 0 时自动回退本地稿，stdout 给出 `source/reason`，不阻断 Phase G；
+    Coordinator 写 `status.g.report_source(_reason)` 并在回退时提示用户。`REPUBLISH_MESSAGE` 与 `/republish` 回复改为“重新读取正文与配图”。
+- **E2 发布日口径（FX01）**：coordinator 只有 `{publish_date}` 占位符、全文未定义取值，`run_stats.py` 缺省用运行当天，
+  E2 上周/本周窗口会随运行日期漂移。`run_stats.py` 缺省改为 `run_config.period.date_end + 1`（显式传参仍优先，
+  不一致时 WARN；无 run_config 时退回今天并 WARN）；coordinator/SKILL.md 写明口径。
+- **E2 节点日历（FX02）**：`marketing_calendar_2026.csv` 比客户 V2 E2 实际使用的 `2026年营销节点_byday.md` 少 4 个电商节点
+  （年货节、618预售启动、99大促、双11预售启动），618/双11/双12 大促类型误为「大众节日」；C3 能提取这些节点但 E2 查不到锚点
+  → 落入「锚点未核实」。补齐并修正类型后节点集合/类型与客户一致（223），保持 BOM+CRLF。
+  `ks/04_节点判定.md`、`ks/07_报告结构.md`、`prompts/06_阶段_E洞察.md`、`prompts/运行前置.md` 仍写“`MARKETING_CALENDAR_PATH`
+  注入外部 byday.md / 缺失静默跳过”，与代码（默认 csv、0 节点报错）及错误案例 E13 结论相反，已改正。
+- **飞书发布 warnings 进入 HC3（FX06）**：admin 授权失败等 `warnings` 原来只要求“原样记录”，审核人看不到；
+  改为逐条写入 HC3 `issues_detected`（前缀「飞书发布：」）。
+- **文档与知识（FX09）**：`references/E3_统计口径说明.md`、`综合热度指数算法说明.md` 此前误迁客户 09-15 旧版（描述 v1_legacy，
+  代码 `ACTIVE_SCORING_VERSION="v2"`），改为客户 10-13 校正版；`memory/topic6/错误案例库.md` 追加客户 E5~E17 的 MA 适配摘要
+  （E11/E12 标注不适用）；`CUSTOMER_TO_MA_FILE_MAPPING.md` 补登 pipeline_g / feishu_push_hc / feishu_pullback / pipeline_deliver /
+  preflight_check / run_logger / KS 等去向，并纠正 `md2source.py`“未迁移”的误记。
+- **测试**：新增 `tests/test_topic6_phase_g_feishu_source.py`（8 条：飞书块↔Markdown 往返结构一致、飞书改文字/单元格进入 source.json、
+  兜底、还原结果可构建并通过 validate-rendered-content、编排指令）与 `tests/test_topic6_v2_gap_fixes.py`（11 条）。
+  两文件在修复前代码上全部失败（19/19），修复后全部通过；Topic6 全量 `532 passed, 5 skipped`（修复前基线 513 passed）。
+- **待办**：`tools/pack_skills.sh` → `tools/upload_skills.py` 上传 topic6-web-report / topic6-insight / topic6-fetch-normalize /
+  topic6-annotation 新版本；`create_all.sh --update-env --update-memory` 同步 coordinator 与 Memory；Gateway 重启加载
+  `topic6_runner.py`/`gateway.py`。212 上真实飞书文档验证一次 Phase G（`/republish` 即可，不重跑 A~F）。
+- **影响文件**：`topic6-web-report/{scripts/fetch_report_md.py(新增),SKILL.md}`、`topic6-insight/{01_统计/run_stats.py,SKILL.md,references/*}`、
+  `topic6-fetch-normalize/references/marketing_calendar_2026.csv`、`topic6-annotation/{ks/04,ks/07,prompts/06,prompts/运行前置}.md`、
+  `agents/coordinator.system.md`、`memory/topic6/错误案例库.md`、`topic6_runner.py`、`gateway.py`、`TOPIC6_DEBUG_QUICKSTART.md`、
+  `TOPIC6_DATA_FILTER_RULES.md`、`CUSTOMER_TO_MA_FILE_MAPPING.md`、`openspec/specs/{skill-web-publish,coordinator-orchestration,session-runner,skill-fetch-normalize}/spec.md`
+
+---
+
 ## 2026-11-06
 
 ### C2 实体归一（03）首批撞 max_tokens=16000 阻断 full；Agent token_limits 恢复模型原生规格

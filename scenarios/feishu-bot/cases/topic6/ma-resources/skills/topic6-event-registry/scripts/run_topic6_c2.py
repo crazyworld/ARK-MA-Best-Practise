@@ -4,15 +4,21 @@
 Topic6 封装：把 MA 的项目约定（可用子集 xlsx、c2_status.json、run_config、结果 xlsx、
 后台 launcher / wait 检查器、单实例锁、签名续跑）适配到 rc.14 统一入口 run_c2.py：
 
-  input.csv -> run_c2.py run --mode cross-platform --frontend fused --execute
-     F1 融合抽取（00+01+02 一次调用，各平台并行）-> 合流 -> 补证前判定
+  input.csv -> run_c2.py run --mode cross-platform --frontend legacy --member-review off --execute
+     00 清洗（每平台一次，各平台并行）-> 01 事件性 -> 02 Frame -> 合流 -> 补证前判定
      -> E/V 并行（03 实体 ∥ 04 向量）-> 05 召回 -> 06 分块 -> 07 归档（覆盖重试）
-     -> x2 置信度（边界带模型裁定）-> x3 合并/拆分复核 -> 原热点保留
-     -> 09 registry -> x4 七列明细 -> finalize（c2_quality / provenance / metrics）
+     -> 原热点保留（keep）-> 09 registry -> x4 七列明细 -> finalize（c2_quality / provenance / metrics）
+
+聚簇语义对齐客户原版 ada_topic6_v2_261110 `c2_run_all_platforms.py::_run_stages_once`（00→09 直跑：
+legacy 三段前端、无 x2 置信度筛查 / x3 双向复核 / 未决拆簇）。MA 保留的改进：跨平台合并（原版按平台
+独立跑）+ 配套 top_k=60、平台并行与 E/V 并行、阶段 checkpoint、03 截断拆批、DeepSeek 模型、降级不阻断。
+--x2-verdict 参数保留兼容（member-review=off 时不生效）。
   -> 04_标注/C2_事件归档/c2_event_result_r{N}.xlsx（row_id + 一级事件名，契约不变）
 
 MA 无人值守：--review-policy record（审核门禁不停，待审项进 c2_quality.review_pending
-交 HC1/HC2）、--degraded-policy accept（07 技术降级不阻断，降级明细进 c2_quality）。
+交 HC1/HC2）、--degraded-policy accept（07 技术降级不阻断，降级明细进 c2_quality）、
+--uncertain-policy keep（无人复核时含 UNCERTAIN 成员的组不拆回原标题，未决成员记入
+original_retained.json.uncertain_kept；对齐客户原版旧链路，见 W45 后会友期 36 条全拆单条）。
 run_c2.py 自带阶段级 checkpoint 与内容寻址缓存：同一签名重跑直接续跑。
 """
 
@@ -60,7 +66,7 @@ C2_TOP_K = 60          # 跨平台合库召回（与 2.2.0 一致）
 C2_CAP = 60
 C2_OUT_BUDGET = 6000
 C2_STAGE_TIMEOUT = 3600
-# 同时跑 F1 的平台数。总并发 = C2_FRONT_WORKERS × C2_MAX_REQUESTS = 16，与 V2 生产
+# 同时跑前端(00 清洗)的平台数。总并发 = C2_FRONT_WORKERS × C2_MAX_REQUESTS = 16，与 V2 生产
 # (2 平台 × 8) 及 2.2.0 的 00 阶段(4 × 4)实测量级一致，避免 relay 限流。
 C2_FRONT_WORKERS = 2
 DEMO_FAST_SYSTEM = """你是社媒热点事件归并器。给定少量热点标题，把描述同一现实事件的记录归入同一事件簇。
@@ -95,7 +101,7 @@ def build_c2_command(
         "--input", str(input_csv),
         "--run-dir", str(run_dir / "engine"),
         "--mode", "cross-platform",
-        "--frontend", "fused",
+        "--frontend", "legacy",
         "--heat-col", "heat",
         "--window", window or "unspecified",
         "--chat-model", chat_model,
@@ -109,6 +115,8 @@ def build_c2_command(
         "--verdict", "off" if x2_verdict == "off" else x2_verdict,
         "--review-policy", "record",
         "--degraded-policy", "accept",
+        "--uncertain-policy", "keep",
+        "--member-review", "off",
         "--execute",
     ]
 
@@ -613,7 +621,7 @@ def _run_unlocked(args: argparse.Namespace) -> Path:
                            "updated_at": datetime.now().astimezone().isoformat()})
             _atomic_json(status_path, status)
             update_run_config(project, {"c2_cluster": {"status": "running", "stage": "c2_engine"}})
-            print(f"[c2] start: {C2_ENGINE} (rc.14 cross-platform, fused)", flush=True)
+            print(f"[c2] start: {C2_ENGINE} (rc.14 cross-platform, legacy, member-review off)", flush=True)
             engine = _run_engine(command, run_dir)
             _write_result(run_dir, result_path, rows)
         else:

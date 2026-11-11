@@ -123,3 +123,28 @@ async def test_sync_ignores_files_without_download_url(tmp_path: Path):
         (tmp_path / "job-1/index.json").read_text(encoding="utf-8")
     )
     assert index["files"] == {}
+
+
+
+async def test_materializes_when_files_api_omits_size(tmp_path: Path):
+    """212 实测(job_fe11fa6b2761):Files API 列表不返回 size,index 里 fingerprint.size=None。
+    旧逻辑按 size 过滤候选,92 个已下载对象一个都没物化到项目目录;改为 size 未知时按 sha256 匹配。"""
+    artifact = b"c2-result"
+    other = b"other-same-name"
+    digest = hashlib.sha256(artifact).hexdigest()
+    manifest = {"schema_version": 1, "project": "W45", "publications": [{
+        "node": "c2", "run_id": "1", "status": "complete", "files": [{
+            "source": "04_标注/C2_事件归档/c2_run/c2_status.json",
+            "output": "W45/04_标注/C2_事件归档/c2_run/c2_status.json",
+            "size": len(artifact), "sha256": digest}]}]}
+    manifest_bytes = json.dumps(manifest, ensure_ascii=False).encode()
+    files = [
+        {"id": "f-old", "filename": "c2_status.json", "status": "active", "download_url": "https://f/old"},
+        {"id": "f-new", "filename": "c2_status.json", "status": "active", "download_url": "https://f/new"},
+        {"id": "f-man", "filename": "manifest.json", "status": "active", "download_url": "https://f/man"},
+    ]
+    ark = _FakeArk(files, {"https://f/old": other, "https://f/new": artifact, "https://f/man": manifest_bytes})
+    sync = Topic6ArtifactSync(ark, tmp_path, lambda _job_id: SimpleNamespace(status="running"))
+    assert await sync.sync_once("job-1", "session-1") == 3
+    target = tmp_path / "job-1" / "W45/04_标注/C2_事件归档/c2_run/c2_status.json"
+    assert target.read_bytes() == artifact

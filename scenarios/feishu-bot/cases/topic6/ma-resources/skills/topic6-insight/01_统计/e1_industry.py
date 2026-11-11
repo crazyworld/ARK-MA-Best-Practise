@@ -122,11 +122,22 @@ def prep_e1_industry(df_y: pd.DataFrame, proj: Path) -> str:
         热点总计 = len(grp)
         热度值 = grp["标准化热度分"].median()
 
-        # 主要驱动话题：该行业下 事件簇名 计数 TOP3（附出现次数，供 LLM 判断信号强弱）
-        events = grp["事件簇名"].fillna("").str.strip()
-        events = events[events != ""]
-        top3_vc = events.value_counts().head(3)
-        驱动话题 = " | ".join(f"{e}({c}次)" for e, c in top3_vc.items()) if not top3_vc.empty else "—"
+        # 主要驱动话题：该行业下 事件簇名 计数 TOP3（附出现次数，供 LLM 判断信号强弱）。
+        # 同次数时按簇内最高标准化热度分降序、再按事件名，保证结果确定可复现(2026-11-11;
+        # 此前 value_counts 同次数按输入行序,W45 医疗健康 3 个 1 次长标题取哪 3 个是随机的)
+        events = grp[["事件簇名", "标准化热度分"]].copy()
+        events["事件簇名"] = events["事件簇名"].fillna("").astype(str).str.strip()
+        events = events[events["事件簇名"] != ""]
+        top3_vc = (
+            events.groupby("事件簇名")["标准化热度分"].agg(["size", "max"])
+            .reset_index()
+            .sort_values(["size", "max", "事件簇名"], ascending=[False, False, True])
+            .head(3)
+        )
+        驱动话题 = (
+            " | ".join(f"{r['事件簇名']}({int(r['size'])}次)" for _, r in top3_vc.iterrows())
+            if not top3_vc.empty else "—"
+        )
 
         rows.append({
             "TOP10行业": ind,

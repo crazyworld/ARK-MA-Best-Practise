@@ -20,7 +20,7 @@
 
 ## 关键规则索引
 
-- 触发词:**"热点报告"** 或 **"热点周报"**(由 gateway `orchestrator` 分派进入 topic6 主线)
+- 启动:飞书 `/start [模式] [周期]` 命令(由 Gateway 解析模式后创建 Session;提到「热点周报」不再触发)
 - 日期默认:当前时间的上一个完整自然周(周一到周日)
 - 人工干预点:**3 个 HC,不可跳过,不可合并**;由 gateway 渲染飞书交互卡片,回帖以 `user.message` 塞回 MA Session
 - Prompt 管理:不通过验收时,skill 内新建 `v{N+1}.md`,不覆盖旧版本;重新打包上传 → SkillHub 生成新 version → 协调器 pin 到明确 version
@@ -36,7 +36,7 @@
 | `topic6-fetch-normalize` | v1 | `/mnt/skills/topic6-fetch-normalize/` | Phase A+B 取数标准化 + 抽样;通过挂载的 hot-topics MCP 直连 |
 | `topic6-annotation` | v1(内含 C0=v13 / R1=v2 / R2=v2 / R3=v1 / R4=v2 / R5=v3 / C3=v7) | `/mnt/skills/topic6-annotation/` | Phase C:C0+R1~R5+C3 七路标注;`datahub_annotate.py` 5 合 1 精简版(提交+轮询+合并+筛选+时窗) |
 | `topic6-insight` | v1(内含 E1=v1 / E2=v3 / E3=v1 / E4=v6 + _tagging=v1) | `/mnt/skills/topic6-insight/` | Phase E:E1~E4 四版块洞察;Ark(OpenAI 兼容)接口 |
-| `topic6-event-registry` | v3.0.0-rc.14 | `/mnt/skills/topic6-event-registry/` | Phase C:C2 事件合并；封装调用 run_c2.py(cross-platform + F1 融合)，阶段 checkpoint 续跑，Chat=DeepSeek-V4.1-Flash |
+| `topic6-event-registry` | v3.0.0-rc.14 | `/mnt/skills/topic6-event-registry/` | Phase C:C2 事件合并；封装调用 run_c2.py(cross-platform + legacy 前端,聚簇对齐原版 00→09,无 x2/x3)，阶段 checkpoint 续跑，Chat=DeepSeek-V4.1-Flash |
 | `topic6-web-report` | v1.1.0 | `/mnt/skills/topic6-web-report/` | Phase G:UI 网页版报告 |
 | `miaoda-web-publish` | v1.0.1 | `/mnt/skills/miaoda-web-publish/` | Phase H:妙搭 Git 发布与链接确认 |
 
