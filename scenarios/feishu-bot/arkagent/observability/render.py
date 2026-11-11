@@ -111,3 +111,10 @@ def render_list(refs: list[TraceRef]) -> str:
         for r in refs
     ]
     return "\n".join([f"{'TRACE_ID':<28} {'根':<4} {'场景':<8} {'状态':<10} 开始时间", *rows])
+
+
+def render_findings(findings) -> str:
+    if not findings:
+        return "诊断: 没有发现明确异常。"
+    icon = {"error": "✗", "warning": "!", "info": "i"}
+    return "诊断:\n" + "\n".join(f"  [{icon[f.level]}] {f.summary}" for f in findings[:8])

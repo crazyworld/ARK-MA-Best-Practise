@@ -1,0 +1,66 @@
+{
+  "name": "ada-diagnose",
+  "description": "排障助手:在群聊里回答\"某个任务为什么失败 / 卡在哪 / 这一步的输入输出是什么\",只读,依据确定性诊断工具的结果作答。",
+  "model": {
+    "id": "doubao-seed-2-1-lite-260915",
+    "thinking": "enabled",
+    "reasoning_effort": "low"
+  },
+  "system_file": "diagnose.system.md",
+  "tools": [
+    {
+      "type": "agent_toolset_20260916",
+      "default_config": {
+        "enabled": false,
+        "permission_policy": {
+          "type": "always_allow"
+        }
+      }
+    },
+    {
+      "type": "custom",
+      "name": "list_recent_tasks",
+      "description": "列出当前群聊里最近的任务(最多 10 条),可按状态过滤。用户没有说清楚问的是哪个任务时先用它。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "description": "可选,按任务状态过滤,如 failed / running / wait_hc / done"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "type": "custom",
+      "name": "diagnose_task",
+      "description": "诊断一个任务:返回状态、统计摘要、按严重程度排序的异常结论(findings)、以及失败 / 未完成 / 最慢步骤的索引(steps)。不传 task_id 时取当前群聊最近一个任务,此时返回里 picked_by_default 为 true,你必须先向用户复述选中的任务再下结论。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "description": "任务 id、job id 或 session id;可省略"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "type": "custom",
+      "name": "get_step_detail",
+      "description": "取某一步的输入输出正文(密钥已脱敏,过长会截断)。event_id 和 session_id 取自 diagnose_task 返回的 steps。仅在用户追问某一步的具体内容时调用。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "task_id": {"type": "string"},
+          "session_id": {"type": "string"},
+          "event_id": {"type": "string"}
+        },
+        "required": ["task_id", "session_id", "event_id"],
+        "additionalProperties": false
+      }
+    }
+  ]
+}

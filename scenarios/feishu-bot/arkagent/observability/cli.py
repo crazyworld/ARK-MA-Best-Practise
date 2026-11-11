@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -17,7 +18,8 @@ from ..config import DEFAULT_ARK_BASE_URL, load_config_file
 from ..paths import get_case_paths
 from .adapters.base import TraceRef, TraceSource
 from .adapters.sqlite_sources import PipelineJobSource, TopicxSource
-from .render import render_list, render_text
+from .diagnose import diagnose
+from .render import render_findings, render_list, render_text
 from .service import build_trace
 
 _CASES_DIR = Path(__file__).resolve().parents[2] / "cases"
@@ -148,5 +150,11 @@ async def run(args: list[str]) -> int:
     finally:
         if ark is not None:
             await ark.aclose()
-    print(json.dumps(trace.to_dict(), ensure_ascii=False, indent=2) if "--json" in flags else render_text(trace))
+    findings = diagnose(trace, now_ms=int(time.time() * 1000))
+    if "--json" in flags:
+        payload = trace.to_dict()
+        payload["findings"] = [f.to_dict() for f in findings]
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(render_findings(findings) + "\n\n" + render_text(trace))
     return 0

@@ -24,6 +24,8 @@ class TraceRef:
     started_at_ms: int
     finished_at_ms: Optional[int] = None
     last_error: str = ""
+    # 任务所在的飞书会话(群或私聊);排障 Bot 据此限定"只能看当前群"。
+    chat_id: str = ""
     sessions: list[SessionRef] = field(default_factory=list)
     db_spans: list[Span] = field(default_factory=list)
     meta: dict[str, Any] = field(default_factory=dict)
@@ -33,5 +35,9 @@ class TraceSource(Protocol):
     def resolve(self, ident: str) -> Optional[TraceRef]: ...
 
     def list_refs(
-        self, *, limit: int = 20, status: Optional[str] = None
+        self,
+        *,
+        limit: int = 20,
+        status: Optional[str] = None,
+        chat_id: Optional[str] = None,
     ) -> list[TraceRef]: ...

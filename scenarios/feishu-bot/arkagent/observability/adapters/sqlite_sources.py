@@ -41,6 +41,17 @@ def _get(row: sqlite3.Row, key: str, default: Any = "") -> Any:
     return row[key] if key in row.keys() else default
 
 
+def _where(*, status: Optional[str], chat_id: Optional[str]) -> tuple[str, tuple]:
+    clauses, params = [], []
+    if status:
+        clauses.append("status = ?")
+        params.append(status)
+    if chat_id:
+        clauses.append("chat_id = ?")
+        params.append(chat_id)
+    return (f"WHERE {' AND '.join(clauses)}" if clauses else ""), tuple(params)
+
+
 def _hc_spans(conn: sqlite3.Connection, job_id: str) -> list[Span]:
     if not _columns(conn, "pipeline_hc_events"):
         return []
@@ -92,6 +103,7 @@ class PipelineJobSource:
             started_at_ms=_secs_to_ms(row["started_at"]) or 0,
             finished_at_ms=_secs_to_ms(row["finished_at"]),
             last_error=row["last_error"] or "",
+            chat_id=_get(row, "chat_id"),
             sessions=[SessionRef(row["ma_session_id"], "business")],
             db_spans=_hc_spans(conn, row["job_id"]) if with_hc else [],
             meta={
@@ -115,8 +127,14 @@ class PipelineJobSource:
                     return self._ref(conn, row, with_hc=True)
         return None
 
-    def list_refs(self, *, limit: int = 20, status: Optional[str] = None) -> list[TraceRef]:
-        where, params = ("WHERE status = ?", (status,)) if status else ("", ())
+    def list_refs(
+        self,
+        *,
+        limit: int = 20,
+        status: Optional[str] = None,
+        chat_id: Optional[str] = None,
+    ) -> list[TraceRef]:
+        where, params = _where(status=status, chat_id=chat_id)
         return [self._ref(conn, row, with_hc=False) for conn, row in self._rows(where, params, limit)]
 
 
@@ -141,6 +159,7 @@ class TopicxSource:
             started_at_ms=_secs_to_ms(row["created_at"]) or 0,
             finished_at_ms=_secs_to_ms(row["finished_at"]),
             last_error=row["last_error"] or "",
+            chat_id=_get(row, "chat_id"),
             sessions=sessions,
             meta={
                 "mode": row["mode"],
@@ -182,8 +201,14 @@ class TopicxSource:
                     return self._ref(conn, row, detail=True)
         return None
 
-    def list_refs(self, *, limit: int = 20, status: Optional[str] = None) -> list[TraceRef]:
-        where, params = ("WHERE status = ?", (status,)) if status else ("", ())
+    def list_refs(
+        self,
+        *,
+        limit: int = 20,
+        status: Optional[str] = None,
+        chat_id: Optional[str] = None,
+    ) -> list[TraceRef]:
+        where, params = _where(status=status, chat_id=chat_id)
         with closing(_connect(self._db_path)) as conn:
             rows = conn.execute(
                 f"SELECT * FROM task_runs {where} ORDER BY created_at DESC LIMIT ?",

@@ -1,0 +1,9 @@
+{
+  "name": "diagnose-env",
+  "config": {
+    "type": "cloud",
+    "networking": {
+      "type": "unrestricted"
+    }
+  }
+}
