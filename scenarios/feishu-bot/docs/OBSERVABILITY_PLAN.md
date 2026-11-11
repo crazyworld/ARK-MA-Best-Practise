@@ -1,6 +1,6 @@
 # ada 全链路可观测:现状、缺口与分期规划
 
-> 状态:P0 已实现(未提交) · 创建:2026-11-02 · 分支:`feat/trace-agent`(基于 `origin/main` `552b055`)
+> 状态:P0 已实现并提交 · 创建:2026-11-02 · 分支:`feat/trace-p0`(基于 `origin/main` `cc74a03`) · 排障 Bot 方案见 §11
 > 对应需求(玉新 / ada FDE):分析师(内部运营)能通过看板看到每次任务的执行链路;也能通过 CLI / 接口取到观测数据,交给 Agent 分析。
 
 ## 1. 背景与目标
@@ -15,7 +15,7 @@ ada 现在有 topic5(复盘报告)、topic6(热点周报)两个 topic 能力,由
 
 约束:
 
-- 服务需要支持分布式部署(用户全局规则)。观测层不得依赖本地文件或进程内状态;持久化通过 `TraceSink` 接口隔离,SQLite 只是默认实现。
+- **部署形态(2026-11-12 决策,取代此前"必须支持分布式"的约束)**:当前阶段不考虑分布式。排障 Bot 与被排查的 bot 同机部署,直接读本机的库和日志。这是用户对全局规则的明确例外,仅限本需求;持久化仍通过 `TraceSink` 接口隔离,以便日后迁移,但不为多机场景付出额外设计成本。详见 §11。
 - 分析师是内部运营,不是所有人都应看到原文;token、凭据必须脱敏,原文分级授权。
 - 观测层放在通用层(`arkagent/`),不反向依赖 `cases/*`。
 
@@ -164,6 +164,7 @@ adapter 通过参数 / 环境变量取库路径:`TOPICX_CONTROL_DB_PATH`、`TOPI
 |---|---|
 | 2026-11-02 | 初版:落盘现状、验证事实、14 项缺口、P0 设计与分期 |
 | 2026-11-02 | P0 实现:`arkagent/observability/` + `arkagent trace list/show`;`tests/test_observability.py` 20 个用例,全量 582 通过;对真实 job 复验,数值与 §3 一致(40 次模型调用、245.5 万/1.4 万 token、39 次工具全配对、最慢 632s) |
+| 2026-11-12 | 新增 §11.10:读代码核实四类网关的会话键与命令分流(分析师复用通用 `Gateway`;数字员工为独立 `TopicSessionBot`,会话按话题共享);发现 `/new` 删除映射致旧 session 失联、`/new` 三种语义、通用网关缺 `user_id`。同日新增 §11 排障 Bot 方案:权限(私聊本人 / 群聊本群共享)、正文可见、同机部署不考虑分布式、`resolve_target` 识别规则、分层下钻控制模型成本、日志存储取舍;§1 约束改为同机部署 |
 
 ## 10. P0 已知限制
 
@@ -172,3 +173,179 @@ adapter 通过参数 / 环境变量取库路径:`TOPICX_CONTROL_DB_PATH`、`TOPI
 - 旧版本目录(`~/.arkagent/cases/topic6/`)不会被自动发现,需 `--env-file` / `--db` 指定;新版统一到 `~/.arkagent/cases/topicX/`。
 - topic5 / topicx 的 adapter 只有单测覆盖,尚未用真实库验证(本机没有这两个库)。
 - 事件只拉取不落库,方舟清理后即不可恢复,见 P1。
+
+## 11. 排障 Bot 方案(2026-11-12 讨论结论)
+
+### 11.1 目标
+
+提供一个独立飞书应用的"排障 Bot":用户在群里或私聊里用自然语言提问,Bot 自动判断问的是哪个 session、哪个事件出了问题,依据该 session 的方舟 session log、gateway log 以及相关记录给出原因和位置。
+
+### 11.2 已定决策
+
+| 项 | 决策 |
+|---|---|
+| 覆盖范围 | gateway 上所有 bot(topicx、分析师研发环境、数字员工,以及排障 Bot 自身) |
+| 部署 | **不考虑分布式**;排障 Bot 与被排查 bot 同机部署,直接读本机资源 |
+| 权限(私聊) | 只能排查**自己名下**私聊 session |
+| 权限(群聊) | 可排查**当前群内全部** session,不区分发起人,群内共享 |
+| 内容可见性 | session log 除密钥脱敏外,**正文均可查看和出现在回答中** |
+| 排障 Bot 自身 | 默认不分析自己正在进行的 session(避免提问产生的日志反过来进入下一次分析),仅在明确询问时读取历史 |
+
+### 11.3 分层架构
+
+```
+第 3 层  排障 Bot(自然语言入口,独立飞书应用)
+            │  只通过确定性工具取数,不直接读库 / 读日志
+第 2 层  查询工具:resolve_target / trace show / why / logs / 取原文
+            │  权限校验在此层强制,以飞书消息的 chat_id、user_id 为准,不接受 LLM 传参决定查谁的
+第 1 层  数据层:各 bot 的 adapter、gateway 日志(落盘 + 统一标识)、事件留存、脱敏
+```
+
+`arkagent trace` 是第 2 层的雏形,Bot 的工具是对它的封装。
+
+### 11.4 自动识别"问的是哪个 session / 事件"
+
+识别由确定性的 `resolve_target` 完成,不交给 LLM 自由猜测,按优先级匹配:
+
+| 优先级 | 提问方式 | 匹配依据 | 可靠性 |
+|---|---|---|---|
+| 1 | 引用 / 回复了 bot 的进度卡片或回复 | `reply_to_message_id` → `progress_card_message_id` / `card_message_id` → job | 确定 |
+| 2 | 在同一话题里追问 | `thread_id` → `topic_thread_id` → task | 确定 |
+| 3 | 直接给出 ID | task_id / job_id / session_id 精确匹配 | 确定 |
+| 4 | "我刚才那个任务" | 提问人在当前会话内最近的任务;多个时必须反问 | 有歧义 |
+| 5 | "上周三那个周报" | 时间 + 描述模糊匹配 | 不稳定,只给候选,不直接下结论 |
+
+约束:返回"唯一命中 / 多个候选 / 未找到"三态;Bot 必须先复述识别结果("我理解你问的是 topic6 的 job_xxx,10-16 14:38 开始的热点周报")再给结论。选错 session 比答不出更糟。
+
+"哪个事件出问题"由确定性逻辑(拟新增 `trace why`)先给出首个异常点,再由 LLM 解释,不让 LLM 在整段事件里自己找。
+
+### 11.5 分析依据
+
+| 依据 | 状态 |
+|---|---|
+| 方舟 session 事件流 | 已有(P0) |
+| 数据库状态:`task_runs` / `pipeline_jobs` / HC 事件 / `user_oauth` 是否过期 | 已有(P0 覆盖前两类) |
+| gateway 日志 | **缺**:当前基线日志只输出到终端不落盘;日志行仅约 24%(127 处中 30 处)带 job / session / task 标识 |
+| 飞书出口记录(卡片是否发出、patch 是否成功、message_id 映射) | 缺 |
+| 出问题时的 Agent / Environment 版本与模型(是否 BYOK) | 缺,创建 session 时未记录 |
+| 方舟 `x-request-id` | 缺,待方舟提供模型级 ID |
+| 历史相似故障库 | 可沉淀,参考 `错误案例库.md` |
+| `conversations` 表(通用 bot 的 conversation_key → session) | 缺 adapter,P0 只覆盖 topicx / topic5 / topic6 |
+
+### 11.6 控制模型成本:分层下钻,不全量灌入
+
+一个正常 session 约 200 个事件、输入约 245 万 token,整段交给模型不可行。工具层按三步提供数据:
+
+1. **汇总**:turn 数、模型调用数与失败数、最慢工具、首个异常点(几百字节)。
+2. **异常点附近**:按首个异常点的时间取前后若干事件。
+3. **按需取正文**:用户追问某一步的输入输出时,按事件 id 只取那一条。
+
+### 11.7 日志存储:同机前提下的取舍
+
+| 方案 | 说明 | 结论 |
+|---|---|---|
+| 本机文件 + SQLite | gateway 日志落盘(滚动),事件写本机库;排障 Bot 同机直读 | **当前阶段采用**,最简单 |
+| 飞书文档(每 session 一份) | 从本机数据渲染,作为可交付视图 | 作为**交付物**,不作为分析输入:无法过滤聚合、整篇读取成本高、写入可能缺段 |
+| SLS(`logstore-tracing`) | 已有 span 写入基础(`obs_pilot`),具备索引查询 | 当前不考虑;若日后需要多机或长期留存再评估。已知 span 内工具结果被截断到 2000 字符,不满足"正文均可查"时需另设完整事件存储 |
+
+同机前提下,飞书文档的并发写入、跨实例去重问题也随之消失(同一 session 只由本机一个 gateway 进程持有)。
+
+### 11.8 风险与未决项
+
+1. **私聊身份**:飞书 `open_id` 按应用隔离,同一人在业务 Bot 与排障 Bot 下的 `open_id` 不同,私聊"自己名下"无法用 `open_id` 判断。需用跨应用稳定的 `user_id`(`IncomingMessage.user_id`,依赖应用开通"获取用户 user ID"权限)。**待核实**:各业务库是否记录了 `user_id`,没有则要补记录。
+2. **群聊共享的边界**:"群聊内皆共享"意味着群成员能看到本群所有 session 的完整正文(含他人上传的业务数据);已按决策接受,但脱敏规则需覆盖密钥之外的常见凭据形态,且漏脱敏无法事后撤回。
+3. **同机的代价**:排障 Bot 依赖被排查 bot 所在机器的文件系统和库,机器宕机或迁移时两者同时不可用;本机磁盘是日志的唯一副本。
+4. **LLM 误判**:根因结论必须附证据位置(事件 id / 日志行),区分"观测到"与"推断"。
+5. **文档限制未核实**:飞书文档单篇大小与写入频率限制,若要做交付视图需先确认。
+
+### 11.9 路径
+
+| 步 | 内容 | 说明 |
+|---|---|---|
+| 1 | 数据层:gateway 日志落盘 + 统一 `task= job= session=` 标识;`conversations` adapter;核实并补记录 `user_id`;`trace why` | 不依赖 Bot,CLI 同样受益 |
+| 2 | `resolve_target` + 权限校验,先在 CLI 里验证识别准确率 | 第 4 点的核心 |
+| 3 | 排障 Bot 骨架:独立飞书应用 + custom tool 调第 2 层,先只读 | 小范围试用 |
+| 4 | 覆盖自身、历史故障库、飞书文档交付视图 | 最后做 |
+
+### 11.10 各 bot 的会话 / 任务 / 命令分流(2026-11-12 读代码核实)
+
+排障 Bot 要覆盖全部 bot,而它们的"会话 → session"关系差别很大,`resolve_target` 和权限校验必须按 bot 区分实现。
+
+#### 11.10.1 四类网关
+
+`arkagent run --case <名>` 加载 `cases/<名>/gateway.py`;同一飞书应用只允许一个 gateway 进程(`GatewayLock`)。不同 bot 走**不同的网关类**,不是同一个网关里运行时分流。
+
+| 网关 | 用它的 case | 会话键(判定"同一个会话") | 库 | 有无 task / job |
+|---|---|---|---|---|
+| 通用 `Gateway`(`arkagent/gateway/orchestrator.py`) | **分析师**(`cases/analyst/gateway.py` 直接 `from arkagent.gateway.orchestrator import Gateway`) | `chat_id : thread_id : user_open_id` | `{case_dir}/gateway.db` 的 `conversations` | 无,只有会话 → session |
+| `TopicSessionBot`(`cases/digital-employee/digital_employee.py`,1273 行,独立实现) | 数字员工 | 群聊:`tenant : chat_id : (thread_id 或 message_id)`,**不含用户**;私聊:`tenant : chat_id : ""` | `{case_dir}/topic_bot_sessions.db` 的 `sessions` | 无 |
+| `Topic6Gateway` | topic6 单入口 | job 按 `(chat_id, thread_id, user_open_id)` 找活跃任务 | `data/topic6_pipeline.db` 的 `pipeline_jobs` | 无 task,直接 job |
+| `TopicxGateway` | topicx(统一入口,topic5 / topic6) | task 按 `(chat_id, topic_thread_id)` 或 `(chat_id, root_message_id)` 找 | `topicx_control.db` 的 `task_runs` + 各 topic 的 `pipeline_jobs` | **有**:每条受理的消息一条 task;意图命中才有 job |
+
+注:topic5 / topic6 / topicx 的 `gateway.py` 里**没有**使用通用 `Gateway`,它们各自实现了网关类(`Topic5Gateway` / `Topic6Gateway` / `TopicxGateway`)。
+
+#### 11.10.2 一条消息怎么被分流
+
+共同前置:`should_handle`(文本非空;私聊,或群聊中 @ 了 bot)→ 用 `event_id` 去重 → 白名单校验。
+
+**通用 `Gateway._process`**(分析师)——纯字符串匹配,不经过模型:
+
+| 输入 | 行为 | 是否产生 session 事件 |
+|---|---|---|
+| `/new` | `DELETE conversations` 中该键的行,下条消息建新 session | 否 |
+| `/whoami` | 回复当前岗位 | 否 |
+| `/remember <内容>` | 写用户专属 Memory Store | 否 |
+| `/role <描述>` | 更新岗位缓存 | 否 |
+| `/stop`(分析师分支新增) | **不进串行队列**,向正在运行的 session 发中断,等待确认 | 有(`user.interrupt`) |
+| 其它文本 | 查 `conversations`:无则建 session 并回"已收到";有则复用;`send_message` 并等到终态,回复最后一条 `agent.message` | 是 |
+
+**`TopicSessionBot`**(数字员工):`is_reset_command` 判 `/new`(会先剥掉开头连续的 `@名字` 再比对),命中则 `sessions` 表删除该键并**立即新建 session**;其它走正常对话,另有 `serial` / `native-queue` 两种执行模式,群聊话题创建后会把 `thread_id` 作为别名绑定到同一 session(`_bind_thread_session`)。
+
+**`Topic6Gateway`**:
+
+| 输入 | 行为 |
+|---|---|
+| `/new` | **取消**当前活跃 job(置 `failed:cancelled_by_user`),停 token 保活与产物同步。语义与通用网关的 `/new` **不同** |
+| `/continue [补充]` | 找会话内最近可续跑的 job,注入"继续"或补充,重订阅进度 |
+| 命中触发词 `parse_trigger`(热点周报 demo / full / skip_sampling) | 创建新 job |
+| 其它 | 回提示,不创建任何记录 |
+
+**`TopicxGateway`**:不判命令。
+
+- 能按 `(chat_id, 话题 / 根消息)` 找到已有 task 且消息在话题内 → 追问,续用原 task;
+- 否则新建 `task_runs` 与 **router session**,由 router 模型判意图并**必须**调用一次 `submit_business_intent`:`topic5`(营销复盘)/ `topic6`(热点周报)/ `unsupported`;
+- `unsupported` 直接成为终态,回复"未创建业务任务",**没有 job、没有业务 session**;
+- 路由工具禁止模型提交 `task_id` / `session_id` / `job_id` / `open_id` / `chat_id` / `lease_token`,身份字段由网关自己填;
+- 停止是卡片按钮(`stop_handler`),不是文本命令(实现未读,仅知状态流转 `stopping → stopped`);
+- topic6 全局单例租约 `topic6_lease`,冲突时 task 为 `busy`。
+
+task 状态:活跃 `routing / routed / authorizing / acquiring / starting / running / wait_hc / paused / stopping / reconcile_required`;终态 `unsupported / stopped / done / failed / busy`。
+
+#### 11.10.3 对排障设计的影响
+
+| # | 发现 | 影响与处理 |
+|---|---|---|
+| 1 | **通用 `Gateway` 与数字员工的 `/new` 都直接删除映射行,无历史表**(`reset_session` / `sessions.reset`) | 用户常见路径是"结果不对 → `/new` → 问刚才为什么错",此时旧 session 在方舟侧还在,**本机已查不到它属于谁**。**必须在排障 Bot 上线前**给两处 reset 加归档(删除前把 `key → session_id` 写入历史表并带归档时间),这是对线上代码的小改 |
+| 2 | 同样叫 `/new`,语义三种:通用网关 = 重置会话;数字员工 = 重置并新建;topic6 = **取消任务** | 排障 Bot 解释用户行为时必须按 bot 区分,不能一概而论 |
+| 3 | `/whoami` `/remember` `/role` 不产生任何 session 事件 | 用户说"我刚才发的命令没反应",**在方舟事件里查不到**,只能查 gateway 日志。这再次说明日志落盘与统一标识是必须项 |
+| 4 | **会话键是否含用户,各 bot 不一致**:通用 `Gateway` 含 `user_open_id`(同群不同人是不同 session);数字员工群聊按话题共享、不含用户;topicx 按话题 / 根消息 | 与你定的"群聊内共享"规则对照:数字员工天然吻合;**通用 `Gateway`(分析师)在同一个群里每个人是独立 session**,按"当前 chat_id 查"就要列出该群全部用户的 session。数据上能做到,但群成员因此能看到同群他人与分析师 Bot 的完整对话——**已按你的决策接受,需在文档中明示这一后果** |
+| 5 | 数字员工的鉴权优先用 `user_id`(`is_authorized`),并已有 `session_user_tokens` / `session_vaults` 等表;通用 `Gateway` 只用 `user_open_id` 白名单 | 私聊"自己名下"的判断,数字员工有条件用 `user_id`;通用 `Gateway` 的 `conversations` 键里只有 `user_open_id`,**没有 `user_id`**。排障 Bot 是独立应用,`open_id` 不通用,所以通用 `Gateway` 的私聊鉴权现在**做不了**,需要补记录 `user_id` |
+| 6 | 数字员工是独立实现,有自己的库(`topic_bot_sessions.db`)与表结构 | `resolve_target` 需要为它**单独写 adapter**,不能复用通用 `conversations` 的读法 |
+| 7 | 通用 `Gateway` 里 `/stop` 登记在内存集合 `_active_runs` / `_stopped_runs` | 中断状态**只存在于进程内存**,重启即丢;排障时无法从库里判断"这轮是被用户主动中断还是失败",只能看方舟事件里的 `user.interrupt` |
+
+#### 11.10.4 adapter 覆盖现状与待办
+
+| bot / 存储 | P0 是否覆盖 | 待办 |
+|---|---|---|
+| topicx `task_runs` | 是 | — |
+| topic5 / topic6 `pipeline_jobs` | 是 | — |
+| 通用 `Gateway` `conversations`(分析师) | **否** | 新增 adapter;配合归档历史表读历史 session |
+| 数字员工 `sessions` | **否** | 新增 adapter |
+| 数字员工 / 通用 `Gateway` 的 `/new` 归档 | 不存在 | 改 `reset_session` / `sessions.reset`,删除前归档 |
+| 通用 `Gateway` 记录 `user_id` | 不存在 | `conversations` 补列并在 `save_session` 写入 |
+
+#### 11.10.5 仍未核实
+
+- `stop_handler.py`(534 行)的实现细节,仅确认状态名;
+- topic5 单入口 `Topic5Gateway` 的命令分流(只确认类存在,未读 `_process`);
+- 分析师的会话键是否因 `scope_output_by_user_topic=True` 而改变:读到该参数只影响**产物存储路径**(按分析师 / Topic 拆分),不影响 `conversation_key`,但"Topic"的来源没有读。
