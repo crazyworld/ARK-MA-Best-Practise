@@ -16,11 +16,10 @@ from arkagent.paths import get_case_paths
 from arkagent.store import GatewayStore
 
 from .config import DiagnoseConfig
-from .tools import DiagnoseTools
+from .tools import DiagnoseTools, Scope
 
 log = logging.getLogger("arkagent.case.diagnose")
 
-PRIVATE_CHAT_REPLY = "排障 Bot 目前只支持在群聊中使用:请把我拉进需要排查的群,并 @我 提问。"
 
 
 def build_sources(db_paths: dict) -> dict:
@@ -51,18 +50,14 @@ class DiagnoseGateway:
     def accept(self, message: IncomingMessage) -> bool:
         if not message.text.strip():
             return False
-        if message.chat_type == "p2p":
-            self._loop.call_soon_threadsafe(
-                lambda: asyncio.ensure_future(self._reply(message.chat_id, PRIVATE_CHAT_REPLY))
-            )
-            return True
-        if not message.mentioned_bot:
+        # 私聊直接响应;群聊必须 @ 了 bot。
+        if message.chat_type != "p2p" and not message.mentioned_bot:
             return False
         if not self._store.claim_event(message.event_id):
             return False
-        # 同一个群内串行,避免并发问答互相覆盖同一个排障会话。
+        # 同一个会话内串行,避免并发问答互相覆盖同一个排障会话。
         self._loop.call_soon_threadsafe(
-            lambda: self._queue.enqueue(message.chat_id, lambda: self._run(message))
+            lambda: self._queue.enqueue(_queue_key(message), lambda: self._run(message))
         )
         return True
 
@@ -79,10 +74,12 @@ class DiagnoseGateway:
         if self._authorized and message.user_open_id not in self._authorized:
             await self._reply(message.chat_id, "当前用户未授权,请联系管理员。")
             return
-        chat_id = message.chat_id  # 范围只取自飞书消息本身
+        chat_id = message.chat_id
+        # 范围只取自飞书消息本身,由网关绑定;工具参数里没有这些字段,模型无法改。
+        scope = Scope(chat_id=chat_id, chat_type=message.chat_type, user_id=message.user_id)
 
         async def handle_tool(name: str, arguments: dict) -> tuple[str, bool]:
-            result, is_error = await self._tools.call(chat_id, name, arguments)
+            result, is_error = await self._tools.call(scope, name, arguments)
             return json.dumps(result, ensure_ascii=False), is_error
 
         # 每个群一个排障会话;/new 之外不主动重置,上下文里保留着此前识别的任务,便于追问。
@@ -104,11 +101,18 @@ class DiagnoseGateway:
         await self._reply(chat_id, result_to_reply(result))
 
 
+def _queue_key(message: IncomingMessage) -> str:
+    # 私聊按人串行,群聊按群串行。
+    return f"p2p:{message.user_id or message.user_open_id}" if message.chat_type == "p2p" else message.chat_id
+
+
 def _key(message: IncomingMessage):
     from arkagent.store import ConversationKey
 
-    # 群内共享一个排障会话:不带 user_open_id,与\"群聊内皆共享\"一致。
-    return ConversationKey(message.tenant_key, message.chat_id, message.thread_id, "")
+    # 群聊:群内共享一个排障会话(不带用户,与"群聊内皆共享"一致)。
+    # 私聊:按人一个排障会话,避免不同人的私聊上下文串在一起。
+    user = (message.user_id or message.user_open_id) if message.chat_type == "p2p" else ""
+    return ConversationKey(message.tenant_key, message.chat_id, message.thread_id, user)
 
 
 def build_gateway(config: DiagnoseConfig, ark, sender, loop: asyncio.AbstractEventLoop):

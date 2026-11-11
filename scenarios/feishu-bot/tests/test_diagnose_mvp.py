@@ -16,8 +16,8 @@ from arkagent.observability.detail import MAX_DETAIL_CHARS, get_step_detail
 from arkagent.observability.diagnose import STUCK_TOOL_MS, diagnose
 from arkagent.observability.events import parse_session_events
 from arkagent.observability.model import Trace
-from diagnose.gateway import DiagnoseGateway, PRIVATE_CHAT_REPLY, build_sources
-from diagnose.tools import DiagnoseTools
+from diagnose.gateway import DiagnoseGateway, build_sources
+from diagnose.tools import DiagnoseTools, Scope
 
 
 def ev(etype, sec, eid=None, **fields):
@@ -27,6 +27,11 @@ def ev(etype, sec, eid=None, **fields):
 
 def text(body):
     return [{"type": "text", "text": body}]
+
+
+def G(chat_id):
+    """群聊范围。"""
+    return Scope(chat_id=chat_id, chat_type="group")
 
 
 FAILED_EVENTS = [
@@ -84,62 +89,60 @@ def tools(tmp_path):
 
 # ---- 权限:只能看当前群 ---------------------------------------------------
 async def test_list_only_returns_current_chat(tools):
-    result, err = await tools.call("oc_A", "list_recent_tasks", {})
+    result, err = await tools.call(G("oc_A"), "list_recent_tasks", {})
     assert not err
     assert [t["id"] for t in result["tasks"]] == ["job_mine"]
     assert "secret failure" not in json.dumps(result, ensure_ascii=False)
 
 
 async def test_cannot_diagnose_task_from_another_chat(tools):
-    result, err = await tools.call("oc_A", "diagnose_task", {"task_id": "job_other"})
+    result, err = await tools.call(G("oc_A"), "diagnose_task", {"task_id": "job_other"})
     assert not err and result["found"] is False
     # 通过 session id 也不行
-    result, _ = await tools.call("oc_A", "diagnose_task", {"task_id": "sesn-other"})
+    result, _ = await tools.call(G("oc_A"), "diagnose_task", {"task_id": "sesn-other"})
     assert result["found"] is False
     assert "group B" not in json.dumps(result, ensure_ascii=False)
 
 
 async def test_not_found_message_does_not_reveal_existence(tools):
-    other, _ = await tools.call("oc_A", "diagnose_task", {"task_id": "job_other"})
-    missing, _ = await tools.call("oc_A", "diagnose_task", {"task_id": "job_nope"})
+    other, _ = await tools.call(G("oc_A"), "diagnose_task", {"task_id": "job_other"})
+    missing, _ = await tools.call(G("oc_A"), "diagnose_task", {"task_id": "job_nope"})
     assert other == missing
 
 
 @pytest.mark.parametrize("field", ["chat_id", "open_id", "user_id", "tenant_key"])
 async def test_identity_args_are_rejected(tools, field):
-    result, err = await tools.call("oc_A", "list_recent_tasks", {field: "oc_B"})
+    result, err = await tools.call(G("oc_A"), "list_recent_tasks", {field: "oc_B"})
     assert err and "tasks" not in result
 
 
 async def test_step_detail_session_must_belong_to_task_in_chat(tools):
     # 用本群的 task_id 去取别的群的 session,不能绕过范围
-    result, _ = await tools.call(
-        "oc_A", "get_step_detail",
+    result, _ = await tools.call(G("oc_A"), "get_step_detail",
         {"task_id": "job_mine", "session_id": "sesn-other", "event_id": "me"},
     )
     assert result["found"] is False
-    result, _ = await tools.call(
-        "oc_A", "get_step_detail",
+    result, _ = await tools.call(G("oc_A"), "get_step_detail",
         {"task_id": "job_other", "session_id": "sesn-other", "event_id": "me"},
     )
     assert result["found"] is False
 
 
 async def test_unknown_tool_is_error(tools):
-    _, err = await tools.call("oc_A", "delete_everything", {})
+    _, err = await tools.call(G("oc_A"), "delete_everything", {})
     assert err
 
 
 async def test_default_pick_is_flagged_so_agent_must_confirm(tools):
-    result, _ = await tools.call("oc_A", "diagnose_task", {})
+    result, _ = await tools.call(G("oc_A"), "diagnose_task", {})
     assert result["found"] and result["picked_by_default"] is True
     assert result["task"]["id"] == "job_mine"
-    explicit, _ = await tools.call("oc_A", "diagnose_task", {"task_id": "job_mine"})
+    explicit, _ = await tools.call(G("oc_A"), "diagnose_task", {"task_id": "job_mine"})
     assert explicit["picked_by_default"] is False
 
 
 async def test_empty_chat_has_nothing(tools):
-    result, _ = await tools.call("oc_C", "diagnose_task", {})
+    result, _ = await tools.call(G("oc_C"), "diagnose_task", {})
     assert result["found"] is False
 
 
@@ -162,7 +165,7 @@ async def test_topicx_task_and_its_job_are_not_double_counted(tmp_path):
         build_sources({"topicx": str(ctl_db), "topic6": str(job_db)}),
         FakeArk({"sesn-r": [], "sesn-mine": FAILED_EVENTS}),
     )
-    result, _ = await tools.call("oc_A", "list_recent_tasks", {})
+    result, _ = await tools.call(G("oc_A"), "list_recent_tasks", {})
     assert [t["id"] for t in result["tasks"]] == ["task_1"]
 
 
@@ -238,7 +241,7 @@ class _Msg:
     def __init__(self, **kw):
         self.text, self.chat_type, self.mentioned_bot = "为什么失败", "group", True
         self.event_id, self.chat_id, self.thread_id = "e1", "oc_A", ""
-        self.user_open_id, self.tenant_key = "ou_1", "t"
+        self.user_open_id, self.tenant_key, self.user_id = "ou_1", "t", "u1"
         self.__dict__.update(kw)
 
 
@@ -273,13 +276,80 @@ def test_group_without_mention_is_ignored():
     assert gw.accept(_Msg(mentioned_bot=False)) is False and not loop.calls
 
 
-def test_private_chat_gets_guidance_and_nothing_else():
+def test_private_chat_is_accepted_without_mention():
     gw, loop = make_gateway()
-    assert gw.accept(_Msg(chat_type="p2p")) is True and len(loop.calls) == 1
-    assert "群聊" in PRIVATE_CHAT_REPLY
+    assert gw.accept(_Msg(chat_type="p2p", mentioned_bot=False, user_id="u1")) is True
+    assert len(loop.calls) == 1
 
 
 def test_duplicate_event_is_dropped():
     gw, loop = make_gateway()
     assert gw.accept(_Msg()) is True
     assert gw.accept(_Msg()) is False
+
+
+# ---- 私聊:只能看自己名下、发生在私聊里的任务(按租户级 user_id) -------------------
+def make_topicx(tmp_path, rows):
+    ctl_db, job_db = tmp_path / "c.db", tmp_path / "t6.db"
+    make_db(str(job_db))
+    ctl = sqlite3.connect(ctl_db)
+    ctl.executescript(
+        """
+        CREATE TABLE task_runs (task_id TEXT PRIMARY KEY, chat_id TEXT, user_id TEXT NOT NULL DEFAULT '',
+            chat_type TEXT NOT NULL DEFAULT '', router_session_id TEXT, business_session_id TEXT,
+            scenario TEXT, mode TEXT, route_reason TEXT, business_job_id TEXT, status TEXT, last_error TEXT,
+            created_at INTEGER, finished_at INTEGER);
+        CREATE TABLE control_events (id INTEGER PRIMARY KEY AUTOINCREMENT, event_type TEXT, task_id TEXT, created_at INTEGER);
+        """
+    )
+    for r in rows:
+        ctl.execute("INSERT INTO task_runs (task_id, chat_id, user_id, chat_type, router_session_id, business_session_id,"
+                    " scenario, mode, route_reason, business_job_id, status, last_error, created_at)"
+                    " VALUES (?,?,?,?,?,?, 'topic6','demo','r','',?, '', 1000)", r)
+    ctl.commit()
+    ctl.close()
+    ark = FakeArk({"sesn-r": [], "sesn-b": FAILED_EVENTS})
+    return DiagnoseTools(build_sources({"topicx": str(ctl_db), "topic6": str(job_db)}), ark)
+
+
+def P(user_id, chat_id="oc_p_alice"):
+    return Scope(chat_id=chat_id, chat_type="p2p", user_id=user_id)
+
+
+async def test_private_chat_sees_only_own_private_tasks(tmp_path):
+    tools = make_topicx(tmp_path, [
+        ("task_alice_dm", "oc_p_alice", "u_alice", "p2p", "sesn-r", "sesn-b", "failed"),
+        ("task_bob_dm", "oc_p_bob", "u_bob", "p2p", "sesn-r", "sesn-b", "failed"),
+        ("task_alice_grp", "oc_group", "u_alice", "group", "sesn-r", "sesn-b", "failed"),
+    ])
+    listed, _ = await tools.call(P("u_alice"), "list_recent_tasks", {})
+    # 只有 alice 本人、且发生在私聊里的那条;她在群里发起的不算"私聊名下"
+    assert [t["id"] for t in listed["tasks"]] == ["task_alice_dm"]
+    other, _ = await tools.call(P("u_alice"), "diagnose_task", {"task_id": "task_bob_dm"})
+    assert other["found"] is False
+    grp, _ = await tools.call(P("u_alice"), "diagnose_task", {"task_id": "task_alice_grp"})
+    assert grp["found"] is False
+
+
+async def test_private_chat_without_user_id_cannot_query_anything(tmp_path):
+    tools = make_topicx(tmp_path, [("task_x", "oc_p_x", "", "p2p", "sesn-r", "sesn-b", "failed")])
+    for uid in ("", "u_alice"):
+        result, err = await tools.call(P(uid, "oc_p_x"), "diagnose_task", {"task_id": "task_x"})
+        assert not err and result["found"] is False
+    msg, _ = await tools.call(P(""), "list_recent_tasks", {})
+    assert "user ID" in msg["message"]
+
+
+async def test_group_scope_ignores_who_asked(tmp_path):
+    tools = make_topicx(tmp_path, [
+        ("task_1", "oc_group", "u_alice", "group", "sesn-r", "sesn-b", "failed"),
+        ("task_2", "oc_group", "u_bob", "group", "sesn-r", "sesn-b", "failed"),
+    ])
+    listed, _ = await tools.call(G("oc_group"), "list_recent_tasks", {})
+    assert {t["id"] for t in listed["tasks"]} == {"task_1", "task_2"}  # 群内共享,不区分发起人
+
+
+async def test_group_cannot_see_private_task_even_in_same_chat_id_shape(tmp_path):
+    tools = make_topicx(tmp_path, [("task_dm", "oc_p_alice", "u_alice", "p2p", "sesn-r", "sesn-b", "failed")])
+    result, _ = await tools.call(G("oc_group"), "diagnose_task", {"task_id": "task_dm"})
+    assert result["found"] is False

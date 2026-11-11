@@ -160,6 +160,8 @@ class TopicxSource:
             finished_at_ms=_secs_to_ms(row["finished_at"]),
             last_error=row["last_error"] or "",
             chat_id=_get(row, "chat_id"),
+            user_id=_get(row, "user_id"),
+            chat_type=_get(row, "chat_type"),
             sessions=sessions,
             meta={
                 "mode": row["mode"],

@@ -62,6 +62,11 @@ class TaskRun:
     created_at: int
     updated_at: int
     finished_at: Optional[int]
+    # 发起人的租户级 user_id:open_id 按应用隔离,排障 Bot(独立应用)靠它判断私聊"是不是本人"。
+    # 应用未开通"获取用户 user ID"权限、或升级前创建的任务为空串。
+    user_id: str = ""
+    # p2p | group。排障 Bot 据此区分"私聊只能看本人 / 群聊看本群全部"。升级前创建的为空串。
+    chat_type: str = ""
 
 
 @dataclass(frozen=True)
@@ -84,6 +89,7 @@ class ControlStore:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._create_schema()
+        self._migrate_identity_columns()
         self._protect_files()
 
     def _create_schema(self) -> None:
@@ -147,6 +153,12 @@ class ControlStore:
             """
         )
 
+    def _migrate_identity_columns(self) -> None:
+        cols = {row[1] for row in self._conn.execute("PRAGMA table_info(task_runs)")}
+        for name in ("user_id", "chat_type"):
+            if name not in cols:
+                self._conn.execute(f"ALTER TABLE task_runs ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
+
     def _protect_files(self) -> None:
         for suffix in ("", "-wal", "-shm"):
             path = Path(f"{self._path}{suffix}")
@@ -166,6 +178,8 @@ class ControlStore:
         user_open_id: str,
         request_text: str,
         topic_thread_id: str = "",
+        user_id: str = "",
+        chat_type: str = "",
     ) -> tuple[TaskRun, bool]:
         now = _now()
         task_id = _new_task_id()
@@ -174,8 +188,9 @@ class ControlStore:
                 """
                 INSERT OR IGNORE INTO task_runs (
                     task_id, feishu_event_id, chat_id, root_message_id,
-                    topic_thread_id, user_open_id, request_text, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    topic_thread_id, user_open_id, request_text, created_at, updated_at,
+                    user_id, chat_type
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task_id,
@@ -187,6 +202,8 @@ class ControlStore:
                     request_text,
                     now,
                     now,
+                    user_id,
+                    chat_type,
                 ),
             )
             created = cursor.rowcount == 1
