@@ -57,10 +57,11 @@ ada 现在有 topic5(复盘报告)、topic6(热点周报)两个 topic 能力,由
 | 失败 | `session.error{error.type,message,retry_status}` | 失败样本:3 次模型调用全部 `is_error`,usage 全 0,最终 `retries_exhausted` |
 | 时间 | 每个事件有 `processed_at`(纳秒),整体单调 | 可直接算耗时 |
 
-**不存在的字段**(2026-11-02 复核,事件体字段与上次一致):
+**字段随方舟版本变化(2026-11-12 修正)**:
 
-- `span.model_request_*` 没有模型名,没有 `session_thread_id`,**没有模型调用级 request_id**。
-- 仅约 1/4 事件带 `session_thread_id`。
+- 模型名、模型调用级 request_id:**始终没有**(2026-11-12 复核仍无)。
+- `session_thread_id` 在 `span.model_request_*` 上**因时间而异**:10-16 的 topic6 样本为 0/40,11-11 的 `ada-pm` / 分析师样本全部带(如 18/18),且 `agent.message`、`agent.thinking`、`agent.tool_*` 也都带。**方舟在 10-16 与 11-11 之间改过**,解析不能写死"span 不带线程 id",要按事件里实际有无字段处理。
+- 新增事件 `session.usage`:每轮 `session.status_idle` 之前一条,含 `active_seconds`、input / output / cache token、`server_tool_use`。**是 session 累计值,不是本轮增量**(`ada-pm` 样本第 2 轮 usage=186410,而本轮 span 汇总仅 64089,差额 122321 恰为第 1 轮);统计 token 不得跨轮相加。
 - 响应头 `x-request-id` 只对应"拉事件"这次 HTTP 请求。
 
 **方舟保留期**:官方口径为"session 在 14 天无新事件后被清理"。2026-11-02 复核时 10-14、10-16 的 session 仍可读(已 17~19 天),清理看起来是惰性的,**不可依赖**,事后拉取要尽早落库(P1)。
@@ -155,7 +156,7 @@ adapter 通过参数 / 环境变量取库路径:`TOPICX_CONTROL_DB_PATH`、`TOPI
 
 1. **模型调用级 request_id**:方舟已答复可提供,2026-11-02 复核事件体尚未出现;上线后补 P1 缺口 4。
 2. **方舟事件保留**:官方 14 天,实测偏宽松但不可依赖;P1 落库不宜推迟。
-3. **缓存命中为 0**:需与模型侧确认。
+3. **缓存命中为 0**:仅 topic6 旧样本(10-16)成立;`ada-pm`(11-11)有大量命中,见 §11.11.4。是否因 BYOK 配置不同,需与模型侧确认。
 4. **飞书文档同步**:本文档尚无对应飞书文档;若要对外评审,需另行创建。
 
 ## 9. 变更记录
@@ -164,7 +165,7 @@ adapter 通过参数 / 环境变量取库路径:`TOPICX_CONTROL_DB_PATH`、`TOPI
 |---|---|
 | 2026-11-02 | 初版:落盘现状、验证事实、14 项缺口、P0 设计与分期 |
 | 2026-11-02 | P0 实现:`arkagent/observability/` + `arkagent trace list/show`;`tests/test_observability.py` 20 个用例,全量 582 通过;对真实 job 复验,数值与 §3 一致(40 次模型调用、245.5 万/1.4 万 token、39 次工具全配对、最慢 632s) |
-| 2026-11-12 | 新增 §11.10:读代码核实四类网关的会话键与命令分流(分析师复用通用 `Gateway`;数字员工为独立 `TopicSessionBot`,会话按话题共享);发现 `/new` 删除映射致旧 session 失联、`/new` 三种语义、通用网关缺 `user_id`。同日新增 §11 排障 Bot 方案:权限(私聊本人 / 群聊本群共享)、正文可见、同机部署不考虑分布式、`resolve_target` 识别规则、分层下钻控制模型成本、日志存储取舍;§1 约束改为同机部署 |
+| 2026-11-12 | 新增 §11.11:ada-pm(通用 Gateway、多智能体)与多智能体观测限制;**修正 §3**——`span` 是否带 `session_thread_id` 随方舟版本变化,新版全部带;发现 `session.usage` 为累计值、模型调用失败会被方舟自动重试;子线程窗口内看不到子 Agent 内部事件。同日新增 §11.10:读代码核实四类网关的会话键与命令分流(分析师复用通用 `Gateway`;数字员工为独立 `TopicSessionBot`,会话按话题共享);发现 `/new` 删除映射致旧 session 失联、`/new` 三种语义、通用网关缺 `user_id`。同日新增 §11 排障 Bot 方案:权限(私聊本人 / 群聊本群共享)、正文可见、同机部署不考虑分布式、`resolve_target` 识别规则、分层下钻控制模型成本、日志存储取舍;§1 约束改为同机部署 |
 
 ## 10. P0 已知限制
 
@@ -277,7 +278,7 @@ adapter 通过参数 / 环境变量取库路径:`TOPICX_CONTROL_DB_PATH`、`TOPI
 
 | 网关 | 用它的 case | 会话键(判定"同一个会话") | 库 | 有无 task / job |
 |---|---|---|---|---|
-| 通用 `Gateway`(`arkagent/gateway/orchestrator.py`) | **分析师**(`cases/analyst/gateway.py` 直接 `from arkagent.gateway.orchestrator import Gateway`) | `chat_id : thread_id : user_open_id` | `{case_dir}/gateway.db` 的 `conversations` | 无,只有会话 → session |
+| 通用 `Gateway`(`arkagent/gateway/orchestrator.py`) | **分析师**(`cases/analyst/gateway.py`)、**ada-pm**(`cases/ada-pm/gateway.py`),两者都直接 `from arkagent.gateway.orchestrator import Gateway` | `chat_id : thread_id : user_open_id` | **各 case 一个库**:`~/.arkagent/cases/analyst/gateway.db`、`~/.arkagent/cases/ada-pm/gateway.db` 的 `conversations`(`ada-pm` 不匹配 `topic\d+`,不并入 `topicX` 共享目录) | 无,只有会话 → session;**ada-pm 是多智能体**(1 主 + 4 子,见 §11.11) |
 | `TopicSessionBot`(`cases/digital-employee/digital_employee.py`,1273 行,独立实现) | 数字员工 | 群聊:`tenant : chat_id : (thread_id 或 message_id)`,**不含用户**;私聊:`tenant : chat_id : ""` | `{case_dir}/topic_bot_sessions.db` 的 `sessions` | 无 |
 | `Topic6Gateway` | topic6 单入口 | job 按 `(chat_id, thread_id, user_open_id)` 找活跃任务 | `data/topic6_pipeline.db` 的 `pipeline_jobs` | 无 task,直接 job |
 | `TopicxGateway` | topicx(统一入口,topic5 / topic6) | task 按 `(chat_id, topic_thread_id)` 或 `(chat_id, root_message_id)` 找 | `topicx_control.db` 的 `task_runs` + 各 topic 的 `pipeline_jobs` | **有**:每条受理的消息一条 task;意图命中才有 job |
@@ -339,7 +340,7 @@ task 状态:活跃 `routing / routed / authorizing / acquiring / starting / runn
 |---|---|---|
 | topicx `task_runs` | 是 | — |
 | topic5 / topic6 `pipeline_jobs` | 是 | — |
-| 通用 `Gateway` `conversations`(分析师) | **否** | 新增 adapter;配合归档历史表读历史 session |
+| 通用 `Gateway` `conversations`(分析师、ada-pm) | **否** | 新增 adapter,**支持多个库路径**(每个 case 一个库,不能假定只有一个);配合归档历史表读历史 session |
 | 数字员工 `sessions` | **否** | 新增 adapter |
 | 数字员工 / 通用 `Gateway` 的 `/new` 归档 | 不存在 | 改 `reset_session` / `sessions.reset`,删除前归档 |
 | 通用 `Gateway` 记录 `user_id` | 不存在 | `conversations` 补列并在 `save_session` 写入 |
@@ -349,3 +350,43 @@ task 状态:活跃 `routing / routed / authorizing / acquiring / starting / runn
 - `stop_handler.py`(534 行)的实现细节,仅确认状态名;
 - topic5 单入口 `Topic5Gateway` 的命令分流(只确认类存在,未读 `_process`);
 - 分析师的会话键是否因 `scope_output_by_user_topic=True` 而改变:读到该参数只影响**产物存储路径**(按分析师 / Topic 拆分),不影响 `conversation_key`,但"Topic"的来源没有读。
+
+### 11.11 ada-pm 与多智能体的观测限制(2026-11-12 实测)
+
+#### 11.11.1 ada-pm 是什么
+
+- 网关:通用 `Gateway`(与分析师同类),`agent_id` 指向主 Agent `pm`,`pm` 通过 `multiagent` 字段引用 4 个子 Agent(t / g / s / validator),另挂 5 个只读知识库;BYOK(请求头经 `extra_headers` 传入)。
+- 代码位于 `feat/analyst-bot` 工作区(**未提交**),不在 `feat/trace-p0` 基线上。
+
+#### 11.11.2 实测样本与结论
+
+样本:`ada-pm` 4 个 session(11-11)、分析师 2 个 session、topic6 旧样本 1 个(10-16,含 2 个并发子线程)。
+
+| 结论 | 依据 |
+|---|---|
+| **`ada-pm` 现存 4 个 session 里没有真正的多线程**:`session.thread_created` 共 0 次,每个 session 只有主线程 `topic-lab-ada-pm-pm` | 事件原文统计 |
+| 记忆里"冒烟时 `thread_created` 出现 3 次"对应的 session 已查不到,**并发子线程在 ada-pm 上没有可验证样本** | 4 个 session 均无 |
+| 唯一的多线程样本(topic6 10-16):2 个 `annotator` 子线程在同一时刻(+169.6s)被拉起,各运行约 13~14 秒,**与主线程运行窗口重叠** | 事件时间线 |
+| **子线程窗口内没有任何模型调用或工具事件**:主 session 只看得到"派发 `agent.thread_message_sent`"与"回传 `agent.thread_message_received`" | 子线程窗口内模型 / 工具事件 0 个 |
+
+第 4 条是**方舟事件流本身的粒度限制**,不是解析问题:**多智能体下,主 session 的事件流看不到子 Agent 内部的模型调用、工具调用与报错**。排障 Bot 对子 Agent 内部只能给出"派发了什么、回传了什么、耗时多久",无法下钻。
+
+> 待验证:子 Agent 自己的 session 是否可单独拉取。目前没有证据表明子线程对应独立的 session id(`session_thread_id` 形如 `sthr-…`,与 `sesn-…` 不同),**未验证**,不要假定能拉到。
+
+#### 11.11.3 线程归属规则(取代此前"一律推断")
+
+1. 事件自带 `session_thread_id` 时直接使用,标为**直接观测**。
+2. 事件没有该字段(旧版方舟数据)时,才按 `session.thread_status_*` 的活跃区间推断,标为**推断**;同时存在多个活跃线程则留空——topic6 样本证明并发子线程真实存在。
+3. 线程显示名取自同 `session_thread_id` 的 `session.thread_*` 事件的 `agent_name`。
+
+#### 11.11.4 统计与判定口径
+
+| 项 | 口径 |
+|---|---|
+| token 汇总 | 以 `span.model_request_end` 的 `model_usage` 汇总为准;`session.usage` 是累计值,**只用于对账,不可跨轮相加** |
+| 模型调用失败 | **不等于会话失败**。`ada-pm` 样本出现 4 次 `is_error=true` 且 input=0 的调用(耗时 0.9~2.3 秒),会话仍正常结束,说明方舟会自动重试。判定:失败后重试成功 = 警告;`retry_status=exhausted` / `stop_reason=retries_exhausted` = 异常 |
+| 缓存命中 | 此前"缓存命中为 0"只对 topic6 旧样本成立;`ada-pm` 样本 `cache_read_input_tokens` 有大量命中(如 8610、13896),**§8 第 3 条结论需收窄为"topic6 BYOK 旧样本"** |
+
+#### 11.11.5 对已提交 P0 的影响(待决,未改代码)
+
+`arkagent/observability/events.py` 现在对 `span.model_request_*` 一律推断线程;在新版数据上应优先读事件自带的 `session_thread_id`。另外 `session.usage` 事件目前被忽略,失败调用也未区分"已重试成功"。这些会改变已提交行为,单独评估后再改。
