@@ -33,6 +33,10 @@ def main(argv: list[str] | None = None) -> int:
                 asyncio.run(_init())
         elif command == "update-agent":
             asyncio.run(_update_agent(argv[1:]))
+        elif command == "trace":
+            from .observability.cli import run as run_trace
+
+            return asyncio.run(run_trace(argv[1:]))
         else:
             _print_help()
         return 0
@@ -377,6 +381,7 @@ def _print_help() -> None:
         "  update-agent  用最新的 system prompt/工具配置更新现有 Agent（不重扫码、不新建 bot）\n"
         "                加 --mcp-url <新地址> 可一并换 MCP 公网地址：重建 static_bearer 凭据 + 写回 config.env\n"
         "  doctor        检查配置并验证方舟 Agent\n"
+        "  trace         任务全链路观测:trace list / trace show <id>(详见 docs/OBSERVABILITY_PLAN.md)\n"
         "  run --case topicx  启动 Topic5/Topic6 统一 Gateway"
     )
 
