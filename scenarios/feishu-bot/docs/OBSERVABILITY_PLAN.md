@@ -167,6 +167,8 @@ adapter 通过参数 / 环境变量取库路径:`TOPICX_CONTROL_DB_PATH`、`TOPI
 | 2026-11-02 | P0 实现:`arkagent/observability/` + `arkagent trace list/show`;`tests/test_observability.py` 20 个用例,全量 582 通过;对真实 job 复验,数值与 §3 一致(40 次模型调用、245.5 万/1.4 万 token、39 次工具全配对、最慢 632s) |
 | 2026-11-12 | 新增 §11.11:ada-pm(通用 Gateway、多智能体)与多智能体观测限制;**修正 §3**——`span` 是否带 `session_thread_id` 随方舟版本变化,新版全部带;发现 `session.usage` 为累计值、模型调用失败会被方舟自动重试;子线程窗口内看不到子 Agent 内部事件。同日新增 §11.10:读代码核实四类网关的会话键与命令分流(分析师复用通用 `Gateway`;数字员工为独立 `TopicSessionBot`,会话按话题共享);发现 `/new` 删除映射致旧 session 失联、`/new` 三种语义、通用网关缺 `user_id`。同日新增 §11 排障 Bot 方案:权限(私聊本人 / 群聊本群共享)、正文可见、同机部署不考虑分布式、`resolve_target` 识别规则、分层下钻控制模型成本、日志存储取舍;§1 约束改为同机部署 |
 
+| 2026-11-12 | MVP 之后补三项:**私聊**(租户级 user_id,Scope 收敛权限)、**/new 归档**(session_history,通用 Gateway 与数字员工)、**session 日志落飞书文档**(bot 身份、继承文件夹权限、失败不外溢) |
+
 ## 10. P0 已知限制
 
 - 工具归类是启发式:多行 shell(`for` 循环、嵌套 heredoc)可能归到 `for` / `mkdir` 等,不影响耗时与计数。
