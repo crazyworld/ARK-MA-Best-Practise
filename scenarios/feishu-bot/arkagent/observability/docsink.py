@@ -112,7 +112,39 @@ class DocStore:
         for name, ddl in (("checked_at", "INTEGER NOT NULL DEFAULT 0"), ("idle_rounds", "INTEGER NOT NULL DEFAULT 0")):
             if name not in cols:
                 self._db.execute(f"ALTER TABLE session_docs ADD COLUMN {name} {ddl}")
+        # 没有文档的 session 的调度状态。session_docs 每行必须有 doc_token,装不下"已确认在回看窗口外"
+        # "已被方舟清理"这类状态;放在 session_docs 里还会把"文档记录"和"调度状态"搅在一起。
+        self._db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS session_sched (
+                session_id TEXT PRIMARY KEY,
+                state TEXT NOT NULL,             -- outside_window | purged
+                until INTEGER NOT NULL,          -- 在这个时间之前不要再检查;0 = 不再检查
+                updated_at INTEGER NOT NULL
+            )
+            """
+        )
         self._db.commit()
+
+    # ---- 没有文档的 session 的调度状态 ----
+    def sched_state(self, session_id: str) -> Optional[tuple[str, int]]:
+        with self._lock:
+            row = self._db.execute("SELECT state, until FROM session_sched WHERE session_id = ?", (session_id,)).fetchone()
+        return (row[0], row[1]) if row else None
+
+    def set_sched(self, session_id: str, state: str, until: int) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO session_sched (session_id, state, until, updated_at) VALUES (?,?,?,?) "
+                "ON CONFLICT(session_id) DO UPDATE SET state=excluded.state, until=excluded.until, updated_at=excluded.updated_at",
+                (session_id, state, until, int(self._clock())),
+            )
+            self._db.commit()
+
+    def clear_sched(self, session_id: str) -> None:
+        with self._lock:
+            self._db.execute("DELETE FROM session_sched WHERE session_id = ?", (session_id,))
+            self._db.commit()
 
     def get(self, session_id: str) -> Optional[DocRecord]:
         with self._lock:
@@ -198,7 +230,7 @@ class SessionDocSink:
             return None
 
     async def publish_new(
-        self, session_id: str, new_events: list[dict], *, title: str, first_round: int = 1
+        self, session_id: str, new_events: list[dict], *, title: str, first_round: int = 1, header: str = ""
     ) -> Optional[str]:
         """写入**已经是增量**的事件(调用方保证它们都在已记录的最后事件之后,且按时间升序)。**不抛异常**。
 
@@ -212,7 +244,7 @@ class SessionDocSink:
                 if not text:
                     return record.doc_url if record else None
                 if record is None:
-                    record = await self._create(session_id, title, text)
+                    record = await self._create(session_id, title, header + text)   # 信息卡只在首批
                 else:
                     await self._append(record.doc_token, text)
                 self._store.advance(session_id, last_id, last_ms, last_ns, rounds)

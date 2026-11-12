@@ -166,7 +166,9 @@ def build_gateway(config: DiagnoseConfig, ark, sender, loop: asyncio.AbstractEve
             SyncConfig(
                 interval_s=config.doc_sync_interval_s,
                 lookback_days=config.doc_lookback_days,
-                max_per_cycle=config.doc_max_per_cycle,
+                max_writes_per_cycle=config.doc_max_writes_per_cycle,
+                check_concurrency=config.doc_check_concurrency,
+                cycle_budget_s=config.doc_cycle_budget_s,
             ),
         )
     return DiagnoseGateway(config, store, ark, reply, loop, tools, scheduler)

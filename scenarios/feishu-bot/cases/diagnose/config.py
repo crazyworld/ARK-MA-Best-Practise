@@ -46,7 +46,9 @@ class DiagnoseConfig:
     doc_parent_token: str = ""
     doc_sync_interval_s: int = 120
     doc_lookback_days: int = 7
-    doc_max_per_cycle: int = 20
+    doc_max_writes_per_cycle: int = 10
+    doc_check_concurrency: int = 4
+    doc_cycle_budget_s: int = 90
     doc_db_path: str = ""
 
 
@@ -100,6 +102,8 @@ def load_case_config(env: Optional[Mapping[str, str]] = None) -> DiagnoseConfig:
         doc_parent_token=(environ.get("SESSION_DOC_PARENT_TOKEN") or "").strip(),
         doc_sync_interval_s=_positive(environ.get("SESSION_DOC_INTERVAL_S"), 120, "SESSION_DOC_INTERVAL_S"),
         doc_lookback_days=_positive(environ.get("SESSION_DOC_LOOKBACK_DAYS"), 7, "SESSION_DOC_LOOKBACK_DAYS"),
-        doc_max_per_cycle=_positive(environ.get("SESSION_DOC_MAX_PER_CYCLE"), 20, "SESSION_DOC_MAX_PER_CYCLE"),
+        doc_max_writes_per_cycle=_positive(environ.get("SESSION_DOC_MAX_WRITES_PER_CYCLE"), 10, "SESSION_DOC_MAX_WRITES_PER_CYCLE"),
+        doc_check_concurrency=_positive(environ.get("SESSION_DOC_CHECK_CONCURRENCY"), 4, "SESSION_DOC_CHECK_CONCURRENCY"),
+        doc_cycle_budget_s=_positive(environ.get("SESSION_DOC_CYCLE_BUDGET_S"), 90, "SESSION_DOC_CYCLE_BUDGET_S"),
         doc_db_path=(environ.get("SESSION_DOC_DB_PATH") or "").strip(),
     )

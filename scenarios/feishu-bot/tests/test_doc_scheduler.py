@@ -101,7 +101,7 @@ async def test_purged_last_event_returns_all_visible_events():
 
 
 # ---- 调度 ------------------------------------------------------------------
-CFG = SyncConfig(interval_s=120, max_per_cycle=2)
+CFG = SyncConfig(interval_s=120, max_writes_per_cycle=2)
 NOW = 10_000_000.0   # 测试时钟(秒);session 的 started_at_ms 要相对它,否则会被 7 天回看窗口正确地丢掉
 
 
@@ -207,10 +207,14 @@ async def test_one_broken_session_does_not_block_others(tmp_path):
     assert stats["failed"] == 1 and stats["written"] == 1
 
 
-async def test_session_outside_lookback_window_is_skipped_until_it_has_a_record(tmp_path):
-    old = ref("old", started=1)                                         # 远早于回看窗口(1970 年)
-    sched, *_ = make(tmp_path, [old], {"old": [ev(1, "o1")]})
-    assert (await sched.run_once())["candidates"] == 0
+async def test_session_outside_lookback_window_is_not_written(tmp_path):
+    # 窗口由**事件流**的最后一个事件时间判断,不由库里的 started_at 判断:
+    # 库里写"刚创建",事件流里却是 30 天前就停了的 → 不写
+    event_epoch = 1_792_132_000.0                                       # ev() 的 2026-10-16 事件
+    old = ref("old", started=int(event_epoch * 1000))
+    sched, store, api, ark, now = make(tmp_path, [old], {"old": done([ev(1, "o1")], sec=2)}, now=[event_epoch + 30 * 86400])
+    stats = await sched.run_once()
+    assert stats["written"] == 0 and api.calls == [] and store.get("old") is None
 
 
 async def test_already_synced_long_running_session_is_followed_beyond_the_window(tmp_path):

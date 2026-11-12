@@ -40,6 +40,9 @@ class Pull:
     events: list[dict]  # 升序(旧→新),只含 last_event_id 之后的新事件
     complete: bool = True  # False = 翻到页数上限仍没追上已同步位置,本次结果不可用,下个周期重来
     fell_back: bool = False  # True = 倒序自检未通过,已退回全量拉取
+    # 该 session **最新**一个事件的 processed_at(原样字符串);没有任何事件为空串。
+    # 用于"回看窗口"判断:倒序第一页的第一条就是它,所以窗口判断不必再单独发请求。
+    newest_at: str = ""
 
 
 class DescOrderUnreliable(Exception):
@@ -60,7 +63,8 @@ async def pull_new_events(
     except DescOrderUnreliable as error:
         log.warning("倒序拉取自检未通过,退回全量 session=%s: %s", session_id, error)
         full = await _pull_full(fetch, session_id)
-        return Pull(_after(full, last_event_id), fell_back=True)
+        newest = max((str(e.get("processed_at") or "") for e in full), key=ts_ns, default="")
+        return Pull(_after(full, last_event_id), fell_back=True, newest_at=newest)
 
 
 async def _pull_desc(
@@ -69,26 +73,29 @@ async def _pull_desc(
     collected: list[dict] = []  # 新→旧
     seen_cursors: set[str] = set()
     page = ""
+    newest_at = ""
     for _ in range(max_pages):
         query = {"limit": str(PAGE_SIZE), "order": "desc", **({"page": page} if page else {})}
         payload = await fetch(f"/sessions/{quote(session_id, safe='')}/events?{urlencode(query)}")
         batch = [e for e in (payload.get("data") or []) if isinstance(e, dict)]
         _check_desc(batch)
+        if not newest_at and batch:
+            newest_at = str(batch[0].get("processed_at") or "")
         for event in batch:
             if last_event_id and event.get("id") == last_event_id:
-                return Pull(_oldest_first(collected))  # 追上了已同步位置
+                return Pull(_oldest_first(collected), newest_at=newest_at)  # 追上了已同步位置
             collected.append(event)
         next_page = str(payload.get("next_page") or "")
         if not next_page:
             # 翻到最旧一页都没遇到 last_event_id:首次(无记录)是正常的;有记录则说明那个事件已不存在
             # (被清理),此时 collected 是全部可见事件,调用方按时间去重,见 SessionSyncer。
-            return Pull(_oldest_first(collected))
+            return Pull(_oldest_first(collected), newest_at=newest_at)
         if next_page in seen_cursors:
             raise DescOrderUnreliable("翻页游标没有推进")
         seen_cursors.add(next_page)
         page = next_page
     # 到上限还没追上:collected 只是最新的一段,缺中间部分,不能写(顺序会断)。放弃本周期,下次重来。
-    return Pull([], complete=False)
+    return Pull([], complete=False, newest_at=newest_at)
 
 
 def _check_desc(batch: list[dict]) -> None:

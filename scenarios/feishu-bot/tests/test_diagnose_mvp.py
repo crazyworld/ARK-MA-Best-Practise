@@ -578,7 +578,7 @@ def test_doc_sync_is_off_unless_a_parent_node_is_configured(tmp_path):
     base = _cfg_env(tmp_path, TOPIC6_PIPELINE_DB_PATH=str(db))
     assert load_case_config(base).doc_parent_token == ""
     on = load_case_config({**base, "SESSION_DOC_PARENT_TOKEN": " wikcnX ", "SESSION_DOC_INTERVAL_S": "60"})
-    assert (on.doc_parent_token, on.doc_sync_interval_s, on.doc_lookback_days, on.doc_max_per_cycle) == ("wikcnX", 60, 7, 20)
+    assert (on.doc_parent_token, on.doc_sync_interval_s, on.doc_lookback_days, on.doc_max_writes_per_cycle, on.doc_check_concurrency, on.doc_cycle_budget_s) == ("wikcnX", 60, 7, 10, 4, 90)
 
 
 @pytest.mark.parametrize("raw", ["0", "-5", "abc"])
