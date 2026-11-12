@@ -1,4 +1,4 @@
-"""session 日志落飞书文档:渲染、幂等、失败不外溢、钩子不影响回复。lark-cli 用假的 runner 代替。"""
+"""session 日志落飞书文档:渲染、幂等、失败不外溢、钩子不影响回复。lark-cli 用假的 api 代替。"""
 import asyncio
 import json
 
@@ -28,21 +28,23 @@ EVENTS = [
 ]
 
 
-class FakeRunner:
+class FakeApi:
+    """记录 (method, path, body)。create 返回文档 id,append 返回 ok。"""
+
     def __init__(self, fail=False):
         self.calls, self.fail = [], fail
 
-    async def __call__(self, argv, stdin):
-        self.calls.append((argv, stdin))
+    async def __call__(self, method, path, body):
+        self.calls.append((method, path, body))
         if self.fail:
-            raise RuntimeError("lark-cli boom")
-        if "+create" in argv:
+            raise RuntimeError("飞书接口失败 code=99991672")
+        if method == "POST":
             return {"data": {"document": {"document_id": "doxcnX", "url": "https://x/docx/doxcnX"}}}
         return {"ok": True}
 
 
-def make_sink(tmp_path, runner):
-    return SessionDocSink(DocStore(str(tmp_path / "d.db")), "fldcnPARENT", runner)
+def make_sink(tmp_path, api):
+    return SessionDocSink(DocStore(str(tmp_path / "d.db")), "fldcnPARENT", api)
 
 
 def test_render_shows_body_redacts_secrets_and_skips_noise():
@@ -66,74 +68,81 @@ def test_render_truncates_huge_body():
 
 
 async def test_first_publish_creates_doc_under_parent_then_appends_only_new(tmp_path):
-    runner = FakeRunner()
-    sink = make_sink(tmp_path, runner)
+    api = FakeApi()
+    sink = make_sink(tmp_path, api)
     url = await sink.publish("sesn-1", EVENTS[:3], title="t")
     assert url == "https://x/docx/doxcnX"
-    create_argv = runner.calls[0][0]
-    assert create_argv[:3] == ["docs", "+create", "--as"] and "bot" in create_argv
-    assert create_argv[create_argv.index("--parent-token") + 1] == "fldcnPARENT"
-    assert "帮我做周报" in runner.calls[0][1]
+    method, path, body = api.calls[0]
+    assert (method, path) == ("POST", "/open-apis/docs_ai/v1/documents")
+    assert body["parent_token"] == "fldcnPARENT" and body["format"] == "markdown"
+    assert body["content"].startswith("<title>t</title>") and "帮我做周报" in body["content"]
 
     await sink.publish("sesn-1", EVENTS, title="t")  # 第二轮:只追加新增部分
-    append_argv, append_body = runner.calls[1]
-    assert "+update" in append_argv and "append" in append_argv
-    assert "好的,已完成" in append_body and "帮我做周报" not in append_body
+    method, path, body = api.calls[1]
+    assert (method, path) == ("PUT", "/open-apis/docs_ai/v1/documents/doxcnX")
+    assert body["command"] == "block_insert_after" and body["block_id"] == "-1"   # 文末追加
+    assert "好的,已完成" in body["content"] and "帮我做周报" not in body["content"]
+
+
+async def test_title_is_escaped_so_it_cannot_inject_markup(tmp_path):
+    api = FakeApi()
+    await make_sink(tmp_path, api).publish("sesn-1", EVENTS[:1], title="a</title><b>x")
+    assert "</title><b>" not in api.calls[0][2]["content"].split("\n")[0]
 
 
 async def test_republishing_same_events_is_idempotent(tmp_path):
-    runner = FakeRunner()
-    sink = make_sink(tmp_path, runner)
+    api = FakeApi()
+    sink = make_sink(tmp_path, api)
     await sink.publish("sesn-1", EVENTS, title="t")
     await sink.publish("sesn-1", EVENTS, title="t")
     await sink.publish("sesn-1", EVENTS, title="t")
-    assert len(runner.calls) == 1            # 重放/重启不重复追加
+    assert len(api.calls) == 1            # 重放/重启不重复追加
 
 
 async def test_progress_survives_restart(tmp_path):
-    runner = FakeRunner()
-    await make_sink(tmp_path, runner).publish("sesn-1", EVENTS, title="t")
-    await make_sink(tmp_path, runner).publish("sesn-1", EVENTS, title="t")  # 新进程,同一个库
-    assert len(runner.calls) == 1
+    api = FakeApi()
+    await make_sink(tmp_path, api).publish("sesn-1", EVENTS, title="t")
+    await make_sink(tmp_path, api).publish("sesn-1", EVENTS, title="t")  # 新进程,同一个库
+    assert len(api.calls) == 1
 
 
 async def test_failure_never_raises_and_progress_not_advanced(tmp_path):
-    bad = FakeRunner(fail=True)
+    bad = FakeApi(fail=True)
     sink = make_sink(tmp_path, bad)
     assert await sink.publish("sesn-1", EVENTS, title="t") is None   # 不抛
-    good = FakeRunner()
+    good = FakeApi()
     sink2 = make_sink(tmp_path, good)
     await sink2.publish("sesn-1", EVENTS, title="t")                 # 失败的那次不算数,可补写
     assert len(good.calls) == 1
 
 
 async def test_missing_document_id_is_a_failure_not_a_crash(tmp_path):
-    class NoId(FakeRunner):
-        async def __call__(self, argv, stdin):
+    class NoId(FakeApi):
+        async def __call__(self, method, path, body):
             return {"data": {}}
 
     assert await make_sink(tmp_path, NoId()).publish("sesn-1", EVENTS, title="t") is None
 
 
 async def test_event_id_purged_falls_back_to_time(tmp_path):
-    runner = FakeRunner()
-    sink = make_sink(tmp_path, runner)
+    api = FakeApi()
+    sink = make_sink(tmp_path, api)
     await sink.publish("sesn-1", EVENTS[:3], title="t")
     # 事件流被截断,上次写到的 id 不在了:按时间只追加更晚的
     await sink.publish("sesn-1", [EVENTS[0], EVENTS[5]], title="t")
-    assert "好的,已完成" in runner.calls[1][1] and "帮我做周报" not in runner.calls[1][1]
+    assert "好的,已完成" in api.calls[1][2]["content"] and "帮我做周报" not in api.calls[1][2]["content"]
 
 
 async def test_nothing_new_means_no_call(tmp_path):
-    runner = FakeRunner()
-    sink = make_sink(tmp_path, runner)
+    api = FakeApi()
+    sink = make_sink(tmp_path, api)
     assert await sink.publish("sesn-1", [ev("agent.thinking", 1, content=text("x"))], title="t") is None
-    assert runner.calls == []
+    assert api.calls == []
 
 
 # ---- 钩子 ------------------------------------------------------------------
 def test_hook_is_off_without_folder_token(tmp_path):
-    assert make_after_turn(object(), case_name="c", db_path=str(tmp_path / "d.db"), env={}) is None
+    assert make_after_turn(object(), case_name="c", db_path=str(tmp_path / "d.db"), app_id="a", app_secret="s", env={}) is None
 
 
 class _Ark:

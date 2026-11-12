@@ -17,7 +17,6 @@ from arkagent.observability.service import EventSource, build_trace
 # 参数里不允许出现的身份字段:出现就拒绝,避免模型试图自己指定范围。
 FORBIDDEN_ARGS = {"chat_id", "open_id", "user_id", "tenant_key"}
 LIST_LIMIT = 10
-MAX_SPANS_PER_TURN = 40
 
 
 @dataclass(frozen=True)
@@ -145,7 +144,7 @@ class DiagnoseTools:
                 "current_phase": trace.meta.get("current_phase"),
             },
             "summary": trace.summary(),
-            "findings": [f.to_dict() for f in findings[:8]],
+            "findings": [f.to_dict() for f in findings],
             "sessions": [
                 {
                     "session_id": n.session_id,
@@ -186,7 +185,7 @@ def _dedupe(refs: list[TraceRef]) -> list[TraceRef]:
 
 
 def _step_index(trace) -> list[dict]:
-    """给 Agent 一份\"哪一步对应哪个事件 id\"的索引,只列失败 / 未完成 / 最慢的,控制体量。"""
+    """给 Agent 一份\"哪一步对应哪个事件 id\"的索引:列出全部失败 / 未完成的步骤,外加每轮最慢的两个工具。不截断。"""
     from arkagent.observability.model import KIND_ERROR, KIND_MODEL, KIND_TOOL, STATUS_ERROR, STATUS_PENDING
 
     rows = []
@@ -209,4 +208,4 @@ def _step_index(trace) -> list[dict]:
                         "duration_ms": s.duration_ms,
                     }
                 )
-    return rows[:MAX_SPANS_PER_TURN]
+    return rows

@@ -171,6 +171,8 @@ adapter 通过参数 / 环境变量取库路径:`TOPICX_CONTROL_DB_PATH`、`TOPI
 
 | 2026-11-12 | 补三项:**adapter**(通用 Gateway 的 conversations / session_history、数字员工的 sessions,含 `/new` 归档的旧会话);**启动权限自检**(读 user_id 需 `contact:user.employee_id:readonly`,实测纠正此前"需 `contact:user.id:readonly`"的判断);长会话的重复警告合并为一条 |
 
+| 2026-11-12 | 修正三处:**自检改用 `application/v6/scopes`**(查应用身份权限,不再需要探测对象;`lark-cli auth check` 只查用户身份);**文档写入改走业务应用自己的 SDK**(lark-cli 只绑定一个应用);**撤销重复警告合并**,按原始场景逐条分析 |
+
 ## 10. P0 已知限制
 
 - 工具归类是启发式:多行 shell(`for` 循环、嵌套 heredoc)可能归到 `for` / `mkdir` 等,不影响耗时与计数。

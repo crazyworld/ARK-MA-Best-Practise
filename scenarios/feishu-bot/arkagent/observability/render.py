@@ -117,4 +117,4 @@ def render_findings(findings) -> str:
     if not findings:
         return "诊断: 没有发现明确异常。"
     icon = {"error": "✗", "warning": "!", "info": "i"}
-    return "诊断:\n" + "\n".join(f"  [{icon[f.level]}] {f.summary}" for f in findings[:8])
+    return "诊断:\n" + "\n".join(f"  [{icon[f.level]}] {f.summary}" for f in findings)

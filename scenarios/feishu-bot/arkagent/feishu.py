@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import time
 from dataclasses import dataclass
 from typing import Optional, Protocol
@@ -299,34 +298,38 @@ def _text_to_post_content(text: str, roster: "Optional[dict[str, str]]" = None) 
 
 @dataclass(frozen=True)
 class ScopeProbe:
-    # ok:能读到 user_id | missing_scope:应用没开通所需权限 | unknown:无法判断(网络、探测对象不存在等)
+    # ok:所需权限都已开通 | missing_scope:有缺失 | unknown:无法判断(网络、接口报错等)
     status: str
     detail: str = ""
     missing: tuple[str, ...] = ()
+    granted: frozenset = frozenset()
 
 
-_SCOPE_RE = re.compile(r"\b(?:contact|im|docs|drive|wiki|docx|auth):[A-Za-z0-9_.:]+")
-_APP_SCOPE_NOT_APPLIED = 99991672
 USER_ID_SCOPE = "contact:user.employee_id:readonly"
 
 
-def classify_user_id_probe(
-    success: bool, code: Optional[int], msg: str, raw: Optional[bytes]
-) -> ScopeProbe:
-    """把通讯录探测响应归类。缺权限时飞书在 msg 里列出缺的 scope。"""
-    if success:
-        try:
-            user = ((json.loads(raw) if raw else {}).get("data") or {}).get("user") or {}
-        except (TypeError, ValueError):
-            user = {}
-        if user.get("user_id"):
-            return ScopeProbe("ok")
-        # 接口成功但没返回 user_id:权限范围里可能没有覆盖到该用户,不能当作\"没开通\"。
-        return ScopeProbe("unknown", "通讯录接口调用成功,但没有返回 user_id(可能该用户不在应用的通讯录权限范围内)")
-    if code == _APP_SCOPE_NOT_APPLIED:
-        listed = tuple(sorted(set(_SCOPE_RE.findall(msg)))) or (USER_ID_SCOPE,)
-        return ScopeProbe("missing_scope", msg[:200], listed)
-    return ScopeProbe("unknown", f"code={code} {msg[:160]}")
+def classify_app_scopes(success: bool, code: Optional[int], msg: str, raw: Optional[bytes]) -> ScopeProbe:
+    """把 application/v6/scopes 的响应整理成\"应用身份已开通集合\"。缺不缺由调用方按自己的需求判断。"""
+    if not success:
+        return ScopeProbe("unknown", f"code={code} {msg[:160]}")
+    try:
+        scopes = ((json.loads(raw) if raw else {}).get("data") or {}).get("scopes") or []
+    except (TypeError, ValueError):
+        return ScopeProbe("unknown", "应用权限接口返回了无法解析的内容")
+    # 每项带 scope_type:tenant=应用身份,user=用户身份。bot 以应用身份调接口,**只认 tenant**;
+    # 同名权限只在 user 下开通、tenant 下没有,调用仍会被拒(2026-11-12 实测:分析师应用的
+    # docx:document:create 只有 user 身份,tenant 下缺失,写文档报 99991672)。
+    granted = frozenset(
+        str(item.get("scope_name"))
+        for item in scopes
+        if isinstance(item, dict)
+        and item.get("scope_name")
+        and item.get("grant_status", 1) == 1
+        and item.get("scope_type") == "tenant"
+    )
+    if not granted:
+        return ScopeProbe("unknown", "没有读到任何应用身份(tenant)权限(可能没有权限查询自身权限,或应用只开了用户身份权限)")
+    return ScopeProbe("ok", granted=granted)
 
 
 class FeishuSender:
@@ -486,34 +489,28 @@ class FeishuSender:
         user = (data or {}).get("user") if isinstance(data, dict) else None
         return str((user or {}).get("name") or "")
 
-    def probe_user_id_scope(self, probe_open_id: str) -> "ScopeProbe":
-        """探测本应用能否读到租户级 user_id:拿一个已知 open_id,按 user_id 类型查通讯录。
+    def list_app_scopes(self) -> "ScopeProbe":
+        """查询**本应用**(应用身份 / tenant)已开通的权限:``GET /open-apis/application/v6/scopes``。
 
-        排障 Bot 判断私聊\"是不是本人\"靠 user_id(open_id 按应用隔离)。读 user_id 需要
-        ``contact:user.employee_id:readonly``(2026-11 实测,飞书服务端会在缺失时直接报出该 scope)。
-        返回而不抛异常:探测失败不应阻断 bot 启动,由调用方决定怎么告知。
+        2026-11 实测:返回本应用已开通的全部 scope(``grant_status=1`` 为已授予),无需任何探测对象;
+        比\"拿用户 id 试探一次\"准确,且能一次列出全部缺失项。注意 ``lark-cli auth check`` 查的是
+        用户身份(user token),不能代替这个检查。返回而不抛异常:自检失败不应阻断 bot 启动。
         """
         from lark_channel import AccessTokenType, BaseRequest, HttpMethod
 
         request = (
             BaseRequest.builder()
             .http_method(HttpMethod.GET)
-            .uri("/open-apis/contact/v3/users/:user_id")
-            .paths({"user_id": probe_open_id})
-            .queries([("user_id_type", "user_id")])
+            .uri("/open-apis/application/v6/scopes")
             .token_types({AccessTokenType.TENANT})
             .build()
         )
         try:
             response = self._client.request(request)
         except Exception as error:  # noqa: BLE001 - 网络等问题,不是权限结论
-            return ScopeProbe("unknown", f"探测请求失败:{error}")
-        return classify_user_id_probe(
-            response.success(),
-            getattr(response, "code", None),
-            getattr(response, "msg", "") or "",
-            response.raw.content if getattr(response, "raw", None) else None,
-        )
+            return ScopeProbe("unknown", f"查询应用权限失败:{error}")
+        raw = response.raw.content if getattr(response, "raw", None) else None
+        return classify_app_scopes(response.success(), getattr(response, "code", None), getattr(response, "msg", "") or "", raw)
 
     def resolve_operator_name(
         self, open_id: str, chat_id: Optional[str] = None

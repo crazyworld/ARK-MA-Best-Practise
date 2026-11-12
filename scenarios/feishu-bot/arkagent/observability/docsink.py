@@ -7,8 +7,9 @@
 - 幂等:每个 session 的\"已写到哪个事件\"记在本机 SQLite(同机部署,同一 session 只有一个
   gateway 进程持有),重放或重启不会重复追加。
 - 只追加:正文用 ``docs +update --command append``;摘要区不覆写,避免依赖 block id。
-- 权限继承自父文件夹:本模块不调用任何\"加协作者\"接口(那是 high-risk 写操作,应由人事先配好)。
-  注意 ``lark-cli docs +create`` 在 bot 身份下会自动给当前 CLI 用户授 full_access,该行为无法关闭。
+- 权限继承自父节点:本模块不调用任何\"加协作者\"接口(那是 high-risk 写操作,应由人事先配好)。
+- 以**业务应用自己的身份**写(用 gateway 进程里已有的 app_id / app_secret 经 SDK 直调 OpenAPI),
+  不依赖 lark-cli:lark-cli 只绑定一个应用,它的 bot 身份不是业务应用,给业务应用加的权限它用不上。
 - 密钥在渲染时脱敏(规则见 redact.py);正文其余内容原样呈现,与\"除密钥外均可见\"的决策一致。
 """
 from __future__ import annotations
@@ -29,7 +30,7 @@ from .redact import redact_text, redact_value
 log = logging.getLogger("arkagent.observability.docsink")
 
 MAX_BODY_CHARS = 3000  # 单个事件正文在文档里的上限,超出截断并标注原长度
-CLI_TIMEOUT_S = 60
+API_TIMEOUT_S = 60
 # 进入文档的事件类型;thinking、usage、状态类事件体量大且对交付无价值。
 _RENDERED = (
     "user.message",
@@ -42,28 +43,39 @@ _RENDERED = (
     "agent.thread_message_received",
 )
 
-# (argv, stdin) -> 标准输出 JSON;可注入,测试不起真进程。
-Runner = Callable[[list[str], Optional[str]], Awaitable[dict]]
+# (method, path, body) -> 响应 JSON;可注入,测试不起真请求。
+Api = Callable[[str, str, dict], Awaitable[dict]]
+CREATE_PATH = "/open-apis/docs_ai/v1/documents"
 
 
-async def run_lark_cli(argv: list[str], stdin: Optional[str] = None) -> dict:
-    proc = await asyncio.create_subprocess_exec(
-        "lark-cli",
-        *argv,
-        stdin=asyncio.subprocess.PIPE if stdin is not None else None,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    try:
-        out, err = await asyncio.wait_for(
-            proc.communicate(stdin.encode() if stdin is not None else None), CLI_TIMEOUT_S
+def make_sdk_api(app_id: str, app_secret: str) -> Api:
+    """用业务应用自己的 tenant token 直调 OpenAPI;同步 SDK 丢线程池,不阻塞事件循环。"""
+    import lark_channel as lark
+    from lark_channel import AccessTokenType, BaseRequest, HttpMethod
+
+    client = lark.Client.builder().app_id(app_id).app_secret(app_secret).build()
+
+    def _call(method: str, path: str, body: dict) -> dict:
+        request = (
+            BaseRequest.builder()
+            .http_method(HttpMethod.POST if method == "POST" else HttpMethod.PUT)
+            .uri(path)
+            .token_types({AccessTokenType.TENANT})
+            .body(body)
+            .build()
         )
-    except asyncio.TimeoutError:
-        proc.kill()
-        raise RuntimeError(f"lark-cli 超时({CLI_TIMEOUT_S}s)")
-    if proc.returncode != 0:
-        raise RuntimeError(f"lark-cli 退出码 {proc.returncode}: {err.decode()[:300]}")
-    return json.loads(out.decode() or "{}")
+        response = client.request(request)
+        raw = response.raw.content if getattr(response, "raw", None) else None
+        payload = json.loads(raw) if raw else {}
+        if not response.success():
+            # 缺权限等错误带着飞书给的原因,直接抛出,由 publish 记日志;不吞掉也不重试。
+            raise RuntimeError(f"飞书接口失败 code={response.code}: {str(response.msg)[:300]}")
+        return payload
+
+    async def api(method: str, path: str, body: dict) -> dict:
+        return await asyncio.wait_for(asyncio.to_thread(_call, method, path, body), API_TIMEOUT_S)
+
+    return api
 
 
 @dataclass(frozen=True)
@@ -185,11 +197,11 @@ class SessionDocSink:
         self,
         store: DocStore,
         parent_token: str,
-        runner: Runner = run_lark_cli,
+        api: Api,
     ) -> None:
         self._store = store
         self._parent = parent_token
-        self._run = runner
+        self._api = api
         # 同一 session 的追加必须串行,否则并发追加会乱序。
         self._locks: dict[str, asyncio.Lock] = {}
 
@@ -219,10 +231,10 @@ class SessionDocSink:
             return record.doc_url
 
     async def _create(self, session_id: str, title: str, first_body: str) -> DocRecord:
-        argv = ["docs", "+create", "--as", "bot", "--title", title, "--doc-format", "markdown", "--content", "-"]
+        body: dict = {"content": f"<title>{_escape_title(title)}</title>\n{first_body}", "format": "markdown"}
         if self._parent:
-            argv += ["--parent-token", self._parent]
-        out = await self._run(argv, first_body)
+            body["parent_token"] = self._parent
+        out = await self._api("POST", CREATE_PATH, body)
         document = (out.get("data") or {}).get("document") or out.get("document") or {}
         token = str(document.get("document_id") or document.get("doc_token") or "")
         url = str(document.get("url") or "")
@@ -232,11 +244,16 @@ class SessionDocSink:
         return DocRecord(session_id, token, url, "", 0)
 
     async def _append(self, token: str, text: str) -> None:
-        await self._run(
-            ["docs", "+update", "--as", "bot", "--doc", token, "--command", "append",
-             "--doc-format", "markdown", "--content", "-"],
-            text,
+        # block_id=-1 即文末;revision_id=-1 取最新版本,不依赖读文档。
+        await self._api(
+            "PUT",
+            f"{CREATE_PATH}/{token}",
+            {"command": "block_insert_after", "block_id": "-1", "content": text, "format": "markdown", "revision_id": -1},
         )
+
+
+def _escape_title(title: str) -> str:
+    return title.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def _after(ordered: list[dict], record: Optional[DocRecord]) -> list[dict]:

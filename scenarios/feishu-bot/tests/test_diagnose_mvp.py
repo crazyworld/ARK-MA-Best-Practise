@@ -508,8 +508,8 @@ async def test_digital_employee_private_without_owner_record_is_not_visible(tmp_
     assert result["found"] is False        # 私聊范围:反推不出归属,不放行
 
 
-def test_repeated_warnings_are_merged_into_one_summary():
-    # 长会话里每一轮都出现"重试后成功":不能逐条刷屏
+def test_repeated_warnings_are_listed_individually_not_merged():
+    # 长会话里每一轮都出现"重试后成功":按原始场景逐条列出,每条都带自己的事件 id
     events = []
     for turn in range(1, 6):
         base = turn * 10
@@ -520,11 +520,12 @@ def test_repeated_warnings_are_merged_into_one_summary():
             ev("session.status_idle", base + 2, stop_reason={"type": "end_turn"}),
         ]
     findings = diagnose(trace_of(events, "done"))
-    assert [f.code for f in findings] == ["model_retried"]
-    assert findings[0].count == 5 and "共 5 轮" in findings[0].summary and "第 1 轮" in findings[0].summary
+    assert [f.code for f in findings] == ["model_retried"] * 5
+    assert [f.span_id for f in findings] == [f"me{t}" for t in range(1, 6)]   # 每条可单独追问
+    assert all(f.summary.startswith(f"第 {t} 轮") for t, f in enumerate(findings, 1))   # 各自带自己的轮次
 
 
-def test_errors_are_never_merged_away():
+def test_errors_are_each_kept():
     events = FAILED_EVENTS + [  # 同一会话里的真正异常必须单独保留
         ev("user.message", 20, "u2", content=text("again")),
         ev("session.error", 21, error={"type": "model_request_failed_error", "message": "x", "retry_status": {"type": "exhausted"}}),

@@ -33,8 +33,6 @@ class Finding:
     summary: str
     span_id: Optional[str] = None
     session_id: Optional[str] = None
-    # 同一类结论被合并的次数;>1 时 summary 已是汇总口径,span_id 指向其中第一次。
-    count: int = 1
 
     def to_dict(self) -> dict:
         return {
@@ -43,7 +41,6 @@ class Finding:
             "summary": self.summary,
             "span_id": self.span_id,
             "session_id": self.session_id,
-            "count": self.count,
         }
 
 
@@ -74,49 +71,9 @@ def diagnose(trace: Trace, *, now_ms: Optional[int] = None) -> list[Finding]:
         if span.kind == KIND_HC and span.status == STATUS_PENDING:
             findings.append(Finding("info", "waiting_review", f"正在等待人工审核 {span.name}", span.span_id))
 
+    # 不做任何合并或二次加工:每一次异常都按原始事件逐条列出,由使用者(人或模型)自行判断。
     order = {"error": 0, "warning": 1, "info": 2}
-    return sorted(_merge_repeats(findings), key=lambda f: order[f.level])
-
-
-# 这些结论在长会话里会每轮重复,逐条列出只会淹没真正的问题,合并成一条汇总。
-_MERGEABLE = {
-    "model_retried": "共 {n} 轮出现模型调用失败后被方舟重试(首次在第 {first} 轮),均未导致会话失败",
-    "tool_error": "共 {n} 次工具返回错误(首次在第 {first} 轮)",
-}
-
-
-def _merge_repeats(findings: list[Finding]) -> list[Finding]:
-    merged: list[Finding] = []
-    groups: dict[tuple[str, str], list[Finding]] = {}
-    for f in findings:
-        if f.code in _MERGEABLE:
-            groups.setdefault((f.code, f.session_id or ""), []).append(f)
-        else:
-            merged.append(f)
-    for (code, session_id), items in groups.items():
-        if len(items) == 1:
-            merged.append(items[0])
-            continue
-        first = items[0]
-        merged.append(
-            Finding(
-                first.level,
-                code,
-                _MERGEABLE[code].format(n=len(items), first=_turn_of(first)),
-                first.span_id,
-                session_id or None,
-                count=len(items),
-            )
-        )
-    return merged
-
-
-def _turn_of(finding: Finding) -> str:
-    # summary 形如"第 N 轮…",取出 N;取不到就写问号,不编造。
-    import re
-
-    match = re.match(r"第 (\d+) 轮", finding.summary)
-    return match.group(1) if match else "?"
+    return sorted(findings, key=lambda f: order[f.level])
 
 
 def _session_findings(node, now_ms: Optional[int]) -> list[Finding]:

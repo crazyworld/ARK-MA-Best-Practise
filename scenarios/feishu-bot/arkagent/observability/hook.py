@@ -1,7 +1,7 @@
 """把 SessionDocSink 接到通用 Gateway 的 ``after_turn`` 钩子上。
 
 放在通用层,各 case 的 build_gateway 只需一行:
-    Gateway(..., after_turn=make_after_turn(ark, sink))
+    Gateway(..., after_turn=make_after_turn(ark, case_name=..., db_path=..., app_id=..., app_secret=...))
 未配置文件夹时返回 None,Gateway 行为与以前完全一致。
 """
 from __future__ import annotations
@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 from typing import Awaitable, Callable, Optional
 
-from .docsink import DocStore, SessionDocSink
+from .docsink import Api, DocStore, SessionDocSink, make_sdk_api
 from .service import EventSource
 
 ENV_PARENT_TOKEN = "SESSION_DOC_PARENT_TOKEN"  # 目标文件夹 token;空 = 不落文档
@@ -21,13 +21,17 @@ def make_after_turn(
     *,
     case_name: str,
     db_path: str,
+    app_id: str,
+    app_secret: str,
     env: Optional[dict] = None,
+    api: Optional[Api] = None,
 ) -> Optional[Callable[[str, str], Awaitable[None]]]:
     environ = os.environ if env is None else env
     parent = (environ.get(ENV_PARENT_TOKEN) or "").strip()
     if not parent:
         return None
-    sink = SessionDocSink(DocStore(environ.get(ENV_DB) or db_path), parent)
+    # 以该业务应用自己的身份写;api 仅供测试注入。
+    sink = SessionDocSink(DocStore(environ.get(ENV_DB) or db_path), parent, api or make_sdk_api(app_id, app_secret))
 
     async def after_turn(session_id: str, user_open_id: str) -> None:
         records = await events.list_session_events(session_id)
