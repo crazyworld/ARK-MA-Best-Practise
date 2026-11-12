@@ -489,6 +489,51 @@ class FeishuSender:
         user = (data or {}).get("user") if isinstance(data, dict) else None
         return str((user or {}).get("name") or "")
 
+    def try_user_name(self, open_id: str) -> str:
+        """尽力反查用户真名;任何失败或查不到返回空串,由调用方降级显示 open_id。
+
+        供排障日志文档等信息展示用:真名需要 ``contact:user.base:readonly`` 权限(已发布版本生效),
+        未开通时返回空串,不得抛异常阻断文档写入。
+        """
+        if not open_id:
+            return ""
+        try:
+            return self._fetch_user_name(open_id)
+        except Exception:
+            return ""
+
+    def try_chat_name(self, chat_id: str) -> str:
+        """尽力反查群名;任何失败或查不到返回空串,由调用方降级显示 chat_id。
+
+        需要 ``im:chat:readonly`` 权限。p2p 会话没有群名概念,返回空串。
+        """
+        if not chat_id:
+            return ""
+        try:
+            from lark_channel import AccessTokenType, BaseRequest, HttpMethod
+
+            request = (
+                BaseRequest.builder()
+                .http_method(HttpMethod.GET)
+                .uri("/open-apis/im/v1/chats/:chat_id")
+                .paths({"chat_id": chat_id})
+                .token_types({AccessTokenType.TENANT})
+                .build()
+            )
+            response = self._client.request(request)
+            if not response.success():
+                return ""
+            raw = response.raw.content if response.raw else None
+            payload = json.loads(raw) if raw else {}
+            data = payload.get("data") if isinstance(payload, dict) else {}
+            name = str(data.get("name") or "")
+            if not name:
+                i18n = data.get("i18n_names") if isinstance(data.get("i18n_names"), dict) else {}
+                name = str(i18n.get("zh_cn") or "")
+            return name
+        except Exception:
+            return ""
+
     def list_app_scopes(self) -> "ScopeProbe":
         """查询**本应用**(应用身份 / tenant)已开通的权限:``GET /open-apis/application/v6/scopes``。
 

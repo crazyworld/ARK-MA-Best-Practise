@@ -32,12 +32,13 @@ def title_of(api, index=0):
     return re.search(r"<title>(.*?)</title>", posts[index][2]["content"]).group(1)
 
 
-def mk(tmp_path, sources, sessions, *, cfg=None, now=None, api=None):
+def mk(tmp_path, sources, sessions, *, cfg=None, now=None, api=None, resolver=None):
     now = now if now is not None else [NOW]
     store = DocStore(str(tmp_path / "d.db"), clock=lambda: now[0])
     api = api or FakeApi()
     ark = FakeArk(sessions)
-    sched = DocScheduler(sources, ark.fetch, SessionDocSink(store, "p", api), store, cfg or SyncConfig(), clock=lambda: now[0])
+    sched = DocScheduler(sources, ark.fetch, SessionDocSink(store, "p", api), store, cfg or SyncConfig(),
+                         clock=lambda: now[0], name_resolver=resolver)
     return sched, store, api, ark, now
 
 
@@ -296,3 +297,50 @@ async def test_purged_session_404_is_not_retried_every_cycle(tmp_path):
     now[0] += 130
     await sched.run_once()
     assert len(ark.requests) == 0                               # 方舟已清理:确认一次后不再每周期去撞
+
+
+# ---- 信息卡:名字解析(群名 / 用户名),查不到降级 ----------------------------------
+async def test_info_card_shows_resolved_chat_and_user_names(tmp_path):
+    async def resolver(ref):
+        return {"chat_name": "热点周报群", "user_name": "张三"}
+
+    sid = "sesn-1"
+    sched, store, api, ark, now = mk(tmp_path, {"analyst": FakeSource([ref_c(sid, chat="oc_abc", chat_type="group", user_open="ou_zzz")])},
+                                     {sid: done([ev(1, "e")], sec=2)}, cfg=SyncConfig(lookback_days=10**6), resolver=resolver)
+    await sched.run_once()
+    body = plain(api.calls[0][2]["content"])
+    assert "热点周报群" in body and "张三" in body          # 可读名
+    assert "oc_abc" in body and "ou_zzz" in body          # 原 ID 保留,便于落库定位
+    assert "群聊" in body and "群组" in body               # 类型标识
+
+
+async def test_info_card_falls_back_to_ids_when_names_unresolvable(tmp_path):
+    async def resolver(ref):
+        return {"chat_name": "", "user_name": ""}         # 查不到
+
+    sid = "sesn-1"
+    sched, store, api, ark, now = mk(tmp_path, {"analyst": FakeSource([ref_c(sid, chat="oc_abc", chat_type="p2p", user_open="ou_zzz")])},
+                                     {sid: done([ev(1, "e")], sec=2)}, cfg=SyncConfig(lookback_days=10**6), resolver=resolver)
+    await sched.run_once()
+    body = plain(api.calls[0][2]["content"])
+    assert "oc_abc" in body and "ou_zzz" in body and "私聊" in body
+
+
+async def test_name_resolver_failure_does_not_block_the_write(tmp_path):
+    async def resolver(ref):
+        raise RuntimeError("飞书查询挂了")
+
+    sid = "sesn-1"
+    sched, store, api, ark, now = mk(tmp_path, {"analyst": FakeSource([ref_c(sid, chat="oc_abc", chat_type="group", user_open="ou_zzz")])},
+                                     {sid: done([ev(1, "e")], sec=2)}, cfg=SyncConfig(lookback_days=10**6), resolver=resolver)
+    stats = await sched.run_once()
+    assert stats["written"] == 1                          # 名字查不到不阻断写入
+    assert "oc_abc" in plain(api.calls[0][2]["content"])
+
+
+async def test_no_resolver_means_no_name_lookup_and_empty_card_still_written(tmp_path):
+    sid = "sesn-1"
+    sched, store, api, ark, now = mk(tmp_path, {"analyst": FakeSource([ref_c(sid, chat="oc_abc", chat_type="group", user_open="ou_zzz")])},
+                                     {sid: done([ev(1, "e")], sec=2)}, cfg=SyncConfig(lookback_days=10**6))  # 不传 resolver
+    stats = await sched.run_once()
+    assert stats["written"] == 1 and "oc_abc" in plain(api.calls[0][2]["content"])

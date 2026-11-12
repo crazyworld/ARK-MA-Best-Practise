@@ -161,6 +161,20 @@ def build_gateway(config: DiagnoseConfig, ark, sender, loop: asyncio.AbstractEve
         async def fetch(path: str) -> dict:  # incremental 的 Fetch:GET 一个 path 返回 JSON
             return await ark._request("GET", path)
 
+        async def name_resolver(ref) -> dict:
+            """把信息卡里的 chat_id / open_id 换成可读的群名 / 用户名(尽力,查不到返回空串降级)。"""
+
+            def resolve_sync() -> dict:
+                chat_name = ""
+                if ref.chat_type == "group" and ref.chat_id:
+                    chat_name = sender.try_chat_name(ref.chat_id)
+                user_name = ""
+                if ref.meta.get("user_open_id"):
+                    user_name = sender.try_user_name(str(ref.meta["user_open_id"]))
+                return {"chat_name": chat_name, "user_name": user_name}
+
+            return await loop.run_in_executor(None, resolve_sync)
+
         scheduler = DocScheduler(
             sources, fetch, sink, doc_store,
             SyncConfig(
@@ -170,5 +184,6 @@ def build_gateway(config: DiagnoseConfig, ark, sender, loop: asyncio.AbstractEve
                 check_concurrency=config.doc_check_concurrency,
                 cycle_budget_s=config.doc_cycle_budget_s,
             ),
+            name_resolver=name_resolver,
         )
     return DiagnoseGateway(config, store, ark, reply, loop, tools, scheduler)

@@ -100,6 +100,7 @@ class DocScheduler:
         store: DocStore,
         cfg: SyncConfig = SyncConfig(),
         clock: Callable[[], float] = time.time,
+        name_resolver: Optional[Callable[[TraceRef], Awaitable[dict]]] = None,
     ) -> None:
         self._sources = sources
         self._fetch = fetch
@@ -107,6 +108,7 @@ class DocScheduler:
         self._store = store
         self._cfg = cfg
         self._clock = clock
+        self._name_resolver = name_resolver
 
     # ---- 一个周期 -----------------------------------------------------------
     async def run_once(self) -> dict:
@@ -138,9 +140,16 @@ class DocScheduler:
             if index >= self._cfg.max_writes_per_cycle:
                 stats["deferred"] += len(pending) - index
                 break
+            names: dict = {}
+            if item.is_new and self._name_resolver:
+                try:
+                    names = await self._name_resolver(item.ref)
+                except Exception:  # noqa: BLE001 - 名字可读性只是锦上添花,查不到不影响写入
+                    names = {}
             url = await self._sink.publish_new(
                 item.sid, item.events, title=_title(item.ref, item.events),
-                first_round=self._next_round(item.sid), header=_info_card(item.ref) if item.is_new else "",
+                first_round=self._next_round(item.sid),
+                header=_info_card(item.ref, names) if item.is_new else "",
             )
             stats["written" if url else "failed"] += 1  # 写失败:进度没推进,下个周期自然补上
         if stats["deferred"]:
@@ -295,16 +304,28 @@ def _title(ref: TraceRef, events: list[dict]) -> str:
     return f"[{ref.scenario}] {_primary_session(ref)} · {when}"
 
 
-def _info_card(ref: TraceRef) -> str:
-    """首批写入时放在文档最前面的会话信息。**只放库里有、且确定的字段,没有的不写、不编。**"""
+def _info_card(ref: TraceRef, names: Optional[dict] = None) -> str:
+    """首批写入时放在文档最前面的会话信息。**只放库里有、且确定的字段,没有的不写、不编。**
+
+    ``names`` 是 name_resolver 的结果(``{"chat_name": ..., "user_name": ...}``),用于把冷冰冰的
+    chat_id / open_id 换成可读的群名 / 用户名;查不到的值是空串,此时回退显示原 ID。名字只是可读性
+    增强,原 ID 始终保留,便于排障时落库定位。
+    """
     from .docrender import esc
 
+    names = names or {}
     rows = [("来源", ref.scenario), ("session", _primary_session(ref))]
     if ref.chat_id:
         kind = {"p2p": "私聊", "group": "群聊"}.get(ref.chat_type, "")
-        rows.append(("会话", f"{ref.chat_id}" + (f"({kind})" if kind else "")))
+        chat_name = str(names.get("chat_name") or "").strip()
+        label = chat_name if chat_name else ref.chat_id
+        if chat_name:
+            label = f"{chat_name}（{ref.chat_id}）"
+        rows.append(("会话" if kind != "群聊" else "群组", f"{label}" + (f" · {kind}" if kind else "")))
     if ref.meta.get("user_open_id"):
-        rows.append(("用户 open_id", str(ref.meta["user_open_id"])))
+        open_id = str(ref.meta["user_open_id"])
+        user_name = str(names.get("user_name") or "").strip()
+        rows.append(("用户", f"{user_name}（{open_id}）" if user_name else open_id))
     if ref.status == "archived":
         rows.append(("状态", "已归档(用户 /new 重置后被替换的旧会话)"))
     body = "".join(f"<p><b>{esc(k)}</b>:{esc(v)}</p>" for k, v in rows)
