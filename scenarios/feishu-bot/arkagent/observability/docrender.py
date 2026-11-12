@@ -1,15 +1,21 @@
-"""把 MA session 事件渲染成飞书文档(XML),按 Turn → Span → 原始事件三级分块。
+"""把 MA session 事件渲染成飞书文档(XML):**原始事件严格按流顺序**,Turn / Span 卡片作为分组标注。
 
 要求(用户,2026-11-12):
-- **不过滤**:每一个事件都进文档,包括 thinking、成功的模型调用、session.usage 等,不截断;
-- 既展示**原始事件 JSON 全文**,又展示每个阶段的**关键信息**(状态、耗时、token、线程);
-- 区分分块:一个 turn、一个 span;样式参照 可观测demo.png(绿勾 / 红叉卡片、轮次头部、并行并排)。
+- **全量、不过滤**:每个事件都进文档,原始 JSON 全文,文档要满足用户"全量预览 MA 事件流";
+- 同时展示每个阶段的**关键信息**(状态、耗时、token);区分分块:一轮对话、一个 span;样式参照 可观测demo.png;
+- 事件的**顺序必须与 MA 流一致**:卡片只是插在事件之间的标注,**不把事件搬到别处**(早先把状态类事件
+  集中放到轮末,实测 208 个事件里 163 个位置与原流不同,已推翻)。
 
-唯一的加工是**密钥脱敏**(最初的决策"除密钥外均可见"):脱敏发生在渲染之前,原始事件对象不被修改。
+唯一的加工是**凭据脱敏**(规则见 redact.py)。模型 token 用量是计数,不是机密,不脱敏。
 
-飞书 XML 限制(2026-11-12 实测,回读确认):
-- callout 里不能放代码块,所以"关键信息卡片"和"原始 JSON"是前后相邻的两个块;
-- callout 的 ``background-color`` 取 ``light-*`` / ``medium-*`` 才会生效(基础色相会被渲染成灰底)。
+术语:**一轮对话** = 用户一条消息 → 到 ``session.status_idle``;一轮对话里可以有**多次模型推理**(Span)和工具调用。
+
+并行判定(2026-11-12 对 4 个真实 session、9 个批次实测):模型一次回复发出多个工具调用,事件流里表现为
+**连续 N≥2 个 ``agent.tool_use``、中间没有任何别的事件**,它们的 ``tool_result`` 随后乱序返回。
+这是因果性、结构性的判定,**不用时间重叠**(两个串行工具碰巧时间交叠不是并行),**也不用"时间戳相同"**
+(实测并行批次里各 ``tool_use`` 的时间戳互不相同)。
+
+飞书 XML 限制(实测):callout 里不能放代码块;callout 背景要用 ``light-*``。
 """
 from __future__ import annotations
 
@@ -18,20 +24,16 @@ import json
 from dataclasses import dataclass, field
 from typing import Optional
 
-from .events import event_text, ts_ms
+from .events import event_text, stream_order, ts_ms
 from .redact import redact_value
-
-# 不属于任何 span 的状态类事件
-_STATE_EVENTS = frozenset({
-    "session.status_running", "session.status_idle", "session.usage",
-    "session.thread_status_running", "session.thread_status_idle", "session.thread_created",
-})
 
 GREEN = ("✅", "light-green", "green")
 RED = ("❌", "light-red", "red")
 GRAY = ("⏳", "light-gray", "gray")
-BLUE = ("🔹", "light-blue", "blue")
-PURPLE = ("🔸", "light-purple", "purple")
+AMBER = ("⚠️", "light-yellow", "yellow")
+
+# stop_reason → 面向用户的说法。只收录实测见过的取值;没见过的原样显示,不编造含义。
+_STOP_TEXT = {"end_turn": "已完成", "retries_exhausted": "模型调用失败,重试耗尽"}
 
 
 def esc(text: object) -> str:
@@ -47,16 +49,18 @@ def fmt_ms(ms: Optional[int]) -> str:
     return f"{seconds:.1f} 秒" if seconds < 120 else f"{seconds / 60:.1f} 分钟"
 
 
-# ---- 分块模型 -----------------------------------------------------------------
+# ---- 分析:不移动任何事件,只在旁边记录"哪些事件属于哪个 Span / 并行批次" ------------------
 @dataclass
-class SpanBlock:
-    kind: str  # model | tool | message | error | other
-    title: str
+class Span:
+    kind: str  # model | tool
+    name: str
     started_ms: int
     ended_ms: Optional[int] = None
     status: str = "ok"  # ok | error | pending
-    tags: list[str] = field(default_factory=list)  # 关键信息:token、线程、工具名…
-    events: list[dict] = field(default_factory=list)  # 原始事件,时间升序
+    tags: list[str] = field(default_factory=list)
+    first_event_id: str = ""  # 卡片插在它之前
+    event_ids: list[str] = field(default_factory=list)
+    tool_use_id: str = ""
 
     @property
     def duration_ms(self) -> Optional[int]:
@@ -64,194 +68,231 @@ class SpanBlock:
 
 
 @dataclass
-class TurnBlock:
+class Round:  # 一轮对话
     index: int
     started_ms: int
     ended_ms: Optional[int] = None
     stop_reason: str = ""
-    spans: list[SpanBlock] = field(default_factory=list)
-    loose: list[dict] = field(default_factory=list)  # 不属于任何 span 的事件(状态、usage 等)
-    head: list[dict] = field(default_factory=list)  # 用户消息
+    errored: bool = False  # 出现 session.error
+    retried_failures: int = 0  # 失败但后来恢复的模型调用数
+    spans: list[Span] = field(default_factory=list)
+    first_event_id: str = ""  # 轮头部卡片插在它之前
 
 
-def build_turns(events: list[dict]) -> list[TurnBlock]:
-    """把事件分进 Turn / Span,**保证每个事件恰好出现一次**(不丢、不重)。"""
-    ordered = sorted((e for e in events if isinstance(e, dict)), key=lambda e: ts_ms(e.get("processed_at")))
-    turns: list[TurnBlock] = []
-    current: Optional[TurnBlock] = None
-    # 第一条用户消息之前到达的状态类事件(status_running、thread_status_running、usage 等):
-    # 它们属于紧随其后的那一轮,不能自己开一轮,否则轮次编号整体错位(实测会把 2 轮数成 3 轮)。
-    preamble: list[dict] = []
-    model_open: dict[str, SpanBlock] = {}  # model_request_start id → span
-    tool_open: dict[str, SpanBlock] = {}  # tool_use id → span
-    last_span: Optional[SpanBlock] = None
+@dataclass
+class Analysis:
+    ordered: list[dict]  # 严格的原始流顺序
+    rounds: list[Round]
+    # 事件 id → 在它**之前**要插入的卡片(轮头部、Span 卡片、并行 grid)。事件本身位置不变。
+    before: dict[str, list[str]]
+    # 事件 id → 它在并行批次里的标签(用于 JSON 块的 caption)
+    parallel_label: dict[str, str]
 
-    def new_turn(at: int) -> TurnBlock:
-        t = TurnBlock(index=len(turns) + 1, started_ms=at)
-        turns.append(t)
-        return t
+
+def analyse(events: list[dict], first_round: int = 1) -> Analysis:
+    ordered = stream_order(events)   # 纳秒 + 输入位置;不能用毫秒(会让同一毫秒内的事件错位)
+    rounds: list[Round] = []
+    cur: Optional[Round] = None
+    model_open: dict[str, Span] = {}
+    tool_open: dict[str, Span] = {}
+    spans_by_event: dict[str, Span] = {}
+    pending_state: list[dict] = []  # 第一条 user.message 之前的状态事件,归入紧随其后的那一轮
+
+    def new_round(at: int, first_id: str) -> Round:
+        r = Round(index=first_round + len(rounds), started_ms=at, first_event_id=first_id)
+        rounds.append(r)
+        return r
 
     for e in ordered:
-        at = ts_ms(e.get("processed_at"))
-        etype = str(e.get("type") or "")
+        at, etype, eid = ts_ms(e.get("processed_at")), str(e.get("type") or ""), str(e.get("id") or "")
         if etype == "user.message":
-            current = new_turn(at)
-            current.head.append(e)
-            current.loose.extend(preamble)
-            preamble.clear()
+            first = pending_state[0]["id"] if pending_state else eid  # 开头的状态事件也在本轮卡片之后
+            cur = new_round(pending_state and ts_ms(pending_state[0].get("processed_at")) or at, str(first))
+            pending_state.clear()
             continue
-        if current is None:
+        if cur is None:
             if etype in _STATE_EVENTS:
-                preamble.append(e)
+                pending_state.append(e)
                 continue
-            # 增量拉取时本批没有 user.message,但已有真正的工作事件:隐式开一轮,避免事件无处可放
-            current = new_turn(at)
-            current.loose.extend(preamble)
-            preamble.clear()
+            cur = new_round(at, eid)  # 增量批次没有 user.message 但已有工作事件
         if etype == "span.model_request_start":
-            sp = SpanBlock("model", "模型推理", at, events=[e], tags=_thread_tag(e))
-            current.spans.append(sp)
-            model_open[str(e.get("id"))] = sp
-            last_span = sp
+            sp = Span("model", "模型推理", at, first_event_id=eid, event_ids=[eid], tags=_thread(e))
+            cur.spans.append(sp)
+            model_open[eid] = sp
+            spans_by_event[eid] = sp
         elif etype == "span.model_request_end":
             sp = model_open.pop(str(e.get("model_request_start_id")), None)
-            if sp is None:  # 找不到起点:单独成块,仍不丢
-                sp = SpanBlock("model", "模型推理(缺起点事件)", at, events=[], tags=_thread_tag(e))
-                current.spans.append(sp)
-            sp.events.append(e)
+            if sp is None:
+                sp = Span("model", "模型推理(缺起点)", at, first_event_id=eid, tags=_thread(e))
+                cur.spans.append(sp)
+            sp.event_ids.append(eid)
+            spans_by_event[eid] = sp
             sp.ended_ms = at
-            usage = e.get("model_usage") if isinstance(e.get("model_usage"), dict) else {}
-            sp.tags += [
-                f"in {usage.get('input_tokens', 0)}",
-                f"out {usage.get('output_tokens', 0)}",
-                *([f"cache {usage['cache_read_input_tokens']}"] if usage.get("cache_read_input_tokens") else []),
-            ]
+            u = e.get("model_usage") if isinstance(e.get("model_usage"), dict) else {}
+            sp.tags += [f"in {u.get('input_tokens', 0)}", f"out {u.get('output_tokens', 0)}"]
+            if u.get("cache_read_input_tokens"):
+                sp.tags.append(f"cache {u['cache_read_input_tokens']}")
             if e.get("is_error"):
                 sp.status = "error"
-            last_span = sp
         elif etype == "agent.tool_use":
-            sp = SpanBlock("tool", str(e.get("name") or "工具"), at, events=[e], status="pending", tags=_thread_tag(e))
-            current.spans.append(sp)
-            tool_open[str(e.get("id"))] = sp
-            last_span = sp
+            sp = Span("tool", str(e.get("name") or "工具"), at, status="pending", first_event_id=eid,
+                      event_ids=[eid], tags=_thread(e), tool_use_id=eid)
+            cur.spans.append(sp)
+            tool_open[eid] = sp
+            spans_by_event[eid] = sp
         elif etype == "agent.tool_result":
             sp = tool_open.pop(str(e.get("tool_use_id")), None)
             if sp is None:
-                sp = SpanBlock("tool", "工具结果(缺调用事件)", at, events=[], tags=_thread_tag(e))
-                current.spans.append(sp)
-            sp.events.append(e)
+                sp = Span("tool", "工具结果(缺调用)", at, first_event_id=eid, tags=_thread(e))
+                cur.spans.append(sp)
+            sp.event_ids.append(eid)
+            spans_by_event[eid] = sp
             sp.ended_ms = at
             sp.status = "error" if e.get("is_error") else "ok"
-            last_span = sp
-        elif etype in ("agent.thinking", "agent.message"):
-            # 没有挂靠键:归属到最近的模型 span(思考与回复由它产生);没有就单独成块
-            owner = last_span if last_span and last_span.kind == "model" else None
-            if owner is not None:
-                owner.events.append(e)
-            else:
-                current.spans.append(SpanBlock("message", "Agent 消息" if etype == "agent.message" else "思考", at, at, events=[e], tags=_thread_tag(e)))
         elif etype == "session.error":
-            err = e.get("error") if isinstance(e.get("error"), dict) else {}
-            current.spans.append(
-                SpanBlock("error", f"错误 {err.get('type', '')}", at, at, "error",
-                          [f"重试:{(err.get('retry_status') or {}).get('type', '-')}"], [e])
-            )
+            cur.errored = True
         elif etype == "session.status_idle":
-            current.ended_ms = at
+            cur.ended_ms = at
             reason = e.get("stop_reason")
-            current.stop_reason = reason.get("type") if isinstance(reason, dict) else ""
-            current.loose.append(e)
-        else:
-            current.loose.append(e)  # usage、thread_*、status_running 等:原样保留在本轮末尾
-    if preamble:  # 整批只有状态事件:仍然不丢,单独成一块
-        t = new_turn(ts_ms(preamble[0].get("processed_at")))
-        t.loose.extend(preamble)
-    return turns
+            cur.stop_reason = str(reason.get("type") or "") if isinstance(reason, dict) else ""
+    for r in rounds:
+        r.retried_failures = _recovered_failures(r)
+    return _place_cards(ordered, rounds, spans_by_event)
 
 
-def _thread_tag(e: dict) -> list[str]:
+def _recovered_failures(r: Round) -> int:
+    """失败的模型调用,且**之后**还有成功的模型调用 → 算"重试后恢复"。末尾连续失败不算(那是没恢复)。"""
+    models = [s for s in r.spans if s.kind == "model"]
+    last_ok = max((i for i, s in enumerate(models) if s.status == "ok"), default=-1)
+    return sum(1 for i, s in enumerate(models) if s.status == "error" and i < last_ok)
+
+
+# 不属于任何 Span 的状态类事件
+_STATE_EVENTS = frozenset({
+    "session.status_running", "session.status_idle", "session.usage",
+    "session.thread_status_running", "session.thread_status_idle", "session.thread_created",
+})
+
+
+def _thread(e: dict) -> list[str]:
     tid = e.get("session_thread_id")
     return [f"线程 …{str(tid)[-6:]}"] if tid else []
 
 
-# ---- 渲染 ---------------------------------------------------------------------
-def _json_block(event: dict, label: str) -> str:
-    """原始事件 JSON 全文(已脱敏、不截断)。"""
-    text = json.dumps(redact_value(event), ensure_ascii=False, indent=2)
-    return f'<pre lang="json" caption="{esc(label)}"><code>{esc(text)}</code></pre>'
-
-
+# ---- 卡片 ------------------------------------------------------------------------------
 def _card(style: tuple, head: str, detail: str = "") -> str:
     emoji, bg, border = style
     body = f"<p>{head}</p>" + (f"<p>{detail}</p>" if detail else "")
     return f'<callout emoji="{emoji}" background-color="{bg}" border-color="{border}">{body}</callout>'
 
 
-_KIND_LABEL = {"model": "模型推理", "tool": "工具调用", "message": "消息", "error": "错误", "other": "事件"}
-
-
-def render_span(sp: SpanBlock) -> str:
-    style = {"ok": GREEN, "error": RED, "pending": GRAY}[sp.status]
-    label = _KIND_LABEL.get(sp.kind, "事件")
-    head = f"<b>{esc(sp.title)}</b> · {label} · {fmt_ms(sp.duration_ms)}"
-    if sp.status == "pending":
-        head += " · 未完成"
-    detail = " · ".join(esc(t) for t in sp.tags)
-    blocks = [_card(style, head, detail)]
-    for e in sp.events:
-        blocks.append(_json_block(e, f"{e.get('type')} · {e.get('id', '')}"))
-    return "".join(blocks)
-
-
-def _parallel(spans: list[SpanBlock]) -> list[list[SpanBlock]]:
-    """把时间上重叠的**工具** span 分成一组(图里的"并行");模型 span 与其他永远独占一组。"""
-    groups: list[list[SpanBlock]] = []
-    for sp in spans:
-        if sp.kind == "tool" and groups and groups[-1][0].kind == "tool" and sp.ended_ms is not None:
-            last_end = max((s.ended_ms or s.started_ms) for s in groups[-1])
-            if sp.started_ms < last_end:
-                groups[-1].append(sp)
-                continue
-        groups.append([sp])
-    return groups
-
-
-def render_turn(turn: TurnBlock) -> str:
-    spans = turn.spans
-    total = None if turn.ended_ms is None else max(0, turn.ended_ms - turn.started_ms)
+def round_card(r: Round) -> str:
+    """一轮对话的状态只看**最终结果**,不看过程里是否出现过失败(方舟会自动重试,失败后重试成功不是失败)。"""
+    spans = r.spans
+    total = None if r.ended_ms is None else max(0, r.ended_ms - r.started_ms)
     model_ms = sum(s.duration_ms or 0 for s in spans if s.kind == "model")
     tool_ms = sum(s.duration_ms or 0 for s in spans if s.kind == "tool")
     ratio = ""
     if model_ms + tool_ms:
         ratio = f" · 模型 {model_ms * 100 // (model_ms + tool_ms)}% / 工具 {tool_ms * 100 // (model_ms + tool_ms)}%"
-    failed = any(s.status == "error" for s in spans)
-    style = RED if failed else (GRAY if turn.ended_ms is None else GREEN)
-    stop = f" · 结束原因 {esc(turn.stop_reason)}" if turn.stop_reason else (" · 进行中" if turn.ended_ms is None else "")
-    out = ["<hr/>", _card(style, f"<b>第 {turn.index} 轮推理</b> · {len(spans)} 个 Span · {fmt_ms(total)}{ratio}{stop}")]
-    for e in turn.head:
-        out.append(_json_block(e, f"{e.get('type')} · {e.get('id', '')}"))
-        text = event_text(e)
-        if text:
-            out.append(f"<blockquote><p>{esc(redact_value(text))}</p></blockquote>")
-    for group in _parallel(spans):
-        if len(group) == 1:
-            out.append(render_span(group[0]))
-            continue
-        # 并行工具:图里"并行 N"并排;每列放卡片 + 原始 JSON
-        out.append(f"<p><b>并行 {len(group)}</b></p>")
-        ratio_w = f"{1 / len(group):.4f}"
-        cols = "".join(f'<column width-ratio="{ratio_w}">{render_span(s)}</column>' for s in group)
-        out.append(f"<grid>{cols}</grid>")
-    for e in turn.loose:
-        out.append(_json_block(e, f"{e.get('type')} · {e.get('id', '')}"))
-    return "".join(out)
+    models = sum(1 for s in spans if s.kind == "model")
+    tools = sum(1 for s in spans if s.kind == "tool")
+
+    if r.ended_ms is None:
+        style, state = GRAY, "进行中"
+    elif r.stop_reason == "end_turn" and not r.errored:
+        style, state = GREEN, _STOP_TEXT["end_turn"]
+    elif r.stop_reason == "retries_exhausted" or r.errored:
+        style, state = RED, _STOP_TEXT.get(r.stop_reason, f"出现错误({esc(r.stop_reason) or '无结束原因'})")
+    else:
+        style, state = AMBER, f"结束原因 {esc(r.stop_reason) or '未知'}"  # 没见过的取值:原样显示,不编造含义
+    note = f"其中 {r.retried_failures} 次模型调用失败后重试成功" if r.retried_failures and style is GREEN else ""
+    head = (f"<b>第 {r.index} 轮对话</b> · {state} · {fmt_ms(total)} · 模型推理 {models} 次 · 工具调用 {tools} 次{ratio}")
+    return _card(style, head, note)
 
 
-def render_events_xml(events: list[dict]) -> tuple[str, str, int, int]:
-    """渲染一批事件。返回 (XML, 最后事件 id, 最后事件时间 ms, 事件总数)。无事件返回空串。"""
-    turns = build_turns(events)
-    if not turns:
+def span_card(sp: Span, label: str = "") -> str:
+    style = {"ok": GREEN, "error": RED, "pending": GRAY}[sp.status]
+    kind = "模型推理" if sp.kind == "model" else "工具调用"
+    head = f"<b>{esc(sp.name)}</b> · {kind} · {fmt_ms(sp.duration_ms)}" + (" · 未完成" if sp.status == "pending" else "")
+    if label:
+        head = f"{esc(label)} " + head
+    return _card(style, head, " · ".join(esc(t) for t in sp.tags))
+
+
+def _place_cards(ordered: list[dict], rounds: list[Round], spans_by_event: dict[str, Span]) -> Analysis:
+    before: dict[str, list[str]] = {}
+    parallel_label: dict[str, str] = {}
+    index_of = {str(e.get("id")): i for i, e in enumerate(ordered)}
+
+    def put(event_id: str, card: str) -> None:
+        before.setdefault(event_id, []).append(card)
+
+    for r in rounds:
+        put(r.first_event_id, "<hr/>" + round_card(r))
+        groups = _parallel_groups(r.spans, ordered, index_of)
+        grouped: set[int] = {id(s) for g in groups for s in g}
+        for g in groups:
+            first = min((s.first_event_id for s in g), key=lambda i: index_of.get(i, 10**9))
+            cols = "".join(
+                f'<column width-ratio="{1 / len(g):.4f}">{span_card(s, f"#{n}")}</column>' for n, s in enumerate(g, 1)
+            )
+            put(first, f"<p><b>并行 {len(g)}</b>(同一次模型回复发出的 {len(g)} 个工具调用)</p><grid>{cols}</grid>")
+            for n, s in enumerate(g, 1):
+                for eid in s.event_ids:
+                    parallel_label[eid] = f"并行 #{n}/{len(g)}"
+        for s in r.spans:
+            if id(s) in grouped:
+                continue
+            put(s.first_event_id, span_card(s))
+    return Analysis(ordered, rounds, before, parallel_label)
+
+
+def _parallel_groups(spans: list[Span], ordered: list[dict], index_of: dict[str, int]) -> list[list[Span]]:
+    """连续 N≥2 个 agent.tool_use(流中相邻,中间没有任何别的事件)= 一个并行批次。"""
+    tool_use_pos = {s.tool_use_id: index_of.get(s.tool_use_id, -1) for s in spans if s.kind == "tool" and s.tool_use_id}
+    by_pos = sorted((pos, s) for s in spans if s.kind == "tool" and s.tool_use_id for pos in [tool_use_pos[s.tool_use_id]] if pos >= 0)
+    groups: list[list[Span]] = []
+    run: list[tuple[int, Span]] = []
+    for pos, sp in by_pos:
+        if run and pos == run[-1][0] + 1:
+            run.append((pos, sp))
+        else:
+            if len(run) >= 2:
+                groups.append([s for _, s in run])
+            run = [(pos, sp)]
+    if len(run) >= 2:
+        groups.append([s for _, s in run])
+    return groups
+
+
+# ---- 输出 ------------------------------------------------------------------------------
+def _json_block(event: dict, label: str) -> str:
+    text = json.dumps(redact_value(event), ensure_ascii=False, indent=2)
+    return f'<pre lang="json" caption="{esc(label)}"><code>{esc(text)}</code></pre>'
+
+
+def render_events_xml(events: list[dict], first_round: int = 1) -> tuple[str, str, int, int]:
+    """返回 (XML, 最后事件 id, 最后事件时间 ms, 事件总数)。事件**严格按原始流顺序**,无事件返回空串。"""
+    a = analyse(events, first_round)
+    if not a.ordered:
         return "", "", 0, 0
-    ordered = sorted((e for e in events if isinstance(e, dict)), key=lambda e: ts_ms(e.get("processed_at")))
-    last = ordered[-1]
-    return "".join(render_turn(t) for t in turns), str(last.get("id") or ""), ts_ms(last.get("processed_at")), len(ordered)
+    out: list[str] = []
+    for e in a.ordered:
+        eid = str(e.get("id") or "")
+        out.extend(a.before.get(eid, []))
+        label = f"{e.get('type')} · {eid}"
+        if eid in a.parallel_label:
+            label = f"{a.parallel_label[eid]} · {label}"
+        out.append(_json_block(e, label))
+        if e.get("type") == "user.message":
+            text = event_text(e)
+            if text:
+                out.append(f"<blockquote><p>{esc(redact_value(text))}</p></blockquote>")
+    last = a.ordered[-1]
+    return "".join(out), str(last.get("id") or ""), ts_ms(last.get("processed_at")), len(a.ordered)
+
+
+# 兼容旧的调用方 / 测试:按"分块"取轮列表
+def build_turns(events: list[dict]) -> list[Round]:
+    return analyse(events).rounds

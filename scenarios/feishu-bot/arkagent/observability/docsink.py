@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Awaitable, Callable, Optional
 
 from .docrender import render_events_xml
-from .events import ts_ms
+from .events import stream_order, ts_ms, ts_ns
 
 log = logging.getLogger("arkagent.observability.docsink")
 
@@ -73,6 +73,12 @@ class DocRecord:
     doc_url: str
     last_event_id: str
     last_event_ms: int
+    # 上次写到的事件的纳秒时间,"是否已写过"的判断只能用它:毫秒会让同一毫秒内的下一个新事件被误判成已写过,
+    # 从而永久丢失(实测约 1% 的事件与前一个事件毫秒相同)。老库没有这一列,补列后旧记录为 0,此时退回毫秒
+    # 判断并且**只用严格大于**之外多留一个毫秒的余量——见 _newer。
+    last_event_ns: int = 0
+    # 已经写入文档的"轮对话"数,下一批的轮号从它 +1 接续,否则每批都从"第 1 轮"重新开始。
+    rounds_written: int = 0
 
 
 class DocStore:
@@ -98,6 +104,10 @@ class DocStore:
             """
         )
         cols = {r[1] for r in self._db.execute("PRAGMA table_info(session_docs)").fetchall()}
+        if "last_event_ns" not in cols:
+            self._db.execute("ALTER TABLE session_docs ADD COLUMN last_event_ns INTEGER NOT NULL DEFAULT 0")
+        if "rounds_written" not in cols:
+            self._db.execute("ALTER TABLE session_docs ADD COLUMN rounds_written INTEGER NOT NULL DEFAULT 0")
         # 定时任务的调度信息:上次检查时间、连续无新事件次数(用于静止降频)
         for name, ddl in (("checked_at", "INTEGER NOT NULL DEFAULT 0"), ("idle_rounds", "INTEGER NOT NULL DEFAULT 0")):
             if name not in cols:
@@ -107,7 +117,7 @@ class DocStore:
     def get(self, session_id: str) -> Optional[DocRecord]:
         with self._lock:
             row = self._db.execute(
-                "SELECT session_id, doc_token, doc_url, last_event_id, last_event_ms "
+                "SELECT session_id, doc_token, doc_url, last_event_id, last_event_ms, last_event_ns, rounds_written "
                 "FROM session_docs WHERE session_id = ?",
                 (session_id,),
             ).fetchone()
@@ -121,12 +131,13 @@ class DocStore:
             )
             self._db.commit()
 
-    def advance(self, session_id: str, event_id: str, event_ms: int) -> None:
+    def advance(self, session_id: str, event_id: str, event_ms: int, event_ns: int = 0, rounds: int = 0) -> None:
+        """推进写入进度。``rounds`` 是**本批新增**的轮数,累加到 ``rounds_written``。"""
         with self._lock:
             self._db.execute(
-                "UPDATE session_docs SET last_event_id=?, last_event_ms=?, idle_rounds=0, "
-                "checked_at=?, updated_at=? WHERE session_id=?",
-                (event_id, event_ms, int(self._clock()), int(self._clock()), session_id),
+                "UPDATE session_docs SET last_event_id=?, last_event_ms=?, last_event_ns=?, idle_rounds=0, "
+                "rounds_written=rounds_written+?, checked_at=?, updated_at=? WHERE session_id=?",
+                (event_id, event_ms, event_ns, rounds, int(self._clock()), int(self._clock()), session_id),
             )
             self._db.commit()
 
@@ -147,6 +158,16 @@ class DocStore:
                 "SELECT checked_at, idle_rounds FROM session_docs WHERE session_id = ?", (session_id,)
             ).fetchone()
         return (row[0], row[1]) if row else (0, 0)
+
+
+def _render(events: list[dict], first_round: int = 1) -> tuple[str, str, int, int, int]:
+    """渲染并返回 (XML, 最后事件 id, 最后事件毫秒, 最后事件纳秒, 本批轮数)。"""
+    from .docrender import analyse
+
+    xml, last_id, last_ms, _ = render_events_xml(events, first_round)
+    ordered = stream_order(events)
+    rounds = len(analyse(events, first_round).rounds) if ordered else 0
+    return xml, last_id, last_ms, (ts_ns(ordered[-1].get("processed_at")) if ordered else 0), rounds
 
 
 def render_events(events: list[dict]) -> tuple[str, str, int]:
@@ -176,7 +197,9 @@ class SessionDocSink:
             log.warning("session 文档写入失败 session=%s: %s", session_id, error)
             return None
 
-    async def publish_new(self, session_id: str, new_events: list[dict], *, title: str) -> Optional[str]:
+    async def publish_new(
+        self, session_id: str, new_events: list[dict], *, title: str, first_round: int = 1
+    ) -> Optional[str]:
         """写入**已经是增量**的事件(调用方保证它们都在已记录的最后事件之后,且按时间升序)。**不抛异常**。
 
         与 ``publish`` 的区别:不再自己按事件 id / 时间切分,省去全量比对,配合 incremental 使用。
@@ -185,14 +208,14 @@ class SessionDocSink:
             lock = self._locks.setdefault(session_id, asyncio.Lock())
             async with lock:
                 record = self._store.get(session_id)
-                text, last_id, last_ms = render_events(new_events)
+                text, last_id, last_ms, last_ns, rounds = _render(new_events, first_round)
                 if not text:
                     return record.doc_url if record else None
                 if record is None:
                     record = await self._create(session_id, title, text)
                 else:
                     await self._append(record.doc_token, text)
-                self._store.advance(session_id, last_id, last_ms)
+                self._store.advance(session_id, last_id, last_ms, last_ns, rounds)
                 return record.doc_url
         except Exception as error:  # noqa: BLE001 - 文档只是交付视图,不得影响主流程
             log.warning("session 文档写入失败 session=%s: %s", session_id, error)
@@ -202,9 +225,9 @@ class SessionDocSink:
         lock = self._locks.setdefault(session_id, asyncio.Lock())
         async with lock:
             record = self._store.get(session_id)
-            ordered = sorted((e for e in events if isinstance(e, dict)), key=lambda e: ts_ms(e.get("processed_at")))
+            ordered = stream_order(events)
             pending = _after(ordered, record)
-            text, last_id, last_ms = render_events(pending)
+            text, last_id, last_ms, last_ns, rounds = _render(pending)
             if not text:
                 return record.doc_url if record else None
             if record is None:
@@ -212,7 +235,7 @@ class SessionDocSink:
                 # 创建时正文已一并写入
             else:
                 await self._append(record.doc_token, text)
-            self._store.advance(session_id, last_id, last_ms)
+            self._store.advance(session_id, last_id, last_ms, last_ns, rounds)
             return record.doc_url
 
     async def _create(self, session_id: str, title: str, first_body: str) -> DocRecord:
@@ -242,10 +265,22 @@ def _escape_title(title: str) -> str:
 
 
 def _after(ordered: list[dict], record: Optional[DocRecord]) -> list[dict]:
-    """取 record 之后的事件。优先按事件 id 定位;找不到(被清理)时按时间,避免重复追加。"""
+    """取 record 之后的事件。优先按事件 id 定位;找不到(被清理)时按**纳秒**时间,避免重复追加。"""
     if record is None or not record.last_event_id:
         return ordered
     for index, event in enumerate(ordered):
         if event.get("id") == record.last_event_id:
             return ordered[index + 1:]
-    return [e for e in ordered if ts_ms(e.get("processed_at")) > record.last_event_ms]
+    return newer_than(ordered, record)
+
+
+def newer_than(events: list[dict], record: "DocRecord") -> list[dict]:
+    """严格晚于 record 最后写入事件的那些。
+
+    必须用纳秒:毫秒会把"与上次末尾同一毫秒的新事件"误判成已写过,永久丢掉它(约 1% 的事件如此)。
+    老库升级后 ``last_event_ns`` 为 0,此时只能退回毫秒,并且用 ``>=`` 偏向"多写"而不是"丢":
+    宁可偶尔重复一个事件,也不能丢。
+    """
+    if record.last_event_ns:
+        return [e for e in events if ts_ns(e.get("processed_at")) > record.last_event_ns]
+    return [e for e in events if ts_ms(e.get("processed_at")) >= record.last_event_ms]

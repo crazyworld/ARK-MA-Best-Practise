@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional
 from urllib.parse import quote, urlencode
 
-from .events import ts_ms
+from .events import ts_ns
 
 log = logging.getLogger("arkagent.observability.incremental")
 
@@ -92,7 +92,7 @@ async def _pull_desc(
 
 
 def _check_desc(batch: list[dict]) -> None:
-    times = [ts_ms(e.get("processed_at")) for e in batch]
+    times = [ts_ns(e.get("processed_at")) for e in batch]
     if any(a < b for a, b in zip(times, times[1:])):
         raise DescOrderUnreliable("返回的事件不是倒序")
 

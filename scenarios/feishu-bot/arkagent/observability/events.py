@@ -35,9 +35,44 @@ COMMAND_PREVIEW_CHARS = 200
 
 
 def ts_ms(value: Any) -> int:
-    """解析方舟事件的 processed_at(纳秒精度,fromisoformat 只认到微秒)。"""
+    """解析方舟事件的 processed_at 为毫秒。**只用于展示和算耗时,不要用来给事件排序**——毫秒会把
+    同一毫秒内的多个事件并成一个键(实测同一 session 里有 17 组、38 个事件毫秒相同),排序会错位。"""
     text = _FRACTION.sub(r"\1", str(value or "")).replace("Z", "+00:00")
     return int(datetime.fromisoformat(text).timestamp() * 1000)
+
+
+_NS_PARTS = re.compile(r"^(.*?T\d\d:\d\d:\d\d)(?:\.(\d+))?(.*)$")
+
+
+def ts_ns(value: Any) -> int:
+    """processed_at 的**纳秒**整数,事件排序专用。
+
+    实测 6 个真实 session 按它排序后与方舟接口原始返回顺序**逐个一致**;纳秒仍相同的(约占 1%)
+    由调用方用输入位置作次级键保持稳定。解析不了的时间戳返回 0(排到最前),不抛异常。
+    """
+    m = _NS_PARTS.match(str(value or ""))
+    if not m:
+        return 0
+    base, frac, tz = m.group(1), m.group(2) or "", m.group(3)
+    try:
+        seconds = int(datetime.fromisoformat(base + tz.replace("Z", "+00:00")).timestamp())
+    except ValueError:
+        return 0
+    return seconds * 10**9 + int((frac + "000000000")[:9])
+
+
+def stream_order(events: list) -> list:
+    """返回按事件发生顺序排列的事件。
+
+    **接口给的顺序是权威的**:输入的纳秒时间已经非降序(正常情况——方舟返回的就是这样,实测 6 个真实 session
+    逐个一致,其中纳秒完全相同的 ``session.usage`` → ``session.status_idle`` 也靠接口顺序区分)时,
+    原样保留,不重排。只有检测到乱序才排序:纳秒为主键,输入位置为次级键,时间戳相同的保持原相对顺序。
+    """
+    items = [e for e in events if isinstance(e, dict)]
+    keys = [ts_ns(e.get("processed_at")) for e in items]
+    if all(a <= b for a, b in zip(keys, keys[1:])):
+        return items
+    return [e for _, _, e in sorted(((k, i, e) for i, (k, e) in enumerate(zip(keys, items))), key=lambda t: (t[0], t[1]))]
 
 
 def event_text(event: dict) -> str:
@@ -73,10 +108,7 @@ class _Parser:
         self._last_phase = ""
 
     def run(self, events: list[dict]) -> SessionNode:
-        ordered = sorted(
-            (e for e in events if isinstance(e, dict)),
-            key=lambda e: ts_ms(e.get("processed_at")),
-        )
+        ordered = stream_order(events)
         self._node.event_count = len(ordered)
         for event in ordered:
             handler = getattr(self, "_on_" + str(event.get("type", "")).replace(".", "_"), None)

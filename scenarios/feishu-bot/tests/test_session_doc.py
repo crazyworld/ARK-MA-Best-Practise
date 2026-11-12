@@ -76,7 +76,7 @@ def test_render_never_truncates_large_bodies():
     assert big in _all_ids(body) and "已截断" not in body
 
 
-def test_render_groups_into_turn_and_span_with_key_info():
+def test_render_groups_into_round_and_span_with_key_info():
     events = [
         ev("user.message", 1, "u1", content=text("问")),
         ev("span.model_request_start", 2, "ms1"),
@@ -88,23 +88,22 @@ def test_render_groups_into_turn_and_span_with_key_info():
     ]
     body, _, _ = render_events(events)
     plain = re.sub(r"<[^>]+>", "", body)
-    assert "第 1 轮推理" in plain and "2 个 Span" in plain and "结束原因 end_turn" in plain
-    assert "模型推理" in plain and "2.0 秒" in plain and "in 100" in plain and "out 7" in plain and "cache 3" in plain
-    assert "bash" in plain and "工具调用" in plain and "4.0 秒" in plain
-    assert 'emoji="❌"' in body and 'emoji="✅"' in body        # 失败红叉、成功绿勾
+    assert "第 1 轮对话" in plain and "已完成" in plain and "模型推理 1 次" in plain and "工具调用 1 次" in plain
+    assert "2.0 秒" in plain and "in 100" in plain and "out 7" in plain and "cache 3" in plain     # 模型用量不脱敏
+    assert "bash" in plain and "4.0 秒" in plain
+    assert 'emoji="❌"' in body and 'emoji="✅"' in body        # 工具报错的 Span 标红;本轮最终完成仍是绿
 
 
-def test_turn_count_matches_user_messages_even_with_leading_state_events():
+def test_round_count_matches_user_messages_even_with_leading_state_events():
     events = [
         ev("session.status_running", 0, "s0"), ev("session.thread_status_running", 0, "t0"),
         ev("user.message", 1, "u1", content=text("a")), ev("session.status_idle", 2, "i1", stop_reason={"type": "end_turn"}),
         ev("user.message", 3, "u2", content=text("b")), ev("session.usage", 4, "us", usage={}),
     ]
-    from arkagent.observability.docrender import build_turns
-    turns = build_turns(events)
-    assert len(turns) == 2                                    # 开头的状态事件不能自成一轮
-    placed = [e["id"] for t in turns for e in [*t.head, *t.loose, *[x for s in t.spans for x in s.events]]]
-    assert sorted(placed) == sorted(e["id"] for e in events)  # 每个事件恰好一次
+    from arkagent.observability.docrender import analyse
+    a = analyse(events)
+    assert len(a.rounds) == 2                                 # 开头的状态事件不能自成一轮
+    assert [e["id"] for e in a.ordered] == ["s0", "t0", "u1", "i1", "u2", "us"]   # 事件一个不少、顺序不变
 
 
 def test_unfinished_tool_is_marked_pending_and_still_rendered():

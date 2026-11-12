@@ -10,8 +10,19 @@ from typing import Any
 
 REDACTED = "[REDACTED]"
 
+# 键名规则:只认"凭据类"字段,不能用"含 token 子串"——模型用量字段 input_tokens / output_tokens /
+# cache_read_input_tokens / total_tokens 的名字里都有 token,那是**计数**,不是机密(2026-11-12 实测:
+# 旧规则把整份文档里的模型用量全替换成了 [REDACTED])。
+#
+# 区分办法:凭据的名字里 token 是**单数**(access_token、refresh_token、token),用量是**复数**(…_tokens)。
+# 这是启发式:单数的 token 一律当凭据,复数的 tokens 一律当计数,不再往下细分。
 _SENSITIVE_KEY = re.compile(
-    r"token|secret|password|passwd|authorization|api[-_]?key|credential|cookie",
+    r"(?<![A-Za-z])(?:"
+    r"(?:access|refresh|id|auth|bearer|session|api|user|app|tenant)[-_]?token(?!s)"
+    r"|token(?!s)"                      # 字段名恰好是 token
+    r"|secret|password|passwd|authorization|api[-_]?key|credential|cookie"
+    r"|auth[-_]?header[-_]?value"       # BYOK_MODEL_AUTH_HEADER_VALUE:请求级模型鉴权头的值
+    r")",
     re.IGNORECASE,
 )
 
@@ -30,10 +41,18 @@ _TEXT_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
         ),
         r"\1" + REDACTED,
     ),
+    # JSON 文本:"access_token": "xxx"(键、值都带引号;上面的规则要求键后紧跟 = 或 :,匹配不到)
+    (
+        re.compile(
+            r"(?i)(\"[A-Za-z0-9_-]*(?:token(?!s)|secret|password|passwd|api[-_]?key|authorization|credential|cookie"
+            r"|auth[-_]?header[-_]?value)[A-Za-z0-9_-]*\"\s*:\s*)\"[^\"]*\""
+        ),
+        r'\1"' + REDACTED + '"',
+    ),
     # FOO_TOKEN=xxx / apiKey: xxx
     (
         re.compile(
-            r"(?i)\b([A-Za-z0-9_]*(?:token|secret|password|passwd|api_?key)[A-Za-z0-9_]*)"
+            r"(?i)\b([A-Za-z0-9_]*(?:token(?!s)|secret|password|passwd|api_?key)[A-Za-z0-9_]*)"
             r"(\s*[=:]\s*)[^\s'\",;]+"
         ),
         r"\1\2" + REDACTED,

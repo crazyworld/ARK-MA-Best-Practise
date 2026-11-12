@@ -17,6 +17,15 @@ def ev(sec, eid, etype="agent.message"):
             "content": [{"type": "text", "text": eid}]}
 
 
+def idle_ev(sec, eid):
+    return ev(sec, eid, "session.status_idle") | {"stop_reason": {"type": "end_turn"}}
+
+
+def done(events, sec=999):
+    """给一批事件补上 idle 结尾,模拟「这一轮已经结束」——调度器只写完整的一轮(见 complete_prefix)。"""
+    return [*events, idle_ev(sec, f"idle-{events[-1]['id']}")]
+
+
 class FakeArk:
     """模拟 GET /sessions/{id}/events:支持 limit / order / page,末页 next_page 为空。"""
 
@@ -151,11 +160,11 @@ def make(tmp_path, refs, sessions, *, api=None, cfg=CFG, now=None):
 
 
 async def test_cycle_writes_new_session_then_only_appends_new_events(tmp_path):
-    sessions = {"s1": [ev(i, f"e{i}") for i in range(1, 4)]}
+    sessions = {"s1": done([ev(i, f"e{i}") for i in range(1, 4)], sec=5)}
     sched, store, api, ark, now = make(tmp_path, [ref("s1")], sessions)
     assert (await sched.run_once())["written"] == 1 and api.calls[0][0] == "POST"
     now[0] += 130
-    sessions["s1"].append(ev(10, "e10"))
+    sessions["s1"] += done([ev(10, "e10")], sec=11)
     assert (await sched.run_once())["written"] == 1
     method, path, body = api.calls[1]
     assert method == "PUT" and "e10" in body["content"] and "e1\"" not in body["content"]   # 只追加新的
@@ -164,7 +173,7 @@ async def test_cycle_writes_new_session_then_only_appends_new_events(tmp_path):
 
 
 async def test_cycle_caps_work_and_prefers_longest_unchecked(tmp_path):
-    sessions = {f"s{i}": [ev(1, f"s{i}-e")] for i in range(5)}
+    sessions = {f"s{i}": done([ev(1, f"s{i}-e")], sec=2) for i in range(5)}
     sched, store, api, ark, now = make(tmp_path, [ref(f"s{i}") for i in range(5)], sessions)
     assert (await sched.run_once())["written"] == 2                    # max_per_cycle=2
     now[0] += 5
@@ -174,7 +183,7 @@ async def test_cycle_caps_work_and_prefers_longest_unchecked(tmp_path):
 
 
 async def test_write_failure_does_not_advance_and_is_retried_next_cycle(tmp_path):
-    sessions = {"s1": [ev(1, "e1")]}
+    sessions = {"s1": done([ev(1, "e1")], sec=2)}
     sched, store, api, ark, now = make(tmp_path, [ref("s1")], sessions, api=FakeApi(fail=True))
     assert (await sched.run_once())["failed"] == 1 and store.get("s1") is None
     api.fail = False
@@ -192,7 +201,7 @@ async def test_over_limit_backlog_is_not_written_partially_and_not_marked_done(t
     assert api.calls == [] and store.get("s") is None                    # 没写任何半截内容,也没有记录
 
 async def test_one_broken_session_does_not_block_others(tmp_path):
-    sessions = {"bad": RuntimeError("500"), "good": [ev(1, "g1")]}
+    sessions = {"bad": RuntimeError("500"), "good": done([ev(1, "g1")], sec=2)}
     sched, store, api, ark, now = make(tmp_path, [ref("bad"), ref("good")], sessions)
     stats = await sched.run_once()
     assert stats["failed"] == 1 and stats["written"] == 1
@@ -214,11 +223,70 @@ async def test_already_synced_long_running_session_is_followed_beyond_the_window
 
 
 async def test_purged_last_event_does_not_duplicate_already_written_content(tmp_path):
-    sessions = {"s": [ev(i, f"e{i}") for i in range(1, 5)]}
+    sessions = {"s": done([ev(i, f"e{i}") for i in range(1, 5)], sec=6)}
     sched, store, api, ark, now = make(tmp_path, [ref("s")], sessions)
     await sched.run_once()
-    sessions["s"] = [ev(i, f"e{i}") for i in range(3, 5)] + [ev(9, "e9")]   # 前面的被方舟清理,e4(上次末尾)还在
+    last_idle = "idle-e4"
+    sessions["s"] = [ev(i, f"e{i}") for i in range(3, 5)] + [idle_ev(6, last_idle)] + done([ev(9, "e9")], sec=10)   # 前面被方舟清理,上次末尾 idle 还在
     now[0] += 130
     await sched.run_once()
     appended = api.calls[1][2]["content"]
     assert "e9" in appended and "e3\"" not in appended and "e4\"" not in appended
+
+
+# ---- 只写完整的一轮对话(调度层):运行中的 session 不落笔 -----------------------------------
+def ref_at(sid, events):
+    """开始时间取自事件本身:这组用例的时钟跟着真实事件走,ref 若仍用固定的假时间会被回看窗口(正确地)过滤掉。"""
+    return ref(sid, started=int(ts_of_event(events[0]) * 1000))
+
+
+def running_tail(sec0, n=1):
+    """一轮正在进行:用户消息 + 一个还没返回的工具调用,没有 idle。"""
+    return [ev(sec0, f"u{n}", "user.message"), ev(sec0 + 1, f"tu{n}", "agent.tool_use") | {"name": "bash", "input": {}}]
+
+
+async def test_session_still_running_writes_nothing_and_is_not_counted_as_idle(tmp_path):
+    sessions = {"s": running_tail(1)}
+    sched, store, api, ark, now = make(tmp_path, [ref_at("s", sessions["s"])], sessions)
+    now[0] = ts_of_event(sessions["s"][-1]) + 5          # 刚有动静
+    assert (await sched.run_once())["written"] == 0 and api.calls == [] and store.get("s") is None
+
+
+async def test_earlier_complete_rounds_are_written_while_current_round_waits(tmp_path):
+    sessions = {"s": done([ev(1, "a1")], sec=2) + running_tail(10, n=2)}
+    sched, store, api, ark, now = make(tmp_path, [ref_at("s", sessions["s"])], sessions)
+    now[0] = ts_of_event(sessions["s"][-1]) + 5
+    assert (await sched.run_once())["written"] == 1
+    written = api.calls[0][2]["content"]
+    assert "a1" in written and "tu2" not in written and "⏳" not in written     # 第 1 轮写了,进行中的第 2 轮没写
+    sessions["s"] = sessions["s"] + [ev(14, "tr2", "agent.tool_result") | {"tool_use_id": "tu2", "is_error": False, "content": []}, idle_ev(15, "i2")]
+    now[0] += 130
+    assert (await sched.run_once())["written"] == 1
+    appended = api.calls[1][2]["content"]
+    assert "tu2" in appended and "tr2" in appended and "缺调用" not in appended   # 第 2 轮结束后整轮一起写,配对完整
+    assert "第 2 轮对话" in re.sub(r"<[^>]+>", "", appended) and "第 1 轮对话" not in re.sub(r"<[^>]+>", "", appended)   # 轮号接续
+
+
+async def test_stuck_session_is_flushed_after_the_stale_window(tmp_path):
+    sessions = {"s": running_tail(1)}
+    sched, store, api, ark, now = make(tmp_path, [ref_at("s", sessions["s"])], sessions)
+    now[0] = ts_of_event(sessions["s"][-1]) + 31 * 60                            # 31 分钟没有任何动静
+    assert (await sched.run_once())["written"] == 1 and api.calls[0][0] == "POST"
+
+
+async def test_waiting_on_a_running_round_does_not_trigger_idle_backoff(tmp_path):
+    sessions = {"s": done([ev(1, "a1")], sec=2) + running_tail(10, n=2)}
+    sched, store, api, ark, now = make(tmp_path, [ref_at("s", sessions["s"])], sessions)
+    now[0] = ts_of_event(sessions["s"][-1]) + 5
+    await sched.run_once()
+    now[0] += 130
+    await sched.run_once()                                                       # 第 2 轮仍在跑:暂缓,但不能当"静止"降频
+    assert store.schedule_info("s")[1] == 0
+
+
+def ts_of_event(e):
+    from arkagent.observability.events import ts_ms
+    return ts_ms(e["processed_at"]) / 1000
+
+
+import re  # noqa: E402

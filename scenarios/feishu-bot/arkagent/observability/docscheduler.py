@@ -24,7 +24,8 @@ from dataclasses import dataclass
 from typing import Callable, Iterable, Optional
 
 from .adapters.base import TraceRef, TraceSource
-from .docsink import DocStore, SessionDocSink
+from .docsink import DocStore, SessionDocSink, newer_than
+from .events import stream_order, ts_ms
 from .incremental import Fetch, pull_new_events
 
 log = logging.getLogger("arkagent.observability.docscheduler")
@@ -41,6 +42,9 @@ class SyncConfig:
     candidates_per_source: int = 200  # 每个库取多少候选
     # 静止降频:连续 N 次没有新事件后,检查间隔乘以对应倍数
     idle_backoff: tuple[tuple[int, int], ...] = ((3, 3), (10, 15), (30, 60))
+    # 一轮对话没有 idle 结尾、且最后一个事件已经这么久没动静 → 视为异常终止,强制写入(否则永远写不出来)。
+    # 实测一次工具调用最长约 10.5 分钟、一轮对话最长约 18.6 分钟,取 30 分钟留余量。
+    stale_s: int = 1800
 
 
 def due(
@@ -125,6 +129,10 @@ class DocScheduler:
         due_refs.sort(key=lambda item: item[0])  # 最久没检查的优先
         return [ref for _, ref in due_refs[: self._cfg.max_per_cycle]]
 
+    def _next_round(self, sid: str) -> int:
+        record = self._store.get(sid)
+        return (record.rounds_written if record else 0) + 1
+
     async def _sync_one(self, ref: TraceRef) -> str:
         sid = _primary_session(ref)
         record = self._store.get(sid)
@@ -141,14 +149,41 @@ class DocScheduler:
             log.warning("session 事件过多,本周期没能追上已同步位置,放弃重试 session=%s", sid)
             return "failed"
         events = _drop_already_written(pull.events, record)
+        # 只写完整的一轮对话;正在进行的这一轮留到下个周期(见 complete_prefix)
+        events, held = complete_prefix(events, now_ms=int(self._clock() * 1000), stale_ms=self._cfg.stale_s * 1000)
         if not events:
             if record:
-                self._store.mark_checked(sid, idle=True)
+                self._store.mark_checked(sid, idle=not held)   # 有暂缓的事件说明 session 在动,不算"静止"
             return "idle"
-        url = await self._sink.publish_new(sid, events, title=_title(ref))
+        url = await self._sink.publish_new(sid, events, title=_title(ref), first_round=self._next_round(sid))
         if url is None:
             return "failed"  # 写失败:进度没推进,下个周期自然补上
         return "written"
+
+
+def complete_prefix(events: list[dict], *, now_ms: int, stale_ms: int) -> tuple[list[dict], list[dict]]:
+    """把事件切成 (可以写入的, 本周期暂缓的)。**只在一轮对话的边界落笔**。
+
+    文档只能追加,写出去就改不了,所以不能在一个 Span / 并行批次中间写:实测在"3 个并行工具只拿到前 2 个
+    tool_use"时写入,会留下永远停在"未完成"的卡片、被切成两半的 grid、下一批里找不到调用的 tool_result,
+    以及重新从 1 开始的轮号。四个后果都无法事后修复。
+
+    规则(边界 = ``session.status_idle``,即一轮对话结束):
+    - 最后一个事件就是 idle → 全部可写;
+    - 否则只写到**最近一个** idle 为止,其后(正在进行的这一轮)暂缓;
+    - 从未出现过 idle → 什么都不写;
+    - 兜底:暂缓部分的最后一个事件已经 ``stale_ms`` 没有动静 → 视为异常终止,全部写入,否则它永远写不出来。
+    """
+    ordered = stream_order(events)
+    if not ordered:
+        return [], []
+    last_idle = max((i for i, e in enumerate(ordered) if e.get("type") == "session.status_idle"), default=-1)
+    if last_idle == len(ordered) - 1:
+        return ordered, []
+    held = ordered[last_idle + 1 :]
+    if now_ms - ts_ms(held[-1].get("processed_at")) >= stale_ms:
+        return ordered, []
+    return ordered[: last_idle + 1], held
 
 
 def _primary_session(ref: TraceRef) -> str:
@@ -159,14 +194,12 @@ def _primary_session(ref: TraceRef) -> str:
 
 
 def _drop_already_written(events: list[dict], record) -> list[dict]:
-    """last_event_id 被清理(没追上)时 incremental 返回的是全部可见事件,这里按时间去掉已写过的。"""
-    if record is None or not record.last_event_ms:
+    """last_event_id 被清理(没追上)时 incremental 返回的是全部可见事件,这里按**纳秒**去掉已写过的。"""
+    if record is None or not record.last_event_id:
         return events
-    from .events import ts_ms
-
     if events and events[0].get("id") == record.last_event_id:
         return events[1:]
-    return [e for e in events if ts_ms(e.get("processed_at")) > record.last_event_ms]
+    return newer_than(events, record)
 
 
 def _title(ref: TraceRef) -> str:
