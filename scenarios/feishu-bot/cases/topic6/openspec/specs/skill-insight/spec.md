@@ -47,7 +47,7 @@ E4 SHALL 并发执行打标（`_tagging`）与草稿枚举（`_curation`），�
 - **THEN** 解析为 0 组，不产生伪数据行
 
 ### Requirement: Prompt 选择
-`load_prompt_template` 与子步骤 Prompt 加载 SHALL 选取目录下版本号数值最大的 `v*.md`，截取 `<!-- PROMPT_START -->` 之后内容，并在前面拼接 `_shared/role_style.md`。因此新增 Prompt 版本即生效；回滚 MUST 通过新增更高版本号实现，MUST NOT 删除或改写旧版本。当前活跃：E1 v3、E2 v8、E3 v7 + `_tagging/v3` + `_insight_draft/v1`、E4 `_tagging/v5` + `_curation/v3` + `_arbitration/v3` + `_writing_coop_risk/v4` + `_writing_marketing_consumer/v2`。子步骤 Prompt 内容纳入 checkpoint 签名。
+`load_prompt_template` 与子步骤 Prompt 加载 SHALL 选取目录下版本号数值最大的 `v*.md`，截取 `<!-- PROMPT_START -->` 之后内容，并在前面拼接 `_shared/role_style.md`。因此新增 Prompt 版本即生效；回滚 MUST 通过新增更高版本号实现，MUST NOT 删除或改写旧版本。当前活跃：E1 v3、E2 v8、E3 v8 + `_tagging/v3` + `_insight_draft/v1`、E4 `_tagging/v5` + `_curation/v3` + `_arbitration/v3` + `_writing_coop_risk/v4` + `_writing_marketing_consumer/v2`。子步骤 Prompt 内容纳入 checkpoint 签名。
 
 #### Scenario: v10 排序
 - **WHEN** 目录内同时有 `v9.md` 与 `v10.md`

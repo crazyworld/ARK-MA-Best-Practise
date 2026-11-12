@@ -55,20 +55,23 @@ def test_e3_second_sort_key_is_cluster_average_score():
     assert agg.set_index("事件簇名").loc["A", "平均标准化分"] == pytest.approx(60.0)
 
 
-def test_e3_table_keeps_max_heat_and_appends_average_column_last():
-    """「热度值」列保持最高分不变;排序锚点(簇内平均分)作为最后一列追加展示。"""
+def test_e3_table_keeps_original_columns_and_hides_average_sort_key():
+    """「平均热度值」只是排序用的临时值:按它排序,但不进 e3_data 表格,飞书报告/妙搭页面不出现该列。
+    表格保持原版 6 列,「热度值」仍为簇内最高分。"""
     e3 = _load("t6_e3_q1b", "e3_platforms.py")
     df = pd.DataFrame(_rows("A", [99, 41, 40]))
     md = e3.prep_e3_platforms(df)
     header = next(line for line in md.splitlines() if line.startswith("| 排名 |"))
-    assert header == "| 排名 | 事件名称 | 行业 | 热点总计 | 热度值 | 具体热搜 | 平均热度值 |"
+    assert header == "| 排名 | 事件名称 | 行业 | 热点总计 | 热度值 | 具体热搜 |"
     cells = [c.strip() for c in next(line for line in md.splitlines() if line.startswith("| 1 |")).strip("|").split("|")]
-    assert cells[4] == "99.0" and cells[-1] == "60.0"
+    assert len(cells) == 6 and cells[4] == "99.0"
+    assert "平均热度值" not in md and "60.0" not in md
 
 
-def test_e3_active_prompt_documents_average_column():
+def test_e3_active_prompt_has_no_average_column():
     body = _latest(INSIGHT / "02_洞察" / "E3_平台新鲜事").read_text(encoding="utf-8").split("<!-- PROMPT_START -->", 1)[1]
-    assert "热度值/具体热搜/平均热度值" in body
+    assert "平均热度值" not in body
+    assert "排名/事件名称/行业/热点总计/热度值/具体热搜）" in body
 
 
 # ---------------------------------------------------------------- Q4
