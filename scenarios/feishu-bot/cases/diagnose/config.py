@@ -42,6 +42,24 @@ class DiagnoseConfig:
     db_paths: dict
     authorized_open_ids: tuple[str, ...]
     session_timeout_ms: int
+    # session 日志落飞书文档(定时任务)。doc_parent_token 为空 = 不启用。
+    doc_parent_token: str = ""
+    doc_sync_interval_s: int = 120
+    doc_lookback_days: int = 7
+    doc_max_per_cycle: int = 20
+    doc_db_path: str = ""
+
+
+def _positive(raw: Optional[str], default: int, name: str) -> int:
+    if not (raw or "").strip():
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        raise RuntimeError(f"{name} 必须是整数:{raw!r}") from None
+    if value <= 0:
+        raise RuntimeError(f"{name} 必须大于 0:{value}")
+    return value
 
 
 def load_case_config(env: Optional[Mapping[str, str]] = None) -> DiagnoseConfig:
@@ -59,6 +77,14 @@ def load_case_config(env: Optional[Mapping[str, str]] = None) -> DiagnoseConfig:
         db_paths[name] = path
     if not db_paths:
         raise RuntimeError("至少需要配置一个待排查的库:" + " / ".join(DB_ENV_KEYS.values()))
+    # 两个 bot 指向同一个库文件会让数据串号(分析师和 ada-pm 的库都叫 gateway.db,只靠目录区分,
+    # 配错一个路径就会把别的 bot 的会话当成自己的)。按真实路径判重,软链接也算。
+    by_real: dict[str, str] = {}
+    for name, path in db_paths.items():
+        real = os.path.realpath(path)
+        if real in by_real:
+            raise RuntimeError(f"{DB_ENV_KEYS[by_real[real]]} 与 {DB_ENV_KEYS[name]} 指向同一个库文件:{real}")
+        by_real[real] = name
     return DiagnoseConfig(
         ark_api_key=environ["ARK_API_KEY"].strip(),
         ark_base_url=(environ.get("ARK_BASE_URL") or "https://ark.cn-beijing.volces.com/api/v3").rstrip("/"),
@@ -71,4 +97,9 @@ def load_case_config(env: Optional[Mapping[str, str]] = None) -> DiagnoseConfig:
             x.strip() for x in (environ.get("AUTHORIZED_OPEN_IDS") or "").replace(",", " ").split() if x.strip()
         ),
         session_timeout_ms=int(environ.get("DIAGNOSE_SESSION_TIMEOUT_MS") or 180_000),
+        doc_parent_token=(environ.get("SESSION_DOC_PARENT_TOKEN") or "").strip(),
+        doc_sync_interval_s=_positive(environ.get("SESSION_DOC_INTERVAL_S"), 120, "SESSION_DOC_INTERVAL_S"),
+        doc_lookback_days=_positive(environ.get("SESSION_DOC_LOOKBACK_DAYS"), 7, "SESSION_DOC_LOOKBACK_DAYS"),
+        doc_max_per_cycle=_positive(environ.get("SESSION_DOC_MAX_PER_CYCLE"), 20, "SESSION_DOC_MAX_PER_CYCLE"),
+        doc_db_path=(environ.get("SESSION_DOC_DB_PATH") or "").strip(),
     )

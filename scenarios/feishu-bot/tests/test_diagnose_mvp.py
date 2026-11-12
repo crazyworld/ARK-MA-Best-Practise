@@ -532,3 +532,88 @@ def test_errors_are_each_kept():
     ]
     codes = [f.code for f in diagnose(trace_of(events, "failed"))]
     assert codes.count("model_retries_exhausted") == 2
+
+
+# ---- 配置:两个 bot 不能指向同一个库 ------------------------------------------
+def _cfg_env(tmp_path, **paths):
+    env = {"ARK_API_KEY": "k", "FEISHU_APP_ID": "a", "FEISHU_APP_SECRET": "s",
+           "DIAGNOSE_AGENT_ID": "ag", "DIAGNOSE_ENVIRONMENT_ID": "en"}
+    env.update(paths)
+    return env
+
+
+def test_config_rejects_two_bots_pointing_at_the_same_db(tmp_path):
+    from diagnose.config import load_case_config
+
+    shared = tmp_path / "gateway.db"
+    shared.write_text("")
+    link = tmp_path / "link.db"
+    link.symlink_to(shared)
+    for second in (shared, link):   # 同一路径、软链接,都要识别
+        env = _cfg_env(tmp_path, ANALYST_GATEWAY_DB_PATH=str(shared), ADA_PM_GATEWAY_DB_PATH=str(second))
+        with pytest.raises(RuntimeError, match="同一个库文件"):
+            load_case_config(env)
+
+
+def test_config_accepts_same_filename_in_different_dirs(tmp_path):
+    from diagnose.config import load_case_config
+
+    for d in ("a", "b"):
+        (tmp_path / d).mkdir()
+        (tmp_path / d / "gateway.db").write_text("")
+    cfg = load_case_config(_cfg_env(
+        tmp_path,
+        ANALYST_GATEWAY_DB_PATH=str(tmp_path / "a" / "gateway.db"),
+        ADA_PM_GATEWAY_DB_PATH=str(tmp_path / "b" / "gateway.db"),
+    ))
+    assert sorted(cfg.db_paths) == ["ada-pm", "analyst"]   # 文件名相同但不是同一个库,放行
+
+
+# ---- 文档同步的接入 --------------------------------------------------------------
+def test_doc_sync_is_off_unless_a_parent_node_is_configured(tmp_path):
+    from diagnose.config import load_case_config
+
+    db = tmp_path / "t.db"
+    db.write_text("")
+    base = _cfg_env(tmp_path, TOPIC6_PIPELINE_DB_PATH=str(db))
+    assert load_case_config(base).doc_parent_token == ""
+    on = load_case_config({**base, "SESSION_DOC_PARENT_TOKEN": " wikcnX ", "SESSION_DOC_INTERVAL_S": "60"})
+    assert (on.doc_parent_token, on.doc_sync_interval_s, on.doc_lookback_days, on.doc_max_per_cycle) == ("wikcnX", 60, 7, 20)
+
+
+@pytest.mark.parametrize("raw", ["0", "-5", "abc"])
+def test_doc_sync_rejects_nonsense_intervals(tmp_path, raw):
+    from diagnose.config import load_case_config
+
+    db = tmp_path / "t.db"
+    db.write_text("")
+    with pytest.raises(RuntimeError, match="SESSION_DOC_INTERVAL_S"):
+        load_case_config({**_cfg_env(tmp_path, TOPIC6_PIPELINE_DB_PATH=str(db)), "SESSION_DOC_INTERVAL_S": raw})
+
+
+def test_start_background_is_a_noop_without_scheduler():
+    gw, loop = make_gateway()
+    gw.start_background()          # 未启用:不报错、不调度
+
+
+def test_start_background_schedules_the_loop_when_enabled():
+    import asyncio
+
+    class Sched:
+        async def run_once(self):
+            return {"written": 0, "failed": 0}
+
+    loop = asyncio.new_event_loop()
+    cfg = type("C", (), {"authorized_open_ids": (), "feishu_app_id": "x", "doc_sync_interval_s": 1, "doc_lookback_days": 7})()
+    gw = DiagnoseGateway(cfg, _Store(), None, None, loop, None, Sched())
+    import threading
+    t = threading.Thread(target=loop.run_forever, daemon=True)
+    t.start()
+    try:
+        gw.start_background()
+        import time
+        time.sleep(0.3)
+        assert [task for task in asyncio.all_tasks(loop)]        # 后台循环确实在事件循环上跑着
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        t.join(1)

@@ -8,9 +8,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from typing import Optional
 
 from arkagent.feishu import IncomingMessage
 from arkagent.gateway.orchestrator import KeyedQueue, result_to_reply
+from arkagent.observability.docscheduler import DocScheduler, SyncConfig, run_forever
+from arkagent.observability.docsink import DocStore, SessionDocSink, make_sdk_api
 from arkagent.observability.adapters.sqlite_sources import (
     ConversationSource,
     DigitalEmployeeSource,
@@ -49,7 +52,11 @@ def build_sources(db_paths: dict) -> dict:
 
 
 class DiagnoseGateway:
-    def __init__(self, config: DiagnoseConfig, store: GatewayStore, ark, reply, loop, tools: DiagnoseTools) -> None:
+    def __init__(
+        self, config: DiagnoseConfig, store: GatewayStore, ark, reply, loop, tools: DiagnoseTools,
+        doc_scheduler: Optional[DocScheduler] = None,
+    ) -> None:
+        self._doc_scheduler = doc_scheduler
         self._config = config
         self._store = store
         self._ark = ark
@@ -59,6 +66,14 @@ class DiagnoseGateway:
         self._queue = KeyedQueue()
         self._authorized = set(config.authorized_open_ids)
         self._watcher = UserIdWatcher(config.feishu_app_id)
+
+    def start_background(self) -> None:
+        """由 cli 在事件循环启动后调用:起文档同步的后台循环(未启用则什么都不做)。"""
+        if self._doc_scheduler is None:
+            return
+        interval = self._config.doc_sync_interval_s
+        asyncio.run_coroutine_threadsafe(run_forever(self._doc_scheduler, interval), self._loop)
+        log.info("session 文档同步已启动 interval=%ss lookback=%sd", interval, self._config.doc_lookback_days)
 
     def accept(self, message: IncomingMessage) -> bool:
         if not message.text.strip():
@@ -136,5 +151,22 @@ def build_gateway(config: DiagnoseConfig, ark, sender, loop: asyncio.AbstractEve
     async def reply(chat_id: str, text: str) -> None:
         await loop.run_in_executor(None, sender.send_to_chat, chat_id, text)
 
-    tools = DiagnoseTools(build_sources(config.db_paths), ark)
-    return DiagnoseGateway(config, store, ark, reply, loop, tools)
+    sources = build_sources(config.db_paths)
+    tools = DiagnoseTools(sources, ark)
+    scheduler = None
+    if config.doc_parent_token:
+        # 以排障应用自己的身份写;所有 bot 的 session 日志都落在同一个父节点下(MVP 不做隔离,见 docscheduler)。
+        doc_store = DocStore(config.doc_db_path or f"{case_paths.case_dir}/session_docs.db")
+        sink = SessionDocSink(doc_store, config.doc_parent_token, make_sdk_api(config.feishu_app_id, config.feishu_app_secret))
+        async def fetch(path: str) -> dict:  # incremental 的 Fetch:GET 一个 path 返回 JSON
+            return await ark._request("GET", path)
+
+        scheduler = DocScheduler(
+            sources, fetch, sink, doc_store,
+            SyncConfig(
+                interval_s=config.doc_sync_interval_s,
+                lookback_days=config.doc_lookback_days,
+                max_per_cycle=config.doc_max_per_cycle,
+            ),
+        )
+    return DiagnoseGateway(config, store, ark, reply, loop, tools, scheduler)

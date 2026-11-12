@@ -116,6 +116,9 @@ def _run(args: list[str] | None = None) -> None:
 
         thread = threading.Thread(target=loop.run_forever, name="gateway-loop", daemon=True)
         thread.start()
+        start_background = getattr(gateway, "start_background", None)
+        if callable(start_background):
+            start_background()  # 后台定时任务(如排障 Bot 的文档同步);必须在事件循环线程启动之后
         recover_active_jobs = getattr(gateway, "recover_active_jobs", None)
         if callable(recover_active_jobs):
             # topic6 在 Gateway 重启后从 MA 历史事件恢复 SSE / HC 卡片；不能阻塞
