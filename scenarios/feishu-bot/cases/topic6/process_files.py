@@ -191,7 +191,7 @@ class ProcessFileDelivery:
                 result["too_large"].append(item.source)
                 continue
             try:
-                token = self._feishu.upload_file(state["folder_token"], str(item.path), _flat_name(item.source))
+                token = self._feishu.upload_drive_file(state["folder_token"], str(item.path), _flat_name(item.source))
             except Exception as err:  # noqa: BLE001
                 result["failed"] += 1
                 log.warning("topic6 process file upload failed job=%s file=%s: %s", job.job_id, item.source, err)

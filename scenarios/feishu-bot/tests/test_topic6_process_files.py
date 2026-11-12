@@ -140,7 +140,7 @@ class _Feishu:
         self.folders.append((parent_token, name))
         return f"fld_{len(self.folders)}"
 
-    def upload_file(self, folder_token, file_path, file_name):
+    def upload_drive_file(self, folder_token, file_path, file_name):
         if self.fail_upload:
             raise RuntimeError("drive upload forbidden")
         self.uploads.append((folder_token, Path(file_path).read_bytes(), file_name))

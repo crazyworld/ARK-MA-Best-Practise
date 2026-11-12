@@ -63,7 +63,7 @@
 - **Q5 字数**：E4 B 组撰写 v2——「营销发现」100-120 字（营销观察案例卡与消费洞察洞察卡两处）、消费洞察「行为反应」80-100 字（信息不足不得编造凑字数）。
 - **R3**：`session.error` 的 `retry_status=retrying` 判断提前到 provider 重试之前，平台重试期间 Gateway 不叠加重试/催促。
 - **R4**：回复已完成/已停止/正在停止任务的进度卡片发 `/continue` 时直接提示，不再回落续跑同一用户的其他任务；沙箱故障文案去掉 topic6 入口不存在的按钮。
-- 影响文件：`process_files.py`（新）、`artifact_sync.py`、`gateway.py`、`topic6_hitl.py`、`job_notifier.py`、`arkagent/feishu.py`（upload_file）、
+- 影响文件：`process_files.py`（新）、`artifact_sync.py`、`gateway.py`、`topic6_hitl.py`、`job_notifier.py`、`arkagent/feishu.py`（upload_drive_file）、
   `topic6-insight/01_统计/e4_marketing.py`、`topic6-event-registry/scripts/{retain_original,run_c2,run_topic6_c2}.py`、`topic6-insight/01_统计/{e1_industry,e2_nodes,e3_platforms}.py`、
   `topic6-insight/02_洞察/{E2_营销节点/v8,E3_平台新鲜事/v7,E4_营销发现/_writing_marketing_consumer/v2}.md`、`topic6_runner.py`、`pipeline_store.py`、
   openspec（session-runner / skill-insight / skill-event-registry）、版本状态/version_mapping/ks 口径文档。
