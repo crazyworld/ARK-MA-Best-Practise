@@ -11,9 +11,16 @@ import logging
 
 from arkagent.feishu import IncomingMessage
 from arkagent.gateway.orchestrator import KeyedQueue, result_to_reply
-from arkagent.observability.adapters.sqlite_sources import PipelineJobSource, TopicxSource
+from arkagent.observability.adapters.sqlite_sources import (
+    ConversationSource,
+    DigitalEmployeeSource,
+    PipelineJobSource,
+    TopicxSource,
+)
 from arkagent.paths import get_case_paths
 from arkagent.store import GatewayStore
+
+from arkagent.preflight import UserIdWatcher
 
 from .config import DiagnoseConfig
 from .tools import DiagnoseTools, Scope
@@ -33,6 +40,11 @@ def build_sources(db_paths: dict) -> dict:
         # topicx 在前:task 视图包含 router session,信息最全。
         sources["topicx"] = TopicxSource(db_paths["topicx"], jobs)
     sources.update(jobs)
+    for name in ("analyst", "ada-pm"):  # 通用 Gateway:会话 → session
+        if name in db_paths:
+            sources[name] = ConversationSource(name, db_paths[name])
+    if "digital-employee" in db_paths:
+        sources["digital-employee"] = DigitalEmployeeSource("digital-employee", db_paths["digital-employee"])
     return sources
 
 
@@ -46,6 +58,7 @@ class DiagnoseGateway:
         self._tools = tools
         self._queue = KeyedQueue()
         self._authorized = set(config.authorized_open_ids)
+        self._watcher = UserIdWatcher(config.feishu_app_id)
 
     def accept(self, message: IncomingMessage) -> bool:
         if not message.text.strip():
@@ -74,6 +87,7 @@ class DiagnoseGateway:
         if self._authorized and message.user_open_id not in self._authorized:
             await self._reply(message.chat_id, "当前用户未授权,请联系管理员。")
             return
+        self._watcher.observe(message.user_id, message.chat_type)
         chat_id = message.chat_id
         # 范围只取自飞书消息本身,由网关绑定;工具参数里没有这些字段,模型无法改。
         scope = Scope(chat_id=chat_id, chat_type=message.chat_type, user_id=message.user_id)

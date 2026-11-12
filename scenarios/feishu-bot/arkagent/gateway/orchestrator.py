@@ -172,7 +172,9 @@ class Gateway:
             await self._reply(message.chat_id, "已收到，正在处理。首次启动可能需要几分钟。")
             with time_block("gateway.create_session", user=message.user_open_id, first=True):
                 session_id = await self._create_session(message)
-            self._store.save_session(key, session_id, self._agent_id, user_id=message.user_id)
+            self._store.save_session(
+                key, session_id, self._agent_id, user_id=message.user_id, chat_type=message.chat_type
+            )
         else:
             progress_task = asyncio.get_event_loop().create_task(self._delayed_progress(message.chat_id))
 

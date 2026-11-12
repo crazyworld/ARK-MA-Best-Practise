@@ -17,11 +17,16 @@ REQUIRED_KEYS = [
     "DIAGNOSE_ENVIRONMENT_ID",
 ]
 
-# 环境变量名 → 数据库类别。topicx 的 task_runs 与 topic5 / topic6 的 pipeline_jobs。
+# 环境变量名 → 数据库。topicx 的 task_runs、topic5 / topic6 的 pipeline_jobs、通用 Gateway 的 conversations、数字员工的 sessions。
 DB_ENV_KEYS = {
     "topicx": "TOPICX_CONTROL_DB_PATH",
     "topic5": "TOPIC5_PIPELINE_DB_PATH",
     "topic6": "TOPIC6_PIPELINE_DB_PATH",
+    # 通用 Gateway 类 bot:每个 case 一个库,各配一个。
+    "analyst": "ANALYST_GATEWAY_DB_PATH",
+    "ada-pm": "ADA_PM_GATEWAY_DB_PATH",
+    # 数字员工:独立的会话库。
+    "digital-employee": "DIGITAL_EMPLOYEE_SESSION_DB_PATH",
 }
 
 

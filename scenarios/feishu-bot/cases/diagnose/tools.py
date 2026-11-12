@@ -35,7 +35,11 @@ class Scope:
 
     def allows(self, ref: TraceRef) -> bool:
         if self.chat_type != "p2p":
-            return ref.chat_id == self.chat_id
+            # 群范围:chat_id 精确相等,且不是**明确标成私聊**的记录。
+            # chat_type 为空(升级前的旧数据,无法确认群还是私聊)按用户决策放行——它依赖\"私聊的
+            # chat_id 只出现在该私聊自己的会话里\"这一假设,不是强校验。新数据都带 chat_type,
+            # 不受此影响;私聊范围对旧数据则一律不放行(见下)。
+            return ref.chat_id == self.chat_id and ref.chat_type != "p2p"
         # 私聊:缺 user_id 或任务没记 user_id(旧数据 / 未开通权限)一律不放行,宁可查不到。
         return bool(
             self.user_id
@@ -87,16 +91,7 @@ class DiagnoseTools:
                 chat_id=scope.chat_id if scope.chat_type != "p2p" else None,
             )
             refs += [r for r in pool if scope.allows(r)]
-        # topicx 的 task 与它下面的 topic5 / topic6 job 是同一个任务,按 task 去重。
-        seen, unique = set(), []
-        for ref in sorted(refs, key=lambda r: r.started_at_ms, reverse=True):
-            job = ref.meta.get("business_job_id") or ref.meta.get("job_id")
-            if job and job in seen:
-                continue
-            if job:
-                seen.add(job)
-            unique.append(ref)
-        return unique
+        return _dedupe(refs)
 
     def _resolve_in_scope(self, scope: Scope, ident: str) -> Optional[TraceRef]:
         for source in self._sources.values():
@@ -174,6 +169,20 @@ class DiagnoseTools:
             return {"found": False, "message": "没有找到该任务或会话"}
         detail = await get_step_detail(self._events, session_id, event_id)
         return detail or {"found": False, "message": "没有找到该事件"}
+
+
+def _dedupe(refs: list[TraceRef]) -> list[TraceRef]:
+    """topicx 的 task 与它下面的 topic5 / topic6 job 是同一个任务,只留一个(按时间倒序)。"""
+    seen: set[str] = set()
+    unique: list[TraceRef] = []
+    for ref in sorted(refs, key=lambda r: r.started_at_ms, reverse=True):
+        job = ref.meta.get("business_job_id") or ref.meta.get("job_id")
+        if job and job in seen:
+            continue
+        if job:
+            seen.add(job)
+        unique.append(ref)
+    return unique
 
 
 def _step_index(trace) -> list[dict]:

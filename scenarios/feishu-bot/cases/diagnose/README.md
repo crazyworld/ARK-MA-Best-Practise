@@ -14,8 +14,8 @@
 |---|---|
 | 群聊 | 可排查**本群全部**任务,不区分发起人 |
 | 私聊 | 只能查**自己发起、且发生在私聊里**的任务,用租户级 `user_id` 判断(`open_id` 按应用隔离,不能用)。应用须开通 `contact:user.id:readonly`,否则取不到 `user_id`,私聊会回复无法确认身份。**升级前创建的任务没有 `user_id`,私聊查不到**(不回填,没有可靠依据) |
-| 覆盖的 bot | topicx、topic5、topic6(读 `task_runs` / `pipeline_jobs`) |
-| 不覆盖 | 分析师、ada-pm、数字员工(会话库结构不同,adapter 未写) |
+| 覆盖的 bot | topicx、topic5、topic6(`task_runs` / `pipeline_jobs`);**分析师、ada-pm**(通用 `Gateway` 的 `conversations` + `session_history`,各 case 一个库);**数字员工**(`sessions` + `session_history`) |
+| 对象类型 | **任务**(topicx 系)有状态和 `last_error`;**会话**(分析师 / ada-pm / 数字员工)跨多轮、没有成败状态,`status` 只有 `active`(在用)/ `archived`(被 `/new` 归档),`archived` 不代表出错 |
 | 部署 | 与被排查的 bot **同机**,直接读本机的库;不考虑分布式 |
 
 权限在工具层强制:chat_id 取自飞书消息,工具参数里没有这个字段,传了会被拒;越权的任务一律回"没找到",不暴露其存在。
@@ -33,7 +33,7 @@ python -m arkagent init --case diagnose
 export ARK_API_KEY=...
 bash cases/diagnose/ma-resources/create_all.sh
 
-# 3. 参考 cases/diagnose/env.example 填 TOPICX/TOPIC5/TOPIC6 的库路径(至少一个)
+# 3. 参考 cases/diagnose/env.example 填各 bot 的库路径(至少一个;未配置的 bot 不参与排查)
 
 # 4. 启动
 python -m arkagent run --case diagnose
@@ -43,7 +43,8 @@ python -m arkagent run --case diagnose
 
 - **不读 gateway 日志**:当前基线日志不落盘,也没有统一的任务标识,读不了。"我发的命令没反应"这类没有 session 事件的问题查不到。
 - **多智能体看不到子 Agent 内部**:主 session 事件流里只有"派发"和"回传"。
-- 通用 `Gateway`(分析师、ada-pm)与数字员工的 `/new` 现在会先归档旧会话映射(`session_history` 表),**但排障 Bot 还没有这两类 bot 的 adapter**,归档的数据暂时只是留存,尚读不出来。
+- **升级前创建的数据**没有 `chat_type` / `user_id`:群范围按 `chat_id` 精确匹配放行(依赖"私聊 chat_id 不外泄"这一假设,不是强校验),私聊范围一律不放行。
+- 数字员工的私聊归属从 `session_memory_scopes`(单聊 `scope_type=user`,`scope_id` 即 user_id)反推;没有该记录的私聊会话查不到。
 - 方舟在 session 14 天无新事件后会清理,之后只能看数据库侧状态。
 - 事件只在提问时实时拉取,不落库。
 
@@ -65,3 +66,18 @@ python -m arkagent run --case diagnose
 
 > 文档**已经写出去就无法收回**(会被索引、缓存)。脱敏规则是启发式的,漏掉的凭据形态会随文档外泄,
 > 所以只对你能控制访问范围的文件夹启用。
+
+## 上线前权限检查
+
+`arkagent run --case <任意 case>` 启动时会自动检查当前应用能否读到租户级 `user_id`,并在启动输出里明确告知:
+
+| 输出 | 含义 |
+|---|---|
+| `权限自检:contact:user.employee_id:readonly 已开通 ✓` | 正常 |
+| `[权限缺失] 应用 … 未开通:…` | 缺权限,附影响说明和开通直达链接;**不阻断启动** |
+| `[权限未确认] …` | 无法判断(没配 `AUTHORIZED_OPEN_IDS`、网络失败、探测对象不在通讯录范围内),**不代表缺权限** |
+
+读取 `user_id` 所需的权限是 **`contact:user.employee_id:readonly`**(2026-11-12 对真实应用实测:按 `user_id` 类型查通讯录时,飞书服务端直接报缺这一项)。
+`contact:user.id:readonly` 在这个场景下**不是**必需的。开通后需在开放平台**发布新版本**才生效。
+
+另外排障 Bot 收到第一条没有 `user_id` 的私聊时,会在日志里再告警一次(启动探测可能是"未确认")。

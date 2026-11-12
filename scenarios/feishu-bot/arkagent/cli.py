@@ -126,6 +126,9 @@ def _run(args: list[str] | None = None) -> None:
         print(f"- 飞书 App ID:{config.feishu_app_id}")
         print(f"- 环境变量文件:{case_paths.config_path}")
         print(f"- 锁文件:{lock_path}(pid={os.getpid()};按 App ID 分粒度)")
+        from .preflight import run_preflight
+
+        run_preflight(sender, config, config.feishu_app_id)
         print("正在连接飞书 WebSocket;请在该 Bot 会话中发送消息。")
         start_feishu_gateway(config.feishu_app_id, config.feishu_app_secret, gateway)
 

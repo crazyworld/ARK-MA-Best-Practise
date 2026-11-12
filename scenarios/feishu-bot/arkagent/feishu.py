@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from dataclasses import dataclass
 from typing import Optional, Protocol
@@ -296,6 +297,38 @@ def _text_to_post_content(text: str, roster: "Optional[dict[str, str]]" = None) 
     return json.dumps(post, ensure_ascii=False)
 
 
+@dataclass(frozen=True)
+class ScopeProbe:
+    # ok:能读到 user_id | missing_scope:应用没开通所需权限 | unknown:无法判断(网络、探测对象不存在等)
+    status: str
+    detail: str = ""
+    missing: tuple[str, ...] = ()
+
+
+_SCOPE_RE = re.compile(r"\b(?:contact|im|docs|drive|wiki|docx|auth):[A-Za-z0-9_.:]+")
+_APP_SCOPE_NOT_APPLIED = 99991672
+USER_ID_SCOPE = "contact:user.employee_id:readonly"
+
+
+def classify_user_id_probe(
+    success: bool, code: Optional[int], msg: str, raw: Optional[bytes]
+) -> ScopeProbe:
+    """把通讯录探测响应归类。缺权限时飞书在 msg 里列出缺的 scope。"""
+    if success:
+        try:
+            user = ((json.loads(raw) if raw else {}).get("data") or {}).get("user") or {}
+        except (TypeError, ValueError):
+            user = {}
+        if user.get("user_id"):
+            return ScopeProbe("ok")
+        # 接口成功但没返回 user_id:权限范围里可能没有覆盖到该用户,不能当作\"没开通\"。
+        return ScopeProbe("unknown", "通讯录接口调用成功,但没有返回 user_id(可能该用户不在应用的通讯录权限范围内)")
+    if code == _APP_SCOPE_NOT_APPLIED:
+        listed = tuple(sorted(set(_SCOPE_RE.findall(msg)))) or (USER_ID_SCOPE,)
+        return ScopeProbe("missing_scope", msg[:200], listed)
+    return ScopeProbe("unknown", f"code={code} {msg[:160]}")
+
+
 class FeishuSender:
     """基于 lark-channel-sdk 自带 OpenAPI Client 的消息发送器（reply / send / react / 读历史）。
 
@@ -452,6 +485,35 @@ class FeishuSender:
         data = payload.get("data") if isinstance(payload, dict) else None
         user = (data or {}).get("user") if isinstance(data, dict) else None
         return str((user or {}).get("name") or "")
+
+    def probe_user_id_scope(self, probe_open_id: str) -> "ScopeProbe":
+        """探测本应用能否读到租户级 user_id:拿一个已知 open_id,按 user_id 类型查通讯录。
+
+        排障 Bot 判断私聊\"是不是本人\"靠 user_id(open_id 按应用隔离)。读 user_id 需要
+        ``contact:user.employee_id:readonly``(2026-11 实测,飞书服务端会在缺失时直接报出该 scope)。
+        返回而不抛异常:探测失败不应阻断 bot 启动,由调用方决定怎么告知。
+        """
+        from lark_channel import AccessTokenType, BaseRequest, HttpMethod
+
+        request = (
+            BaseRequest.builder()
+            .http_method(HttpMethod.GET)
+            .uri("/open-apis/contact/v3/users/:user_id")
+            .paths({"user_id": probe_open_id})
+            .queries([("user_id_type", "user_id")])
+            .token_types({AccessTokenType.TENANT})
+            .build()
+        )
+        try:
+            response = self._client.request(request)
+        except Exception as error:  # noqa: BLE001 - 网络等问题,不是权限结论
+            return ScopeProbe("unknown", f"探测请求失败:{error}")
+        return classify_user_id_probe(
+            response.success(),
+            getattr(response, "code", None),
+            getattr(response, "msg", "") or "",
+            response.raw.content if getattr(response, "raw", None) else None,
+        )
 
     def resolve_operator_name(
         self, open_id: str, chat_id: Optional[str] = None
