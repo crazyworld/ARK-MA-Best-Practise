@@ -152,11 +152,18 @@ def build_gateway(config: DiagnoseConfig, ark, sender, loop: asyncio.AbstractEve
         await loop.run_in_executor(None, sender.send_to_chat, chat_id, text)
 
     sources = build_sources(config.db_paths)
-    tools = DiagnoseTools(sources, ark)
+    # 文档进度库无论"文档同步"是否启用都创建:诊断结论要从中查对应 session 的飞书文档链接。
+    # DocStore 只是打开/建一个 SQLite,无其他副作用。
+    doc_store = DocStore(config.doc_db_path or f"{case_paths.case_dir}/session_docs.db")
+
+    def doc_lookup(session_id: str) -> Optional[str]:
+        record = doc_store.get(session_id)
+        return record.doc_url if record and record.doc_url else None
+
+    tools = DiagnoseTools(sources, ark, doc_lookup=doc_lookup)
     scheduler = None
     if config.doc_parent_token:
         # 以排障应用自己的身份写;所有 bot 的 session 日志都落在同一个父节点下(MVP 不做隔离,见 docscheduler)。
-        doc_store = DocStore(config.doc_db_path or f"{case_paths.case_dir}/session_docs.db")
         sink = SessionDocSink(doc_store, config.doc_parent_token, make_sdk_api(config.feishu_app_id, config.feishu_app_secret))
         async def fetch(path: str) -> dict:  # incremental 的 Fetch:GET 一个 path 返回 JSON
             return await ark._request("GET", path)

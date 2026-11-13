@@ -304,7 +304,7 @@ def test_duplicate_event_is_dropped():
 
 
 # ---- 私聊:只能看自己名下、发生在私聊里的任务(按租户级 user_id) -------------------
-def make_topicx(tmp_path, rows):
+def make_topicx(tmp_path, rows, doc_lookup=None):
     ctl_db, job_db = tmp_path / "c.db", tmp_path / "t6.db"
     make_db(str(job_db))
     ctl = sqlite3.connect(ctl_db)
@@ -324,7 +324,7 @@ def make_topicx(tmp_path, rows):
     ctl.commit()
     ctl.close()
     ark = FakeArk({"sesn-r": [], "sesn-b": FAILED_EVENTS})
-    return DiagnoseTools(build_sources({"topicx": str(ctl_db), "topic6": str(job_db)}), ark)
+    return DiagnoseTools(build_sources({"topicx": str(ctl_db), "topic6": str(job_db)}), ark, doc_lookup=doc_lookup)
 
 
 def P(user_id, chat_id="oc_p_alice"):
@@ -617,3 +617,36 @@ def test_start_background_schedules_the_loop_when_enabled():
     finally:
         loop.call_soon_threadsafe(loop.stop)
         t.join(1)
+
+
+# ---- 诊断结论附加飞书文档链接 -----------------------------------------------------
+async def test_diagnose_attaches_doc_url_for_sessions_with_a_doc(tmp_path):
+    lookup = {"sesn-b": "https://doc/abc"}
+    tools = make_topicx(tmp_path, [("task_1", "oc_g", "u1", "group", "sesn-r", "sesn-b", "failed")], doc_lookup=lookup.get)
+    result, err = await tools.call(G("oc_g"), "diagnose_task", {"task_id": "task_1"})
+    assert not err and result["found"]
+    by_sid = {s["session_id"]: s.get("doc_url") for s in result["sessions"]}
+    assert by_sid["sesn-b"] == "https://doc/abc"          # 有文档的 session 带链接
+    assert by_sid["sesn-r"] is None                        # 无文档的 session 不带
+
+
+async def test_diagnose_doc_url_is_none_without_lookup(tmp_path):
+    tools = make_topicx(tmp_path, [("task_1", "oc_g", "u1", "group", "sesn-r", "sesn-b", "failed")])
+    result, _ = await tools.call(G("oc_g"), "diagnose_task", {"task_id": "task_1"})
+    assert all(s.get("doc_url") is None for s in result["sessions"])
+
+
+async def test_diagnose_doc_url_is_none_when_lookup_returns_none(tmp_path):
+    tools = make_topicx(tmp_path, [("task_1", "oc_g", "u1", "group", "sesn-r", "sesn-b", "failed")], doc_lookup=lambda sid: None)
+    result, _ = await tools.call(G("oc_g"), "diagnose_task", {"task_id": "task_1"})
+    assert all(s.get("doc_url") is None for s in result["sessions"])
+
+
+async def test_doc_lookup_failure_is_swallowed_and_diagnosis_still_works(tmp_path):
+    def broken(sid):
+        raise RuntimeError("查文档链接失败")
+
+    tools = make_topicx(tmp_path, [("task_1", "oc_g", "u1", "group", "sesn-r", "sesn-b", "failed")], doc_lookup=broken)
+    result, err = await tools.call(G("oc_g"), "diagnose_task", {"task_id": "task_1"})
+    assert not err and result["found"]                     # 诊断本身不受影响
+    assert all(s["doc_url"] is None for s in result["sessions"])

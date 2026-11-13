@@ -54,9 +54,15 @@ class Scope:
 
 
 class DiagnoseTools:
-    def __init__(self, sources: dict[str, TraceSource], events: EventSource) -> None:
+    def __init__(
+        self,
+        sources: dict[str, TraceSource],
+        events: EventSource,
+        doc_lookup: Optional[Callable[[str], Optional[str]]] = None,
+    ) -> None:
         self._sources = sources
         self._events = events
+        self._doc_lookup = doc_lookup
 
     async def call(self, scope: Scope, name: str, arguments: dict) -> tuple[dict, bool]:
         """返回 (结果, 是否出错)。"""
@@ -152,11 +158,21 @@ class DiagnoseTools:
                     "available": n.available,
                     "unavailable_reason": n.unavailable_reason,
                     "turns": len(n.turns),
+                    "doc_url": self._doc_url(n.session_id),
                 }
                 for n in trace.sessions
             ],
             "steps": _step_index(trace),
         }
+
+    def _doc_url(self, session_id: str) -> Optional[str]:
+        """查该 session 的飞书日志文档链接(若文档同步已生成)。查不到/未启用返回 None,不抛异常。"""
+        if self._doc_lookup is None:
+            return None
+        try:
+            return self._doc_lookup(session_id)
+        except Exception:
+            return None
 
     async def _step_detail(self, scope: Scope, args: dict) -> dict:
         ident = str(args.get("task_id") or "").strip()
