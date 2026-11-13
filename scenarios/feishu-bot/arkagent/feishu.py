@@ -458,14 +458,8 @@ class FeishuSender:
         self._roster_cache[chat_id] = (now + CHAT_ROSTER_TTL_SECONDS, roster)
         return roster
 
-    def _fetch_user_name(self, open_id: str) -> str:
-        """走原生 `GET /open-apis/contact/v3/users/:user_id?user_id_type=open_id` 反查真名。
-
-        飞书卡片按钮回调只带 open_id，没有 name 字段（见 P2CardActionTrigger.operator）；卡片
-        终态想显示真名就得单发一次 contact API。SDK 无对应 typed model，用 BaseRequest 直发，
-        与 bot_open_id / list_chat_members 同款。同步调用，失败抛异常由 resolve_operator_name
-        兜底。需要 `contact:user.base:readonly` scope。
-        """
+    def _fetch_user(self, open_id: str) -> dict:
+        """查通讯录 user 对象(一次请求),失败抛异常。需要 ``contact:user.base:readonly`` scope。"""
         from lark_channel import AccessTokenType, BaseRequest, HttpMethod
 
         request = (
@@ -486,19 +480,23 @@ class FeishuSender:
         except (TypeError, ValueError, json.JSONDecodeError):
             payload = {}
         data = payload.get("data") if isinstance(payload, dict) else None
-        user = (data or {}).get("user") if isinstance(data, dict) else None
-        return str((user or {}).get("name") or "")
+        return (data or {}).get("user") if isinstance(data, dict) else {}
+
+    def _fetch_user_name(self, open_id: str) -> str:
+        """反查真名,失败抛异常由 resolve_operator_name 兜底(卡片操作人回显用)。"""
+        return str(self._fetch_user(open_id).get("name") or "")
 
     def try_user_name(self, open_id: str) -> str:
-        """尽力反查用户真名;任何失败或查不到返回空串,由调用方降级显示 open_id。
+        """尽力反查用户可读标识:**真名优先,真名没有回退邮箱**;两者都拿不到返回空串,由调用方降级显示 open_id。
 
-        供排障日志文档等信息展示用:真名需要 ``contact:user.base:readonly`` 权限(已发布版本生效),
-        未开通时返回空串,不得抛异常阻断文档写入。
+        供排障日志文档等信息展示用。name 和 email 都属于 ``contact:user.base:readonly``
+        权限(需已发布版本生效),未开通时都返回空串,不得抛异常阻断文档写入。
         """
         if not open_id:
             return ""
         try:
-            return self._fetch_user_name(open_id)
+            user = self._fetch_user(open_id)
+            return str(user.get("name") or user.get("email") or "")
         except Exception:
             return ""
 
