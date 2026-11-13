@@ -214,3 +214,34 @@ def test_upgrade_loop_not_capped_at_two_upgrades():
     # 4000→8000→16000→32000→64000:至少能升到 64000,覆盖实测峰值 16541 与 4 倍波动
     assert max(seen) >= 64000
     assert upgrades > pe.MAX_TOKENS_RETRIES
+
+
+def test_legally_new_opened_type_from_input_is_allowed():
+    """_tagging/v5.md 允许按主体命名语法新开类型(如「KOL/网红舆论风波」)。
+
+    白名单基准取输入数据实际类型,不能写死 10 个名字,否则合法新类型会被误杀。
+    """
+    pe = _load_pe("t6_pe_newtype")
+    input_data = (
+        "| 风险类型 | 事件簇名 | 行业 | 热度分 | 具体热搜 | 风险判断说明 | 展开分析 |\n"
+        "|---|---|---|---|---|---|---|\n"
+        "| KOL/网红舆论风波 | 某网红塌房 | 食品零食 | 90.0 | - [t](https://a.com) | 说明 | 是 |\n"
+    )
+    text = "**KOL/网红舆论风波**\n\n一句观察。\n"
+    assert pe._validate_e4_group_subheadings(text, input_data) == []
+    # 同一个自造名字在输入里没出现过 → 仍然被拦
+    assert pe._validate_e4_group_subheadings("**品牌合作动态**\n\n一句。\n", input_data)
+
+
+def test_subheading_check_prefers_input_types_over_builtin():
+    """输入有类型列时以输入为准:内置 5 类之外的自造名即使长得像内置名也被拦。"""
+    pe = _load_pe("t6_pe_inputbasis")
+    input_data = (
+        "| 变动类型 | 事件簇名 | 商业实体 | 行业 | 热度分 | 代表热搜 | 合作动态说明 |\n"
+        "|---|---|---|---|---|---|---|\n"
+        "| 品牌联名/资源合作 | A | 某品牌 | 食品零食 | 90.0 | t | 说明 |\n"
+    )
+    # 内置集合里的「合作争议」本轮没候选,撰写稿不该出现它
+    issues = pe._validate_e4_group_subheadings("**合作争议**\n\n一句。\n", input_data)
+    assert any("合作争议" in i for i in issues)
+    assert pe._validate_e4_group_subheadings("**品牌联名/资源合作**\n\n一句。\n", input_data) == []

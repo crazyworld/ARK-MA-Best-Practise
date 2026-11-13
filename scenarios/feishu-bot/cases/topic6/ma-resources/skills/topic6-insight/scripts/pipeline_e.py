@@ -1368,19 +1368,53 @@ E4_LEGAL_RISK_TYPES = ("品牌舆情事件", "政策监管风险", "明星舆论
 E4_LEGAL_SUBHEADINGS = frozenset(E4_LEGAL_COOP_TYPES + E4_LEGAL_RISK_TYPES + ("未分类",))
 # 整行是一个粗体(允许行尾空白),用来区分"小标题"和正文里的强调短语
 _E4_SUBHEADING_RE = re.compile(r"^\s*\*\*([^*\n]{1,40})\*\*\s*$")
+_E4_TYPE_COLUMNS = ("变动类型", "风险类型")
 
 
-def _validate_e4_group_subheadings(text: str) -> list:
-    """A 组(合作动态+舆情风险)的粗体小标题必须是合法类型名。"""
+def _types_in_input(input_data: str) -> set:
+    """从本组输入数据表格里取打标产出的类型集合(输入没有该列时返回空集)。
+
+    _tagging/v5.md 明确允许候选装不进既有类型时按主体命名语法新开类型(如
+    「KOL/网红舆论风波」),所以校验基准不能写死 10 个名字,否则会把合法新类型误杀。
+    类型只可能来自打标,因此"出现在输入表格的变动类型/风险类型列里"就是充分依据;
+    模型自造的名字不会出现在输入里,必然被拦下。
+    """
+    found = set()
+    header: list[str] | None = None
+    for line in (input_data or "").splitlines():
+        s = line.strip()
+        if not s.startswith("|"):
+            header = None
+            continue
+        cells = [c.strip() for c in s.strip("|").split("|")]
+        if header is None:
+            if any(h in cells for h in _E4_TYPE_COLUMNS):
+                header = cells
+            continue
+        if set("".join(cells)) <= set("-: "):   # 表头分隔行
+            continue
+        for col in _E4_TYPE_COLUMNS:
+            if col in header:
+                idx = header.index(col)
+                if idx < len(cells) and cells[idx]:
+                    found.add(cells[idx])
+    return found
+
+
+def _validate_e4_group_subheadings(text: str, input_data: str = "") -> list:
+    """A 组(合作动态+舆情风险)的粗体小标题必须来自本组输入数据的类型列。"""
+    from_input = _types_in_input(input_data)
+    allowed = (from_input | {"未分类"}) if from_input else E4_LEGAL_SUBHEADINGS
     issues = []
     for line in text.splitlines():
         m = _E4_SUBHEADING_RE.match(line)
         if not m:
             continue
         title = m.group(1).strip()
-        if title not in E4_LEGAL_SUBHEADINGS:
+        if title not in allowed:
+            basis = "本组输入数据的类型列" if from_input else "内置合法类型集"
             issues.append(
-                f"小标题「{title}」不在合法类型集内(允许:{'/'.join(E4_LEGAL_SUBHEADINGS)})"
+                f"小标题「{title}」不在{basis}内(允许:{'/'.join(sorted(allowed))})"
                 "——打标结果可能降级,不允许自造分类名")
     return issues
 
@@ -1390,7 +1424,7 @@ def validate_e4_group(group: str, result_text: str, input_data: str) -> list:
     两组都查链接溯源。在组内校验,失败只重写该组,不拖累另一组。"""
     if group == "a":
         issues = [i for i in validate_section_content("e4:A", result_text) if "表格行单元格数" in i]
-        issues += _validate_e4_group_subheadings(result_text)
+        issues += _validate_e4_group_subheadings(result_text, input_data)
     else:
         issues = _validate_e4_b_cards(result_text)
     issues += _validate_e4_grounding(result_text, input_data)
@@ -1520,10 +1554,16 @@ async def build_e4_task(llm_call, sec: dict, insight_dir: Path, model: str = "")
                 tag_res = retry or tag_res
 
     if tagging_error:
-        # 打标彻底失败:E4 整体按失败返回,不产出降级版正文。
+        # 打标彻底失败(重跑一次仍不完整):E4 整体按失败返回,不产出降级版正文。
+        # 为什么不用"保留全部候选继续写":打标是"分类+过滤"两道职责,失败后报告会退化成
+        # 一个自造小标题+未过滤条目,而格式校验/链接溯源全部通过、self_check 也不报错——
+        # 这正是 2026-11-13 事故能流到终稿的原因。宁可让 E4 显式失败(人工可见、可重跑),
+        # 也不产出看着正常实则错的报告。
+        # 恢复路径:勾选 --sections e4 单版块重跑(E1~E3 命中 checkpoint 不重算)。
         return {**await _error_result(
-            sec, f"E4 打标失败,已重跑仍不完整:{tagging_error}."
-                 "为避免未过滤候选进入报告,本版块按失败处理"),
+            sec, f"E4 打标失败(已重跑 {E4_GROUP_REWRITE_RETRIES + 1} 次仍不完整):{tagging_error}。"
+                 "为避免未过滤候选进入报告,本版块按失败处理;"
+                 "请用 --sections e4 单独重跑本版块(E1~E3 走 checkpoint 不重算)"),
             "input_tokens": usage.input_tokens, "output_tokens": usage.output_tokens}
 
     _atomic_text(json.dumps(
