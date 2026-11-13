@@ -311,7 +311,8 @@ async def test_info_card_shows_resolved_chat_and_user_names(tmp_path):
     body = plain(api.calls[0][2]["content"])
     assert "热点周报群" in body and "张三" in body          # 可读名
     assert "oc_abc" in body and "ou_zzz" in body          # 原 ID 保留,便于落库定位
-    assert "群聊" in body and "群组" in body               # 类型标识
+    assert " · 热点周报群" in body                          # ID 后面用 · 连接可读信息(群名优先,不再是笼统的"群聊")
+    assert "群组" not in body                              # 标签统一叫"会话",不再叫"群组"
 
 
 async def test_info_card_falls_back_to_ids_when_names_unresolvable(tmp_path):

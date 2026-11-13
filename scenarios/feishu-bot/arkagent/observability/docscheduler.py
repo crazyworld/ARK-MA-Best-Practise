@@ -318,10 +318,10 @@ def _info_card(ref: TraceRef, names: Optional[dict] = None) -> str:
     if ref.chat_id:
         kind = {"p2p": "私聊", "group": "群聊"}.get(ref.chat_type, "")
         chat_name = str(names.get("chat_name") or "").strip()
-        label = chat_name if chat_name else ref.chat_id
-        if chat_name:
-            label = f"{chat_name}（{ref.chat_id}）"
-        rows.append(("会话" if kind != "群聊" else "群组", f"{label}" + (f" · {kind}" if kind else "")))
+        # ID 在前,` · ` 之后接可读信息:群名优先,没有群名才退回"私聊 / 群聊"类型标识。
+        readable = chat_name or kind or ""
+        suffix = f" · {readable}" if readable else ""
+        rows.append(("会话", f"{ref.chat_id}{suffix}"))
     if ref.meta.get("user_open_id"):
         open_id = str(ref.meta["user_open_id"])
         user_name = str(names.get("user_name") or "").strip()
