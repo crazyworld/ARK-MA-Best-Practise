@@ -56,6 +56,7 @@ KEY_FILE_PATTERNS: tuple[str, ...] = (
     "06_洞察/v*/e2_flags.json",
     "06_洞察/v*/e3_word_freq_audit.md",
     "06_洞察/v*/e4_arbitration_audit.md",
+    "06_洞察/v*/e4_quality.json",
     "06_洞察/v*/pipeline_e_report_v*.json",
 )
 

@@ -691,10 +691,12 @@ E3_TAGGING_AUDIT_FILE = "e3_tagging_audit.md"
 E3_INSIGHT_DRAFT_AUDIT_FILE = "e3_insight_draft_audit.md"
 E3_TAGGING_PROMPT_DIR = PROMPTS_DIR / "E3_平台新鲜事" / "_tagging"
 E3_INSIGHT_DRAFT_PROMPT_DIR = PROMPTS_DIR / "E3_平台新鲜事" / "_insight_draft"
-# 起始预算(CC V2 实测值),撞线由 call_llm_async 自动升档
-E3_TAGGING_MAX_TOKENS = 20000
-E3_INSIGHT_DRAFT_MAX_TOKENS = 5000
-E3_PLATFORM_WRITE_MAX_TOKENS = 8000
+# 起始预算。2026-11-13 按 relay 实测抬高:DeepSeek-V4.1-Flash 思考 token 计入
+# max_tokens,同类任务实测 completion 峰值 16541(列名回吐版),预算贴着需求给会每周撞线。
+# 撞线仍由 call_llm_async 自动升档兜底,上限 MAX_TOKENS_CEILING。
+E3_TAGGING_MAX_TOKENS = 64000
+E3_INSIGHT_DRAFT_MAX_TOKENS = 20000
+E3_PLATFORM_WRITE_MAX_TOKENS = 32000
 E3_KEEP_TAG = "具体实体/热梗"
 E3_FILTER_TAG = "主体不明的动作/结果词"
 E3_SIGNAL_TYPES = {"品牌/商业动作型", "风险/舆情型", "消费态度/情绪信号型", "无信号"}
@@ -936,10 +938,13 @@ E4_CURATION_PROMPT_DIR = PROMPTS_DIR / "E4_营销发现" / "_curation"
 E4_ARBITRATION_PROMPT_DIR = PROMPTS_DIR / "E4_营销发现" / "_arbitration"
 E4_WRITING_A_PROMPT_DIR = "E4_营销发现/_writing_coop_risk"
 E4_WRITING_B_PROMPT_DIR = "E4_营销发现/_writing_marketing_consumer"
-E4_TAGGING_MAX_TOKENS = 4000
-E4_CURATION_MAX_TOKENS = 4000
-E4_ARBITRATION_MAX_TOKENS = 4000
-E4_WRITING_MAX_TOKENS = 10000
+# 2026-11-13 事故修复(见 TOPIC6_CHANGELOG):起始 4000 时打标实测需要 16541,
+# 只差 500 就撞死在 16000,导致「打标失败→静默降级→报告只有一个自造小标题」。
+# 现按实测峰值给足余量,思考量不受影响(预算只是上限,不是消耗量)。
+E4_TAGGING_MAX_TOKENS = 64000
+E4_CURATION_MAX_TOKENS = 64000
+E4_ARBITRATION_MAX_TOKENS = 32000
+E4_WRITING_MAX_TOKENS = 64000
 E4_DRAFT_LIMIT = 10
 E4_GROUP_REWRITE_RETRIES = 1
 
@@ -1007,24 +1012,58 @@ def _parse_e4_tagging_output(text: str, warnings: list | None = None) -> tuple:
     return risk_tags, coop_tags
 
 
-def _filter_e4_tagged(candidates: dict, risk_tags: dict | None, coop_tags: dict | None) -> tuple:
-    """按打标过滤,返回 (risk_kept, coop_kept),元素为 [类型, 候选]。tags=None 表示打标不可用,
-    保守保留全部;单条漏打标同样保守保留。"""
+class E4TaggingIncomplete(RuntimeError):
+    """打标结果缺失/不可用。strict 模式下抛此错,由调用方重跑或让 E4 整体失败。"""
+
+
+def _filter_e4_tagged(candidates: dict, risk_tags: dict | None, coop_tags: dict | None,
+                      *, strict: bool = True) -> tuple:
+    """按打标过滤。返回 (risk_kept, coop_kept, degraded)。
+
+    strict=True(默认):打标不可用,或任一候选没有被有效打标 → 抛 E4TaggingIncomplete。
+        2026-11-13 事故修复:此前 tags=None 时给全部候选打一个占位类型
+        「未打标（调用失败，保守保留）」继续往下写,导致渲染层没有类型列、撰写模型
+        自造「品牌合作动态」「综合舆情风险」两个小标题、本该被过滤的候选全部留在报告里,
+        且整条链路上没有任何一处报错。已失败步骤的输出不允许继续参与下游。
+    strict=False:仅供人工强制续跑(显式开关),保留旧兜底行为,同时返回 degraded=True,
+        调用方必须把降级写进报告说明,不能和正常产出长得一样。
+    """
+    problems: list[str] = []
+    degraded = False
+
     def _keep(pool, tags, type_key, verdict_key, ok_value):
+        nonlocal degraded
         kept = []
         for item in candidates.get(pool, []):
+            name = item["事件簇名"]
             if tags is None:
-                kept.append(["未打标（调用失败，保守保留）", item])
+                degraded = True
+                if strict:
+                    problems.append(f"{pool}:{name}(整组打标不可用)")
+                    continue
+                kept.append(["未分类（打标不可用，人工强制保留）", item])
                 continue
-            tag = tags.get(item["事件簇名"])
+            tag = tags.get(name)
             if tag is None:
-                kept.append(["未分类（打标遗漏，保守保留）", item])
-            elif tag.get(verdict_key, ok_value) == ok_value:
-                kept.append([tag.get(type_key) or "未分类", item])
+                degraded = True
+                if strict:
+                    problems.append(f"{pool}:{name}(漏打标)")
+                    continue
+                kept.append(["未分类（打标遗漏，人工强制保留）", item])
+                continue
+            if tag.get(verdict_key, ok_value) != ok_value:
+                continue
+            kept.append([tag.get(type_key) or "未分类", item])
         return kept
 
-    return (_keep("舆情风险", risk_tags, "风险类型", "可接性", "接"),
-            _keep("合作动态", coop_tags, "变动类型", "参考价值", "有用"))
+    risk_kept = _keep("舆情风险", risk_tags, "风险类型", "可接性", "接")
+    coop_kept = _keep("合作动态", coop_tags, "变动类型", "参考价值", "有用")
+    if problems and strict:
+        head = f"E4 打标不完整({len(problems)} 条):" + "、".join(problems[:5])
+        if len(problems) > 5:
+            head += f" 等 {len(problems)} 条"
+        raise E4TaggingIncomplete(head + "。保守保留会把未过滤候选写进报告,已改为失败重跑")
+    return risk_kept, coop_kept, degraded
 
 
 def _build_e4_curation_input(candidates: dict) -> str | None:
@@ -1313,15 +1352,95 @@ def _validate_e4_grounding(result_text: str, input_data: str) -> list:
     return [f"引用了 {len(stray)} 个不在本组输入数据里的链接(疑似编造)：{stray[:5]}"]
 
 
+# 2026-11-13 事故修复:撰写稿的粗体小标题只能是打标产出的类型名。
+# 事故现场打标失败后模型自造「品牌合作动态」「综合舆情风险」,格式校验和链接溯源都查不出来
+# (表格列数对、链接都在候选池里),一路流到终稿。这一层是撰写阶段的最后一道闸。
+E4_LEGAL_COOP_TYPES = ("品牌联名/资源合作", "品牌×IP合作", "品牌×明星代言合作", "合作争议")
+E4_LEGAL_RISK_TYPES = ("品牌舆情事件", "政策监管风险", "明星舆论风波", "文娱作品口碑",
+                       "机构/赛事争议")
+E4_LEGAL_SUBHEADINGS = frozenset(E4_LEGAL_COOP_TYPES + E4_LEGAL_RISK_TYPES + ("未分类",))
+# 整行是一个粗体(允许行尾空白),用来区分"小标题"和正文里的强调短语
+_E4_SUBHEADING_RE = re.compile(r"^\s*\*\*([^*\n]{1,40})\*\*\s*$")
+
+
+def _validate_e4_group_subheadings(text: str) -> list:
+    """A 组(合作动态+舆情风险)的粗体小标题必须是合法类型名。"""
+    issues = []
+    for line in text.splitlines():
+        m = _E4_SUBHEADING_RE.match(line)
+        if not m:
+            continue
+        title = m.group(1).strip()
+        if title not in E4_LEGAL_SUBHEADINGS:
+            issues.append(
+                f"小标题「{title}」不在合法类型集内(允许:{'/'.join(E4_LEGAL_SUBHEADINGS)})"
+                "——打标结果可能降级,不允许自造分类名")
+    return issues
+
+
 def validate_e4_group(group: str, result_text: str, input_data: str) -> list:
     """A 组查表格列数(对齐 V2 validate-writing 的 _check_table_integrity),B 组查卡片字段;
     两组都查链接溯源。在组内校验,失败只重写该组,不拖累另一组。"""
     if group == "a":
         issues = [i for i in validate_section_content("e4:A", result_text) if "表格行单元格数" in i]
+        issues += _validate_e4_group_subheadings(result_text)
     else:
         issues = _validate_e4_b_cards(result_text)
     issues += _validate_e4_grounding(result_text, input_data)
     return issues
+
+
+E4_QUALITY_FILE = "e4_quality.json"
+_E4_FALLBACK_TYPE_MARKS = ("未分类", "未打标")
+
+
+def _is_fallback_type(coop_or_risk_type: str) -> bool:
+    return any(coop_or_risk_type.startswith(m) for m in _E4_FALLBACK_TYPE_MARKS)
+
+
+def build_e4_quality(candidates: dict, risk_kept: list, coop_kept: list,
+                     tag_res: dict | None, parse_warnings: list | None = None) -> dict:
+    """E4 打标/筛选质量画像,写 e4_quality.json 供 HC 与人工排查。
+
+    事故教训:打标失败时报告照样产出、自校验全过,没有任何一处能看出降级。
+    这几个字段把"是否降级/覆盖率多少"变成可机读的事实,进过程数据白名单。
+    """
+    def _dist(kept: list) -> dict:
+        dist: dict[str, int] = {}
+        for typ, _ in kept:
+            dist[typ] = dist.get(typ, 0) + 1
+        return dist
+
+    risk_total = len(candidates.get("舆情风险", []))
+    coop_total = len(candidates.get("合作动态", []))
+    risk_kept_ok = sum(1 for t, _ in risk_kept if not _is_fallback_type(t))
+    coop_kept_ok = sum(1 for t, _ in coop_kept if not _is_fallback_type(t))
+    fallback_count = sum(1 for t, _ in list(risk_kept) + list(coop_kept) if _is_fallback_type(t))
+
+    # 覆盖率 = 有真实类型(非兜底)的候选数 / 候选池总数。
+    # 被打标判"无用/不接"而剔除的候选不算缺失,所以分子只数留下来的,分母是池子;
+    # 池子里被判掉的那部分另有 selected 字段体现。
+    tagged_total = len(risk_kept) + len(coop_kept)
+    pool_total = risk_total + coop_total
+    coverage = (tagged_total - fallback_count) / tagged_total if tagged_total else 1.0
+
+    tag_res = tag_res or {}
+    quality = {
+        "candidate_pool": {"舆情风险": risk_total, "合作动态": coop_total},
+        "selected": {"舆情风险": len(risk_kept), "合作动态": len(coop_kept),
+                     "合计": tagged_total, "池子合计": pool_total},
+        "tag_coverage": round(coverage, 4),
+        "fallback_type_count": fallback_count,
+        "type_distribution": {"舆情风险": _dist(risk_kept), "合作动态": _dist(coop_kept)},
+        "degraded": fallback_count > 0,
+        "budget": {
+            "max_tokens_used": tag_res.get("max_tokens_used"),
+            "max_tokens_upgrades": tag_res.get("max_tokens_upgrades"),
+            "output_tokens": tag_res.get("output_tokens"),
+        },
+        "parse_warnings": list(parse_warnings or []),
+    }
+    return quality
 
 
 async def build_e4_task(llm_call, sec: dict, insight_dir: Path, model: str = "") -> dict:
@@ -1355,10 +1474,54 @@ async def build_e4_task(llm_call, sec: dict, insight_dir: Path, model: str = "")
 
     parse_warnings: list = []
     risk_tags = coop_tags = None
-    if tagging_input and _sub_ok(tag_res, sid, "打标", "保守保留全部舆情风险/合作动态候选"):
+    tagging_ok = bool(tagging_input) and _sub_ok(
+        tag_res, sid, "打标", "打标失败,E4 将按失败处理(不再静默保留全部候选)")
+    if tagging_ok:
         risk_tags, coop_tags = _parse_e4_tagging_output(tag_res["content"], parse_warnings)
         _atomic_text(tag_res["content"], insight_dir / E4_TAGGING_AUDIT_FILE)
-    risk_kept, coop_kept = _filter_e4_tagged(candidates, risk_tags, coop_tags)
+
+    # 2026-11-13 事故修复:strict 模式下打标不可用/漏打标直接抛错,由下方捕获后重跑一次,
+    # 仍失败则整个 E4 报 error,交给完整性闸。不再打占位类型继续往下写。
+    risk_kept: list = []
+    coop_kept: list = []
+    tagging_error: str | None = None
+    for tag_attempt in range(E4_GROUP_REWRITE_RETRIES + 1):
+        try:
+            risk_kept, coop_kept, _degraded = _filter_e4_tagged(
+                candidates, risk_tags, coop_tags, strict=True)
+            tagging_error = None
+            break
+        except E4TaggingIncomplete as error:
+            tagging_error = str(error)
+            print(f"[{sid}] ⚠️ 打标不完整({tag_attempt + 1}/"
+                  f"{E4_GROUP_REWRITE_RETRIES + 1}):{tagging_error}", file=sys.stderr)
+            if tag_attempt >= E4_GROUP_REWRITE_RETRIES:
+                break
+            # 重跑一次打标（只在打标输入非空时）
+            if not tagging_input:
+                break
+            risk_tags = coop_tags = None
+            retry = usage.add(await _run_sub_step(
+                llm_call, "e4_tagging", "E4候选打标", E4_TAGGING_PROMPT_DIR,
+                tagging_input, E4_TAGGING_MAX_TOKENS))
+            if _sub_ok(retry, sid, "打标重试", "打标重试仍失败"):
+                risk_tags, coop_tags = _parse_e4_tagging_output(
+                    retry["content"], parse_warnings)
+                _atomic_text(retry["content"], insight_dir / E4_TAGGING_AUDIT_FILE)
+                tag_res = retry
+            else:
+                tag_res = retry or tag_res
+
+    if tagging_error:
+        # 打标彻底失败:E4 整体按失败返回,不产出降级版正文。
+        return {**await _error_result(
+            sec, f"E4 打标失败,已重跑仍不完整:{tagging_error}."
+                 "为避免未过滤候选进入报告,本版块按失败处理"),
+            "input_tokens": usage.input_tokens, "output_tokens": usage.output_tokens}
+
+    _atomic_text(json.dumps(
+        build_e4_quality(candidates, risk_kept, coop_kept, tag_res, parse_warnings),
+        ensure_ascii=False, indent=2), insight_dir / E4_QUALITY_FILE)
 
     marketing, consumer = [], []
     if curation_input and _sub_ok(cur_res, sid, "草稿枚举", "营销观察/消费洞察本轮为空"):
