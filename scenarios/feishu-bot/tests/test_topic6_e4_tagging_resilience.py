@@ -245,3 +245,22 @@ def test_subheading_check_prefers_input_types_over_builtin():
     issues = pe._validate_e4_group_subheadings("**合作争议**\n\n一句。\n", input_data)
     assert any("合作争议" in i for i in issues)
     assert pe._validate_e4_group_subheadings("**品牌联名/资源合作**\n\n一句。\n", input_data) == []
+
+
+def test_fallback_types_skip_subheading_whitelist():
+    """降级时类型全是兜底名 → 小标题不按类型校验。
+
+    否则撰写模型自造「品牌合作动态」会被判失败 → 重写1次仍失败 → E4 整版块报错,
+    正好又退化成"打标失败报告就出不来",与"对齐原版保守保留"矛盾。
+    """
+    pe = _load_pe("t6_pe_fallback_skip")
+    degraded_input = (
+        "| 变动类型 | 事件簇名 | 商业实体 | 行业 | 热度分 | 代表热搜 | 合作动态说明 |\n"
+        "|---|---|---|---|---|---|---|\n"
+        "| 未分类（打标不可用，保守保留全部） | A | 某品牌 | 食品零食 | 90.0 | t | 说明 |\n"
+    )
+    # 降级稿自造的小标题不再被拦
+    assert pe._validate_e4_group_subheadings("**品牌合作动态**\n\n一句。\n", degraded_input) == []
+    # 正常打标时仍然照拦(同一条自造名)
+    normal_input = degraded_input.replace("未分类（打标不可用，保守保留全部）", "品牌联名/资源合作")
+    assert pe._validate_e4_group_subheadings("**品牌合作动态**\n\n一句。\n", normal_input)

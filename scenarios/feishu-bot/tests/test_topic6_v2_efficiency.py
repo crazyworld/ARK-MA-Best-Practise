@@ -685,12 +685,19 @@ def test_e4_a_group_broken_table_fails_group_check():
     assert module.validate_e4_group("a", ok, "") == []
 
 
-def test_e4_tagging_failure_fails_section_and_curation_failure_empties_b(tmp_path, monkeypatch):
-    """2026-11-13 事故修复:打标失败不再"保留全部候选继续写",改为 E4 按失败处理。
+def test_e4_tagging_failure_retries_once_then_keeps_all_candidates(tmp_path, monkeypatch):
+    """打标失败:重试 1 次,仍失败则按原版保守保留全部候选继续写(不丢数据、版块不挂)。
 
-    旧约定(打标失败保守保留)正是事故根因:未过滤候选全部进报告、占位类型让撰写模型
-    自造「品牌合作动态」小标题,而整条链路没有任何一处报错。枚举失败的处理不变(不回退
-    全量候选,避免绕开价值前置过滤)。
+    2026-11-13 事故的教训不是"保守保留"错了——那是原版刻意的设计(原版
+    pipeline_e4_agent_steps.py:164-168),赌的是报告里类型混乱由 HC3 人工修正。
+    事故的真正缺口是:降级只在 stderr 打一行,报告和 self_check 里完全看不出来,
+    于是自造小标题一路流到终稿。
+
+    所以这里锁定三点:
+      1. 打标确实被重试了 1 次(不是一失败就放弃,也不无限重试)
+      2. 仍失败后 E4 照常产出 ok(对齐原版,报告不会因此缺失)
+      3. 降级被显式记录:parse_warnings 带降级说明、quality.degraded=True
+    枚举失败的处理不变(不回退全量候选,避免绕开价值前置过滤)。
     """
     module = _load_pipeline_e_module()
 
@@ -704,10 +711,15 @@ def test_e4_tagging_failure_fails_section_and_curation_failure_empties_b(tmp_pat
         return _llm_ok(sec, "上周未观察到符合条件的营销观察。")
 
     result, calls, prompts = _run_e4(module, tmp_path, monkeypatch, responder)
-    assert result["status"] == "error"
-    assert "打标失败" in (result.get("error") or "")
-    # 撰写阶段根本没有被调用:不允许带着未打标的候选去写正文
-    assert "e4:A" not in prompts and "e4:B" not in prompts
+    assert result["status"] == "ok"                       # 对齐原版:版块不因打标失败而挂
+    assert sum(1 for c in calls if c == "e4_tagging") == 2  # 首次 + 重试 1 次
+    # 保守保留:未过滤候选照样进撰写 Prompt
+    assert "财务暴雷" in prompts["e4:A"][0]
+    # 但降级必须可见,不能和正常产出长得一样
+    quality = json.loads((tmp_path / "e4_quality.json").read_text(encoding="utf-8"))
+    assert quality["degraded"] is True
+    assert quality["fallback_type_count"] > 0
+    assert any("降级" in w for w in quality["parse_warnings"])
 
 
 def test_pipeline_signature_tracks_sub_step_prompts(tmp_path, monkeypatch):

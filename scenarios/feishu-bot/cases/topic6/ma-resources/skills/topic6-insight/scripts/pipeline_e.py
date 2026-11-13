@@ -1020,20 +1020,23 @@ def _parse_e4_tagging_output(text: str, warnings: list | None = None) -> tuple:
 
 
 class E4TaggingIncomplete(RuntimeError):
-    """打标结果缺失/不可用。strict 模式下抛此错,由调用方重跑或让 E4 整体失败。"""
+    """打标结果缺失/不可用,仅 strict 模式(测试/排查)抛出。生产走保守保留。"""
 
 
 def _filter_e4_tagged(candidates: dict, risk_tags: dict | None, coop_tags: dict | None,
-                      *, strict: bool = True) -> tuple:
+                      *, strict: bool = False) -> tuple:
     """按打标过滤。返回 (risk_kept, coop_kept, degraded)。
 
-    strict=True(默认):打标不可用,或任一候选没有被有效打标 → 抛 E4TaggingIncomplete。
-        2026-11-13 事故修复:此前 tags=None 时给全部候选打一个占位类型
-        「未打标（调用失败，保守保留）」继续往下写,导致渲染层没有类型列、撰写模型
-        自造「品牌合作动态」「综合舆情风险」两个小标题、本该被过滤的候选全部留在报告里,
-        且整条链路上没有任何一处报错。已失败步骤的输出不允许继续参与下游。
-    strict=False:仅供人工强制续跑(显式开关),保留旧兜底行为,同时返回 degraded=True,
-        调用方必须把降级写进报告说明,不能和正常产出长得一样。
+    **保守保留语义,对齐原版**(原版 pipeline_e.py:1547-1561 /
+    pipeline_e4_agent_steps.py:164-168):打标不可用或单条漏打标时,一律保留该候选并打
+    兜底类型,不丢数据、不让整个版块因打标失败而挂掉。原版的设计赌注是"报告里类型混乱
+    由 HC3 人工看出来修正",这条链路保持不变。
+
+    与事故前的差别只有一处:degraded 会返回给调用方,进而写进 e4_quality.json 和报告
+    正文——原版降级时只在 stderr 打一行、报告里看不出来,事故就是这样流到终稿的。
+    数据行为对齐原版,可见性加强。
+
+    strict=True 仅供测试/排查:任一候选没被有效打标就抛 E4TaggingIncomplete。
     """
     problems: list[str] = []
     degraded = False
@@ -1045,19 +1048,16 @@ def _filter_e4_tagged(candidates: dict, risk_tags: dict | None, coop_tags: dict 
             name = item["事件簇名"]
             if tags is None:
                 degraded = True
-                if strict:
-                    problems.append(f"{pool}:{name}(整组打标不可用)")
-                    continue
-                kept.append(["未分类（打标不可用，人工强制保留）", item])
+                problems.append(f"{pool}:{name}(整组打标不可用)")
+                kept.append(["未分类（打标不可用，保守保留全部）", item])
                 continue
             tag = tags.get(name)
             if tag is None:
                 degraded = True
-                if strict:
-                    problems.append(f"{pool}:{name}(漏打标)")
-                    continue
-                kept.append(["未分类（打标遗漏，人工强制保留）", item])
+                problems.append(f"{pool}:{name}(漏打标)")
+                kept.append(["未分类（打标遗漏，保守保留）", item])
                 continue
+            # 单条漏字段时按原版默认值处理:可接性默认"接"、参考价值默认"有用"(保留)
             if tag.get(verdict_key, ok_value) != ok_value:
                 continue
             kept.append([tag.get(type_key) or "未分类", item])
@@ -1069,7 +1069,7 @@ def _filter_e4_tagged(candidates: dict, risk_tags: dict | None, coop_tags: dict 
         head = f"E4 打标不完整({len(problems)} 条):" + "、".join(problems[:5])
         if len(problems) > 5:
             head += f" 等 {len(problems)} 条"
-        raise E4TaggingIncomplete(head + "。保守保留会把未过滤候选写进报告,已改为失败重跑")
+        raise E4TaggingIncomplete(head)
     return risk_kept, coop_kept, degraded
 
 
@@ -1402,8 +1402,16 @@ def _types_in_input(input_data: str) -> set:
 
 
 def _validate_e4_group_subheadings(text: str, input_data: str = "") -> list:
-    """A 组(合作动态+舆情风险)的粗体小标题必须来自本组输入数据的类型列。"""
+    """A 组(合作动态+舆情风险)的粗体小标题必须来自本组输入数据的类型列。
+
+    打标降级时输入里的类型全是「未分类（打标不可用/遗漏…）」兜底名,撰写模型必然
+    不会拿它当小标题(实测降级稿写的是「品牌合作动态」「综合舆情风险」)。此时按打标
+    类型校验没有意义,只会把"保守保留"重新变成"版块报错",与对齐原版的取舍矛盾。
+    降级场景的可见性由 e4_quality.json 的 degraded 和报告正文的降级说明承担,不在这一层拦。
+    """
     from_input = _types_in_input(input_data)
+    if from_input and all(_is_fallback_type(t) for t in from_input):
+        return []
     allowed = (from_input | {"未分类"}) if from_input else E4_LEGAL_SUBHEADINGS
     issues = []
     for line in text.splitlines():
@@ -1440,7 +1448,8 @@ def _is_fallback_type(coop_or_risk_type: str) -> bool:
 
 
 def build_e4_quality(candidates: dict, risk_kept: list, coop_kept: list,
-                     tag_res: dict | None, parse_warnings: list | None = None) -> dict:
+                     tag_res: dict | None, parse_warnings: list | None = None,
+                     degraded: bool | None = None) -> dict:
     """E4 打标/筛选质量画像,写 e4_quality.json 供 HC 与人工排查。
 
     事故教训:打标失败时报告照样产出、自校验全过,没有任何一处能看出降级。
@@ -1466,6 +1475,9 @@ def build_e4_quality(candidates: dict, risk_kept: list, coop_kept: list,
     coverage = (tagged_total - fallback_count) / tagged_total if tagged_total else 1.0
 
     tag_res = tag_res or {}
+    # degraded 由调用方按"打标是否真的降级"传入(可能漏字段但类型齐全);不传则按兜底类型推断
+    if degraded is None:
+        degraded = fallback_count > 0
     quality = {
         "candidate_pool": {"舆情风险": risk_total, "合作动态": coop_total},
         "selected": {"舆情风险": len(risk_kept), "合作动态": len(coop_kept),
@@ -1473,7 +1485,7 @@ def build_e4_quality(candidates: dict, risk_kept: list, coop_kept: list,
         "tag_coverage": round(coverage, 4),
         "fallback_type_count": fallback_count,
         "type_distribution": {"舆情风险": _dist(risk_kept), "合作动态": _dist(coop_kept)},
-        "degraded": fallback_count > 0,
+        "degraded": bool(degraded),
         "budget": {
             "max_tokens_used": tag_res.get("max_tokens_used"),
             "max_tokens_upgrades": tag_res.get("max_tokens_upgrades"),
@@ -1515,59 +1527,46 @@ async def build_e4_task(llm_call, sec: dict, insight_dir: Path, model: str = "")
 
     parse_warnings: list = []
     risk_tags = coop_tags = None
-    tagging_ok = bool(tagging_input) and _sub_ok(
-        tag_res, sid, "打标", "打标失败,E4 将按失败处理(不再静默保留全部候选)")
-    if tagging_ok:
+    tagging_ok = False
+    if tagging_input and _sub_ok(tag_res, sid, "打标", "打标失败,将重试1次"):
         risk_tags, coop_tags = _parse_e4_tagging_output(tag_res["content"], parse_warnings)
         _atomic_text(tag_res["content"], insight_dir / E4_TAGGING_AUDIT_FILE)
+        tagging_ok = True
 
-    # 2026-11-13 事故修复:strict 模式下打标不可用/漏打标直接抛错,由下方捕获后重跑一次,
-    # 仍失败则整个 E4 报 error,交给完整性闸。不再打占位类型继续往下写。
+    # 打标失败/不完整时重试 1 次(E4_GROUP_REWRITE_RETRIES),仍失败则按原版保守保留:
+    # 全部候选打兜底类型继续撰写,不丢数据、不让版块挂掉。原版
+    # pipeline_e.py:1547-1561 / pipeline_e4_agent_steps.py:164-168 就是这个语义。
+    # 与事故前的唯一差别:降级状态写进 e4_quality.json 和报告正文(原版只在 stderr 打一行,
+    # 报告里完全看不出来,所以事故能一路流到终稿)。
     risk_kept: list = []
     coop_kept: list = []
-    tagging_error: str | None = None
+    degraded = False
     for tag_attempt in range(E4_GROUP_REWRITE_RETRIES + 1):
-        try:
-            risk_kept, coop_kept, _degraded = _filter_e4_tagged(
-                candidates, risk_tags, coop_tags, strict=True)
-            tagging_error = None
+        risk_kept, coop_kept, degraded = _filter_e4_tagged(candidates, risk_tags, coop_tags)
+        if not degraded:
             break
-        except E4TaggingIncomplete as error:
-            tagging_error = str(error)
-            print(f"[{sid}] ⚠️ 打标不完整({tag_attempt + 1}/"
-                  f"{E4_GROUP_REWRITE_RETRIES + 1}):{tagging_error}", file=sys.stderr)
-            if tag_attempt >= E4_GROUP_REWRITE_RETRIES:
-                break
-            # 重跑一次打标（只在打标输入非空时）
-            if not tagging_input:
-                break
-            risk_tags = coop_tags = None
-            retry = usage.add(await _run_sub_step(
-                llm_call, "e4_tagging", "E4候选打标", E4_TAGGING_PROMPT_DIR,
-                tagging_input, E4_TAGGING_MAX_TOKENS))
-            if _sub_ok(retry, sid, "打标重试", "打标重试仍失败"):
-                risk_tags, coop_tags = _parse_e4_tagging_output(
-                    retry["content"], parse_warnings)
-                _atomic_text(retry["content"], insight_dir / E4_TAGGING_AUDIT_FILE)
-                tag_res = retry
-            else:
-                tag_res = retry or tag_res
+        if tag_attempt >= E4_GROUP_REWRITE_RETRIES or not tagging_input:
+            break
+        print(f"[{sid}] ⚠️ 打标不完整,重试1次打标", file=sys.stderr)
+        risk_tags = coop_tags = None
+        retry = usage.add(await _run_sub_step(
+            llm_call, "e4_tagging", "E4候选打标", E4_TAGGING_PROMPT_DIR,
+            tagging_input, E4_TAGGING_MAX_TOKENS))
+        if _sub_ok(retry, sid, "打标重试", "打标重试仍失败,按原版保守保留全部候选"):
+            risk_tags, coop_tags = _parse_e4_tagging_output(
+                retry["content"], parse_warnings)
+            _atomic_text(retry["content"], insight_dir / E4_TAGGING_AUDIT_FILE)
+            tag_res = retry
 
-    if tagging_error:
-        # 打标彻底失败(重跑一次仍不完整):E4 整体按失败返回,不产出降级版正文。
-        # 为什么不用"保留全部候选继续写":打标是"分类+过滤"两道职责,失败后报告会退化成
-        # 一个自造小标题+未过滤条目,而格式校验/链接溯源全部通过、self_check 也不报错——
-        # 这正是 2026-11-13 事故能流到终稿的原因。宁可让 E4 显式失败(人工可见、可重跑),
-        # 也不产出看着正常实则错的报告。
-        # 恢复路径:勾选 --sections e4 单版块重跑(E1~E3 命中 checkpoint 不重算)。
-        return {**await _error_result(
-            sec, f"E4 打标失败(已重跑 {E4_GROUP_REWRITE_RETRIES + 1} 次仍不完整):{tagging_error}。"
-                 "为避免未过滤候选进入报告,本版块按失败处理;"
-                 "请用 --sections e4 单独重跑本版块(E1~E3 走 checkpoint 不重算)"),
-            "input_tokens": usage.input_tokens, "output_tokens": usage.output_tokens}
+    if degraded:
+        msg = ("E4 打标降级:本期合作动态/舆情风险未能完成分类与过滤,"
+               "候选已全部保留(未按可接性/参考价值筛选),小标题为兜底分类")
+        print(f"[{sid}] ⚠️ {msg}", file=sys.stderr)
+        parse_warnings.append(msg)
 
     _atomic_text(json.dumps(
-        build_e4_quality(candidates, risk_kept, coop_kept, tag_res, parse_warnings),
+        build_e4_quality(candidates, risk_kept, coop_kept, tag_res, parse_warnings,
+                         degraded=degraded),
         ensure_ascii=False, indent=2), insight_dir / E4_QUALITY_FILE)
 
     marketing, consumer = [], []
