@@ -21,11 +21,22 @@ log = logging.getLogger("arkagent.preflight")
 
 DOC_SCOPES = ("docx:document:create", "docx:document:write_only")
 
+# 查通讯录用户需要两层:入口权限(四选一,飞书报错为"One of the following") + 用户字段权限。
+# 缺入口这一层是"信息卡显示不出真名"最常见的根因,飞书返回 99991672 且错误藏在 permission_violations。
+CONTACT_ENTRY_SCOPES = (
+    "contact:contact.base:readonly",
+    "contact:contact:access_as_app",
+    "contact:contact:readonly",
+    "contact:contact:readonly_as_app",
+)
+CONTACT_USER_PROFILE_SCOPES = ("contact:user.base:readonly",)
+
 
 @dataclass(frozen=True)
 class Requirement:
     scopes: tuple[str, ...]
     why: str  # 缺失时对用户的影响,要具体到"会发生什么"
+    any_of: bool = False  # True = 这些权限任一个即可(入口权限四选一);False = 都要
 
 
 def requirements(env: Optional[Mapping[str, str]] = None) -> list[Requirement]:
@@ -40,6 +51,19 @@ def requirements(env: Optional[Mapping[str, str]] = None) -> list[Requirement]:
         reqs.append(
             Requirement(DOC_SCOPES, "session 日志写不进飞书文档(只记 warning 日志,不影响用户收到回复)")
         )
+        reqs.append(
+            Requirement(
+                CONTACT_ENTRY_SCOPES,
+                "飞书日志信息卡显示不出用户真名/邮箱(缺通讯录访问入口权限,任一即可)",
+                any_of=True,
+            )
+        )
+        reqs.append(
+            Requirement(
+                CONTACT_USER_PROFILE_SCOPES,
+                "飞书日志信息卡显示不出用户真名/邮箱(缺用户字段权限)",
+            )
+        )
     return reqs
 
 
@@ -52,11 +76,17 @@ def evaluate(app_id: str, probe: ScopeProbe, reqs: list[Requirement]) -> list[st
         ]
     reports = []
     for req in reqs:
-        missing = [s for s in req.scopes if s not in probe.granted]
+        if req.any_of:
+            missing = req.scopes if all(s not in probe.granted for s in req.scopes) else []
+            label = "以下任一"
+        else:
+            missing = [s for s in req.scopes if s not in probe.granted]
+            label = ""
         if not missing:
             continue
+        display = f"{label}:{', '.join(missing)}" if label else ", ".join(missing)
         reports.append(
-            f"[权限缺失] 应用 {app_id} 未开通(应用身份):{', '.join(missing)}\n"
+            f"[权限缺失] 应用 {app_id} 未开通(应用身份):{display}\n"
             f"  影响:{req.why}\n"
             f"  处理:开放平台 → 该应用 → 权限管理 → 应用身份权限,开通后需**发布新版本**才生效。\n"
             f"  直达:https://open.feishu.cn/page/scope-apply?clientID={app_id}&scopes="

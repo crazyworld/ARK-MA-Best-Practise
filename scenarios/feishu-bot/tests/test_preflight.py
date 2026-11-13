@@ -5,7 +5,15 @@
 import json
 
 from arkagent.feishu import USER_ID_SCOPE, ScopeProbe, classify_app_scopes
-from arkagent.preflight import DOC_SCOPES, UserIdWatcher, evaluate, requirements, run_preflight
+from arkagent.preflight import (
+    CONTACT_ENTRY_SCOPES,
+    CONTACT_USER_PROFILE_SCOPES,
+    DOC_SCOPES,
+    UserIdWatcher,
+    evaluate,
+    requirements,
+    run_preflight,
+)
 
 
 def scopes_response(*names, status=1, scope_type="tenant"):
@@ -65,11 +73,28 @@ def test_missing_user_id_scope_is_reported_with_impact_and_link():
 
 def test_doc_scopes_only_required_when_doc_sink_is_enabled():
     only_id = granted(USER_ID_SCOPE)
-    assert evaluate("cli_x", only_id, requirements({})) == []                           # 没启用文档:不要求
+    assert evaluate("cli_x", only_id, requirements({})) == []           # 没启用文档:不要求
     reports = evaluate("cli_x", only_id, requirements({"SESSION_DOC_PARENT_TOKEN": "wikcnX"}))
-    assert len(reports) == 1 and all(s in reports[0] for s in DOC_SCOPES)
-    full = granted(USER_ID_SCOPE, *DOC_SCOPES)
+    assert len(reports) == 3                                            # doc + 通讯录入口 + 用户字段
+    full = granted(USER_ID_SCOPE, *DOC_SCOPES, *CONTACT_ENTRY_SCOPES, *CONTACT_USER_PROFILE_SCOPES)
     assert evaluate("cli_x", full, requirements({"SESSION_DOC_PARENT_TOKEN": "wikcnX"})) == []
+
+
+def test_contact_entry_is_any_of():
+    probe = granted(USER_ID_SCOPE, *DOC_SCOPES, "contact:contact:access_as_app", *CONTACT_USER_PROFILE_SCOPES)
+    reports = evaluate("cli_x", probe, requirements({"SESSION_DOC_PARENT_TOKEN": "t"}))
+    assert all("contact:contact" not in r for r in reports)             # 有任一入口,这一项不报
+    none = granted(USER_ID_SCOPE, *DOC_SCOPES, *CONTACT_USER_PROFILE_SCOPES)  # 一个入口都没有
+    reports = evaluate("cli_x", none, requirements({"SESSION_DOC_PARENT_TOKEN": "t"}))
+    entry = next(r for r in reports if "通讯录访问入口" in r)
+    assert "以下任一" in entry and "contact:contact.base:readonly" in entry
+
+
+def test_contact_user_profile_is_required_in_addition_to_entry():
+    # 只有入口、没有用户字段权限 → 仍缺 profile
+    probe = granted(USER_ID_SCOPE, *DOC_SCOPES, "contact:contact.base:readonly")
+    reports = evaluate("cli_x", probe, requirements({"SESSION_DOC_PARENT_TOKEN": "t"}))
+    assert any("用户字段" in r and "contact:user.base:readonly" in r for r in reports)
 
 
 def test_partially_missing_doc_scopes_list_only_what_is_missing():

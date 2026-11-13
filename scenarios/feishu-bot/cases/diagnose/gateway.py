@@ -201,8 +201,12 @@ def build_gateway(config: DiagnoseConfig, ark, sender, loop: asyncio.AbstractEve
                 if ref.chat_type == "group" and ref.chat_id:
                     chat_name = sender.try_chat_name(ref.chat_id)
                 user_name = ""
-                if ref.meta.get("user_open_id"):
-                    user_name = sender.try_user_name(str(ref.meta["user_open_id"]))
+                # 优先租户级 user_id(跨应用稳定);旧数据没有 user_id 才退回应用级 open_id
+                # (open_id 按应用隔离,用排障应用的身份查业务应用的 open_id 通常查不到,只作最后兜底)
+                if ref.user_id:
+                    user_name = sender.try_user_name(ref.user_id, "user_id")
+                elif ref.meta.get("user_open_id"):
+                    user_name = sender.try_user_name(str(ref.meta["user_open_id"]), "open_id")
                 return {"chat_name": chat_name, "user_name": user_name}
 
             return await loop.run_in_executor(None, resolve_sync)

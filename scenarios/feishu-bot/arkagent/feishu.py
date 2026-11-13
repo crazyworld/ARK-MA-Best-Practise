@@ -458,16 +458,20 @@ class FeishuSender:
         self._roster_cache[chat_id] = (now + CHAT_ROSTER_TTL_SECONDS, roster)
         return roster
 
-    def _fetch_user(self, open_id: str) -> dict:
-        """查通讯录 user 对象(一次请求),失败抛异常。需要 ``contact:user.base:readonly`` scope。"""
+    def _fetch_user(self, ident: str, user_id_type: str = "open_id") -> dict:
+        """查通讯录 user 对象(一次请求),失败抛异常。
+
+        需要两层权限:`contact:contact.*`(通讯录访问入口,任一) + `contact:user.base:readonly`
+        (用户基础字段 name/email)。缺任一层飞书都返回 99991672。
+        """
         from lark_channel import AccessTokenType, BaseRequest, HttpMethod
 
         request = (
             BaseRequest.builder()
             .http_method(HttpMethod.GET)
             .uri("/open-apis/contact/v3/users/:user_id")
-            .paths({"user_id": open_id})
-            .queries([("user_id_type", "open_id")])
+            .paths({"user_id": ident})
+            .queries([("user_id_type", user_id_type)])
             .token_types({AccessTokenType.TENANT})
             .build()
         )
@@ -486,16 +490,17 @@ class FeishuSender:
         """反查真名,失败抛异常由 resolve_operator_name 兜底(卡片操作人回显用)。"""
         return str(self._fetch_user(open_id).get("name") or "")
 
-    def try_user_name(self, open_id: str) -> str:
-        """尽力反查用户可读标识:**真名优先,真名没有回退邮箱**;两者都拿不到返回空串,由调用方降级显示 open_id。
+    def try_user_name(self, ident: str, user_id_type: str = "open_id") -> str:
+        """尽力反查用户可读标识:**真名优先,真名没有回退邮箱**;两者都拿不到返回空串,由调用方降级显示 ID。
 
-        供排障日志文档等信息展示用。name 和 email 都属于 ``contact:user.base:readonly``
-        权限(需已发布版本生效),未开通时都返回空串,不得抛异常阻断文档写入。
+        供排障日志文档等信息展示用。ident 是租户级 user_id 时用 ``user_id_type="user_id"``
+        (跨应用稳定),是某应用的 open_id 时用 ``"open_id"``。查不到/权限不足都返回空串,
+        不得抛异常阻断文档写入。
         """
-        if not open_id:
+        if not ident:
             return ""
         try:
-            user = self._fetch_user(open_id)
+            user = self._fetch_user(ident, user_id_type)
             return str(user.get("name") or user.get("email") or "")
         except Exception:
             return ""
