@@ -189,3 +189,28 @@ def test_quality_flags_degraded_and_fallback_count():
     assert quality["fallback_type_count"] == 2
     assert quality["degraded"] is True
     assert quality["parse_warnings"]
+
+
+# ------------------------------------------------------------------ P0 升档上限
+
+def test_ceiling_reaches_model_hard_limit():
+    """ceiling 必须等于 relay 实测硬上限 393216;旧值 32000 让升档形同虚设。"""
+    pe = _load_pe("t6_pe_ceiling")
+    assert pe.MAX_TOKENS_CEILING == 393216
+    assert pe.MAX_TOKENS_TOTAL_ATTEMPTS >= 4
+
+
+def test_upgrade_loop_not_capped_at_two_upgrades():
+    """起始 4000 连撞线时,升档次数由总尝试次数决定,不再被"最多升 2 次"锁死。"""
+    pe = _load_pe("t6_pe_upgrade")
+    cur, upgrades = 4000, 0
+    seen = [cur]
+    for _ in range(pe.MAX_TOKENS_TOTAL_ATTEMPTS):
+        if upgrades + 1 >= pe.MAX_TOKENS_TOTAL_ATTEMPTS or cur >= pe.MAX_TOKENS_CEILING:
+            break
+        cur = min(cur * 2, pe.MAX_TOKENS_CEILING)
+        upgrades += 1
+        seen.append(cur)
+    # 4000→8000→16000→32000→64000:至少能升到 64000,覆盖实测峰值 16541 与 4 倍波动
+    assert max(seen) >= 64000
+    assert upgrades > pe.MAX_TOKENS_RETRIES

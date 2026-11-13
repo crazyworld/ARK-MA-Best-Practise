@@ -105,7 +105,12 @@ def test_length_truncation_doubles_max_tokens_and_counts_discarded_tokens(monkey
     assert result["input_tokens"] == 30
 
 
-def test_length_upgrade_respects_retry_limit_and_ceiling(monkeypatch):
+def test_length_upgrade_climbs_until_total_attempts_exhausted(monkeypatch):
+    """2026-11-13 修复:升档不再被"最多升 2 次"截断(那会让 ceiling 形同虚设)。
+
+    旧约定是 [20000, 32000] 两次就停——4000 起步时只到 16000,打标实测需要 16541
+    正好撞死。现在按总尝试次数(MAX_TOKENS_TOTAL_ATTEMPTS)逐档翻倍到 ceiling。
+    """
     module = _load_pipeline_e_module()
     budgets = []
 
@@ -114,9 +119,13 @@ def test_length_upgrade_respects_retry_limit_and_ceiling(monkeypatch):
         return {"content": "半截", "input_tokens": 1, "output_tokens": 1, "stop_reason": "length"}
 
     monkeypatch.setattr(module, "_stream_completion", always_length)
-    result = asyncio.run(module.call_llm_async("k", "u", _section(max_tokens=20000), "p", "m"))
+    result = asyncio.run(module.call_llm_async("k", "u", _section(max_tokens=4000), "p", "m"))
 
-    assert budgets == [20000, module.MAX_TOKENS_CEILING]
+    assert len(budgets) == module.MAX_TOKENS_TOTAL_ATTEMPTS
+    assert budgets[0] == 4000
+    assert budgets == sorted(budgets)                    # 单调升档
+    assert max(budgets) >= 64000                         # 覆盖实测峰值 16541 的 3.9 倍
+    assert all(b <= module.MAX_TOKENS_CEILING for b in budgets)
     assert result["stop_reason"] == "length"
 
 
@@ -676,7 +685,13 @@ def test_e4_a_group_broken_table_fails_group_check():
     assert module.validate_e4_group("a", ok, "") == []
 
 
-def test_e4_tagging_failure_keeps_all_and_curation_failure_empties_b(tmp_path, monkeypatch):
+def test_e4_tagging_failure_fails_section_and_curation_failure_empties_b(tmp_path, monkeypatch):
+    """2026-11-13 事故修复:打标失败不再"保留全部候选继续写",改为 E4 按失败处理。
+
+    旧约定(打标失败保守保留)正是事故根因:未过滤候选全部进报告、占位类型让撰写模型
+    自造「品牌合作动态」小标题,而整条链路没有任何一处报错。枚举失败的处理不变(不回退
+    全量候选,避免绕开价值前置过滤)。
+    """
     module = _load_pipeline_e_module()
 
     async def responder(sec, prompt, calls):
@@ -689,9 +704,10 @@ def test_e4_tagging_failure_keeps_all_and_curation_failure_empties_b(tmp_path, m
         return _llm_ok(sec, "上周未观察到符合条件的营销观察。")
 
     result, calls, prompts = _run_e4(module, tmp_path, monkeypatch, responder)
-    assert result["status"] == "ok"
-    assert "财务暴雷" in prompts["e4:A"][0]             # 打标失败保守保留
-    assert "上周未枚举出符合条件的营销观察" in prompts["e4:B"][0]  # 枚举失败不回退全量
+    assert result["status"] == "error"
+    assert "打标失败" in (result.get("error") or "")
+    # 撰写阶段根本没有被调用:不允许带着未打标的候选去写正文
+    assert "e4:A" not in prompts and "e4:B" not in prompts
 
 
 def test_pipeline_signature_tracks_sub_step_prompts(tmp_path, monkeypatch):

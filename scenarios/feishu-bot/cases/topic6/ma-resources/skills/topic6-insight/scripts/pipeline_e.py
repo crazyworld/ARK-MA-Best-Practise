@@ -72,8 +72,15 @@ CHECKPOINT_VERSION = 1
 DEFAULT_MAX_WORKERS = 6
 DEFAULT_MAX_ATTEMPTS = 5
 # finish_reason=length 时 max_tokens 自动翻倍重试(对齐 CC V2 需求5),截断稿不落 checkpoint
-MAX_TOKENS_RETRIES = 2
-MAX_TOKENS_CEILING = 32000
+#
+# 2026-11-13 修复:原先"最多升 2 次"+ceiling 32000 的组合让 ceiling 形同虚设——
+# 任何起始预算翻两档就到顶(4000→8000→16000),永远摸不到 32000,更摸不到模型真实上限。
+# 打标实测需要 16541 时正好撞死在 16000,被判"打标失败"并触发静默降级。
+# 现改为:未到 ceiling 就继续升,用总尝试次数兜底;ceiling 取 relay 实测硬上限 393216
+# (超过报错:max_tokens range is [1, 393216],即 384K 输出)。
+MAX_TOKENS_RETRIES = 2          # 仅用于日志文案兼容,升档次数不再受它限制
+MAX_TOKENS_TOTAL_ATTEMPTS = 5   # 含首次调用;防止模型异常反复撞线时无限升档
+MAX_TOKENS_CEILING = 393216
 # 完整性闸未通过(空内容/表格列数错乱)时,原参数重跑该版块的次数
 SECTION_REVALIDATE_RETRIES = 1
 
@@ -298,7 +305,7 @@ async def call_llm_async(
                 )
                 if (
                     response["stop_reason"] != "length"
-                    or upgrades >= MAX_TOKENS_RETRIES
+                    or upgrades + 1 >= MAX_TOKENS_TOTAL_ATTEMPTS
                     or cur_max >= MAX_TOKENS_CEILING
                 ):
                     break
@@ -307,7 +314,7 @@ async def call_llm_async(
                 nxt = min(cur_max * 2, MAX_TOKENS_CEILING)
                 print(
                     f"[{sid}] ⚠️ finish_reason=length,max_tokens {cur_max}→{nxt} "
-                    f"自动升档重试({upgrades + 1}/{MAX_TOKENS_RETRIES})",
+                    f"自动升档重试({upgrades + 1}/{MAX_TOKENS_TOTAL_ATTEMPTS - 1})",
                     file=sys.stderr,
                 )
                 cur_max = nxt
