@@ -325,7 +325,8 @@ def _info_card(ref: TraceRef, names: Optional[dict] = None) -> str:
     if ref.meta.get("user_open_id"):
         open_id = str(ref.meta["user_open_id"])
         user_name = str(names.get("user_name") or "").strip()
-        rows.append(("用户", f"{user_name}（{open_id}）" if user_name else open_id))
+        # 与会话行同款:ID 在前,` · ` 后接可读信息(真名/邮箱);查不到就只显示 open_id。
+        rows.append(("用户", f"{open_id} · {user_name}" if user_name else open_id))
     if ref.status == "archived":
         rows.append(("状态", "已归档(用户 /new 重置后被替换的旧会话)"))
     body = "".join(f"<p><b>{esc(k)}</b>:{esc(v)}</p>" for k, v in rows)
