@@ -143,11 +143,12 @@ MA 根目录：`ma-resources/skills/topic6-web-report/`
 | `references/document-image-extraction.md`、`html-snapshot-upload.md` | 同名文件 | 原样迁入 | SHA-256 一致 |
 | `scripts/md2source.py`、`fetch_case_images.py` | 客户 `pipeline_g.py`（SourceJsonBuilder / download_case_images） | MA 重写 | 报告 md → source.json 确定性转换；HC3 飞书文档案例配图下载 |
 | `scripts/fetch_report_md.py` | 客户 `pipeline_g.py::fetch_feishu_markdown` | MA 新增（2026-11-10） | 网页正文以 HC3 定稿飞书文档为准：tenant token 读 docx blocks 还原 Markdown；读取失败/还原不完整时回退本地合并报告 |
-| `scripts/upload-html.mjs`、`validate-case-image-sources.mjs`、`validate-rendered-content.mjs`、`validate-template-assets.mjs` | 同名文件 | 原样迁入 | 4 个脚本 SHA-256 一致 |
+| `scripts/upload-html.mjs`、`validate-case-image-sources.mjs`、`validate-template-assets.mjs` | 同名文件 | 原样迁入（`validate-case-image-sources.mjs` 已有 MA 缺图占位适配） | 客户 11-12 版删除了 `upload-html.mjs`、`validate-template-assets.mjs`，MA 保留 |
+| `scripts/validate-rendered-content.mjs` | 同名文件 | 适配迁入 | MA-01~06 布局断言（10-28）；2026-11-14 合入客户 11-12 版的 9 条 CSS 结构断言 |
 | `assets/preview.png` | 同名文件 | 原样迁入 | SHA-256 一致 |
 | `assets/source/app.js`、`index.html`、`source.example.json` | 同名文件 | 原样迁入 | 3 个模板源码文件 SHA-256 一致 |
-| `assets/source/build-report.mjs`、`styles.css` | 同名文件 | 适配迁入 | 此前已有 MA 适配（与 bundle SHA 不一致，原表记为一致属误记）；2026-11-06 build-report 周/月刊改为只按周期标签判定 |
-| `assets/source/DESIGN_SPEC.md` | 同名文件 | 适配迁入 | 「云端交付」节改为不上传 snapshot（2026-11-06） |
+| `assets/source/build-report.mjs`、`styles.css` | 同名文件 | 适配迁入 | 此前已有 MA 适配（与 bundle SHA 不一致，原表记为一致属误记）；2026-11-06 build-report 周/月刊改为只按周期标签判定；2026-11-14 三方合入客户 11-12 版的布局与链接修复（保留 MA 的缺图占位、SourceLinkIndex、周期判定、尾注、字体栈；详见 skill CHANGELOG） |
+| `assets/source/DESIGN_SPEC.md` | 同名文件 | 适配迁入 | 「云端交付」节改为不上传 snapshot（2026-11-06）；2026-11-14 合入客户 11-12 版的容器断点/Hero/风险卡规则 |
 | `assets/source/bluefocus-logo-white.png`、`hero-social-bg.jpg`、`title-monthly.png`、`title-weekly.png` | 同名文件 | 原样迁入 | 4 个根级素材 SHA-256 一致 |
 | `assets/source/assets/case-1-car-livestream.jpg`～`case-4-brand-notice.jpg` | 同名文件 | 原样迁入 | 4 张案例图 SHA-256 一致 |
 | `assets/source/assets/fonts/Poppins-{Bold,Light,Medium,Regular,SemiBold}.ttf` | 同名文件 | 原样迁入 | 5 个字体 SHA-256 一致 |

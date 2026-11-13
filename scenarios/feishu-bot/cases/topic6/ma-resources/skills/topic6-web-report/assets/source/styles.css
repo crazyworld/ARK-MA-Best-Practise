@@ -63,11 +63,11 @@ body::after {
 
 body::before {
   background:
-    radial-gradient(ellipse 66% 48% at 2% -6%, rgba(255, 43, 174, 0.98), transparent 68%),
-    radial-gradient(ellipse 56% 48% at 42% -3%, rgba(115, 54, 255, 0.96), transparent 69%),
-    radial-gradient(ellipse 56% 52% at 78% -3%, rgba(0, 177, 255, 0.94), transparent 70%),
-    radial-gradient(ellipse 44% 42% at 102% 4%, rgba(26, 241, 198, 0.76), transparent 72%),
-    linear-gradient(180deg, #744cff 0%, #6eaeea 25%, #e2eaf4 55%, var(--page) 78%, var(--page) 100%);
+    radial-gradient(ellipse 66% 48% at 2% -6%, hsl(323 100% 50% / 0.98), transparent 68%),
+    radial-gradient(ellipse 56% 48% at 42% -3%, hsl(258 100% 53% / 0.96), transparent 69%),
+    radial-gradient(ellipse 56% 52% at 78% -3%, hsl(198 100% 42% / 0.94), transparent 70%),
+    radial-gradient(ellipse 44% 42% at 102% 4%, hsl(168 88% 44% / 0.76), transparent 72%),
+    linear-gradient(180deg, hsl(253 100% 57%) 0%, hsl(209 75% 59%) 25%, hsl(213 45% 84%) 55%, var(--page) 78%, var(--page) 100%);
 }
 
 body::after {
@@ -147,16 +147,16 @@ button {
 .report-hero::before {
   content: "";
   position: absolute;
-  inset: 0 0 auto;
-  z-index: -1;
-  height: clamp(360px, 50vh, 520px);
+  inset: 0 0 auto 0;
+  z-index: 0;
+  height: clamp(400px, 50vh, 560px);
   pointer-events: none;
   background-image: var(--hero-bg-image, none);
   background-position: center top;
   background-size: cover;
   background-repeat: no-repeat;
   mix-blend-mode: normal;
-  opacity: 0.18;
+  opacity: 0.06;
   filter: saturate(1.12) contrast(1.03);
   -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 42%, rgba(0, 0, 0, 0.9) 54%, rgba(0, 0, 0, 0.64) 68%, rgba(0, 0, 0, 0.34) 82%, rgba(0, 0, 0, 0.12) 92%, transparent 100%);
   mask-image: linear-gradient(to bottom, #000 0%, #000 42%, rgba(0, 0, 0, 0.9) 54%, rgba(0, 0, 0, 0.64) 68%, rgba(0, 0, 0, 0.34) 82%, rgba(0, 0, 0, 0.12) 92%, transparent 100%);
@@ -477,6 +477,8 @@ button {
 .toc-icon svg { width: 100%; height: 100%; fill: currentColor; }
 
 .content-shell {
+  position: relative;
+  z-index: 1;
   width: min(1240px, calc(100% - 48px));
   margin: 12px auto 0;
 }
@@ -776,7 +778,7 @@ button {
 
 .risk-topic-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: 1fr;
   gap: 14px;
   margin-top: 18px;
 }
@@ -788,7 +790,7 @@ button {
   background: #f7f8fc;
 }
 
-.risk-topic-card:last-child:nth-child(odd) { grid-column: 1 / -1; }
+.risk-topic-card:last-child:nth-child(odd) { grid-column: auto; }
 
 .risk-topic-card .minor-heading {
   margin: 0 0 12px;
@@ -1196,7 +1198,8 @@ button {
   display: flex;
   flex: 0 0 auto;
   margin-left: auto;
-  align-items: flex-end;
+  align-items: center;
+  align-self: center;
   justify-content: flex-end;
   gap: 14px;
 }
@@ -1328,6 +1331,125 @@ button {
   padding-top: 8px;
 }
 
+#marketing-nodes .data-card-grid--node-summary .data-card-header {
+  padding: 20px 22px 18px;
+}
+
+#marketing-nodes .data-card-grid--node-summary .data-card-fields {
+  padding-top: 10px;
+}
+
+#marketing-nodes .data-card-grid--node-summary .data-card-field--brand-ip {
+  padding-top: 5px;
+}
+
+#marketing-nodes .data-card-grid--node-summary .data-card-meta {
+  display: block;
+  width: 124px;
+  padding-right: 6px;
+  align-self: center;
+}
+
+#marketing-nodes .data-card-grid--node-summary .data-card-stat {
+  display: grid;
+  grid-template-rows: 16px 22px 7px;
+  width: 124px;
+  flex-basis: 124px;
+  align-content: start;
+  row-gap: 4px;
+  text-align: left;
+}
+
+#marketing-nodes .data-card-grid--node-summary .data-card-stat > span {
+  display: flex;
+  height: 16px;
+  margin: 0;
+  align-items: center;
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 16px;
+}
+
+#marketing-nodes .data-card-grid--node-summary .data-card-stat > strong {
+  display: flex;
+  height: 22px;
+  min-height: 22px;
+  align-items: center;
+  color: #26324d;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 22px;
+}
+
+#marketing-nodes .data-card-stat--node-count::after {
+  content: "";
+  display: block;
+  height: 7px;
+  visibility: hidden;
+}
+
+#marketing-nodes .data-card-grid--node-summary .data-card-heat-supplement {
+  width: 124px;
+}
+
+.data-card-grid--node-preview {
+  gap: 12px;
+}
+
+#marketing-nodes .data-card-grid--node-preview .data-card {
+  padding: 0;
+  border-color: rgba(82, 92, 122, 0.12);
+  border-radius: 18px;
+  background: linear-gradient(145deg, #f2f6ff 0%, #edf4ff 100%);
+  box-shadow: none;
+}
+
+#marketing-nodes .data-card-grid--node-preview .data-card:nth-child(even) {
+  background: linear-gradient(145deg, #fff7ed 0%, #fff0e7 100%);
+}
+
+#marketing-nodes .data-card-grid--node-preview .data-card-header {
+  display: block;
+  min-height: 0;
+  padding: 17px 19px 8px;
+  border-radius: 0;
+  background: transparent;
+}
+
+#marketing-nodes .data-card-grid--node-preview .data-card-title-row h3 {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 19px;
+}
+
+#marketing-nodes .data-card-grid--node-preview .data-card-header h3 time {
+  min-height: 28px;
+  margin-left: auto;
+  padding: 0 10px;
+  align-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.8);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.68);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 28px;
+}
+
+#marketing-nodes .data-card-grid--node-preview .data-card-fields {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 18px;
+  padding: 3px 19px 15px;
+  background: transparent;
+}
+
+#marketing-nodes .data-card-grid--node-preview .data-card-field {
+  padding: 5px 0 0;
+}
+
 .data-card-grid--hot-events .data-card {
   padding: 10px;
 }
@@ -1341,10 +1463,37 @@ button {
   flex-basis: calc(100% - 58px);
 }
 
+.data-card-grid--hot-events .data-card-title {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.data-card-industry--hot-event {
+  height: 34px;
+  padding: 0 12px;
+  align-items: center;
+  justify-content: center;
+  background: rgba(67, 61, 243, 0.12);
+  color: var(--accent-deep);
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1;
+  transform: translateY(-1px);
+}
+
 .data-card-grid--hot-events .data-card-meta {
   width: 100%;
   margin-left: 56px;
   justify-content: flex-start;
+}
+
+.data-card-grid--hot-events.data-card-grid--ranked .data-card-meta {
+  width: 118px;
+  margin-left: 0;
+  padding-right: 6px;
+  align-self: center;
+  justify-content: flex-end;
 }
 
 .data-card-grid--hot-events .data-card-stat {
@@ -1392,6 +1541,7 @@ button {
   grid-template-columns: 1fr;
 }
 
+/* Dense-card field headings use a 60% intro gap without changing other cards. */
 .data-card-grid--ranked {
   grid-template-columns: 1fr;
   gap: 12px;
@@ -1433,30 +1583,47 @@ button {
   grid-column: auto;
 }
 
+/* Platform-keyword cards: 25px → 15px intro gap (60%) for the two primary fields. */
+.data-card-grid--platform-keywords.data-card-grid--plays .data-card-header {
+  margin-bottom: 5px;
+}
+
+.data-card-grid--platform-keywords.data-card-grid--ranked .data-card-fields {
+  padding-top: 7px;
+}
+
+.data-card-grid--platform-keywords .data-card-field.data-card-field--specific-hot-search,
+.data-card-grid--platform-keywords .data-card-field.data-card-field--industry-fit {
+  padding-top: 3px;
+}
+
 .data-card-grid--ranked .data-card-field--drivers .cell-list {
   grid-template-columns: repeat(3, minmax(0, 1fr));
   column-gap: 20px;
 }
 
+.data-card-grid--industry-ranking {
+  container-type: inline-size;
+}
+
 .data-card-grid--industry-ranking .data-card {
-  display: grid;
-  grid-template-columns: minmax(430px, 0.4fr) minmax(0, 0.6fr);
-  gap: 10px;
-  align-items: stretch;
+  display: block;
 }
 
 .data-card-grid--industry-ranking .data-card-header {
   grid-template-columns: auto minmax(0, 1fr) auto;
-  align-content: center;
+  align-items: center;
+  min-height: 84px;
+  padding: 16px 18px;
 }
 
 .data-card-grid--industry-ranking .data-card-meta {
-  grid-column: auto;
-  width: auto;
+  display: block;
+  width: 118px;
   max-width: none;
   margin-top: 0;
-  justify-content: flex-end;
-  gap: 10px;
+  padding-right: 6px;
+  align-self: center;
 }
 
 .data-card-grid--industry-ranking .data-card-title-row {
@@ -1467,18 +1634,85 @@ button {
   white-space: nowrap;
 }
 
-.data-card-grid--industry-ranking .data-card-stat,
-.data-card-grid--industry-ranking .data-card-heat {
-  width: 104px;
-  flex-basis: 104px;
+.title-count-capsule {
+  display: inline-flex;
+  height: 30px;
+  padding: 0 10px;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.82);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.62);
+  box-shadow: 0 3px 10px rgba(50, 63, 88, 0.045);
+  white-space: nowrap;
+  transform: translateY(-2px);
+}
+
+.title-count-capsule strong {
+  color: #26324d;
+  font-family: "Poppins Report", "Noto Sans SC", "Source Han Sans SC", "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 16px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.title-count-capsule span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1;
+}
+
+.data-card-heat-supplement {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  width: 118px;
+  flex: 0 0 118px;
+  align-items: baseline;
+  align-self: center;
+  gap: 5px 8px;
+}
+
+.data-card-heat-supplement > span {
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 1.2;
+}
+
+.data-card-heat-supplement > strong {
+  color: var(--ink-soft);
+  font-family: "Poppins Report", "Noto Sans SC", "Source Han Sans SC", "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 14px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  text-align: right;
+}
+
+.data-card-heat-supplement .heat-meter {
+  grid-column: 1 / -1;
+  width: 100%;
+  height: 7px;
+  margin: 0;
+  background: rgba(50, 63, 88, 0.16);
+  box-shadow: inset 0 0 0 0.5px rgba(38, 49, 74, 0.11), inset 0 1px 1px rgba(38, 49, 74, 0.06);
+}
+
+.data-card-heat-supplement .heat-fill {
+  min-width: 0;
+  padding: 0;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.22), 0 1px 2px rgba(38, 49, 74, 0.12);
 }
 
 .data-card-grid--industry-ranking .data-card-fields {
   display: block;
   min-width: 0;
-  padding: 14px 16px;
-  border-radius: 15px;
-  background: #f9fbfd;
+  margin: 0;
+  padding: 12px 10px 6px;
+  border-radius: 0;
+  background: #fff;
 }
 
 .data-card-grid--industry-ranking .data-card-field--drivers {
@@ -1487,23 +1721,25 @@ button {
 }
 
 .data-card-grid--industry-ranking .data-card-field--drivers dt {
-  margin-bottom: 8px;
+  margin-bottom: 7px;
   color: var(--ink-soft);
   font-weight: 500;
 }
 
 .data-card-grid--industry-ranking .data-card-field--drivers .cell-list {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px 16px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0 18px;
 }
 
 .data-card-grid--industry-ranking .data-card-field--drivers .cell-list li {
-  position: relative;
-  padding-left: 10px;
+  min-width: 0;
+  padding: 1px 0 1px 10px;
+  border-left: 0;
 }
 
 .data-card-grid--industry-ranking .data-card-field--drivers .cell-list li:first-child {
   padding-left: 10px;
+  border-left: 0;
 }
 
 .data-card-grid--industry-ranking .data-card-field--drivers .cell-list li::before {
@@ -1512,6 +1748,64 @@ button {
   left: 0;
   display: block;
   color: inherit;
+}
+
+/* Industry ranking cards respond to their usable card width. Wide cards split
+   metrics and topics; constrained cards stack them before text can collide. */
+@container (min-width: 940px) {
+  .data-card-grid--industry-ranking .data-card {
+    display: grid;
+    grid-template-columns: minmax(390px, 0.94fr) minmax(360px, 1.06fr);
+    align-items: stretch;
+    gap: 10px;
+  }
+
+  .data-card-grid--industry-ranking .data-card-header {
+    min-height: 100%;
+    align-self: stretch;
+  }
+
+  .data-card-grid--industry-ranking .data-card-fields {
+    display: flex;
+    min-width: 0;
+    margin: 0;
+    padding: 18px 20px;
+    align-items: center;
+    border-radius: var(--radius-inner);
+    background: #f8fafe;
+  }
+
+  .data-card-grid--industry-ranking .data-card-field--drivers {
+    width: 100%;
+  }
+
+  .data-card-grid--industry-ranking .data-card-field--drivers .cell-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 9px 18px;
+  }
+}
+
+@container (max-width: 939px) {
+  .data-card-grid--industry-ranking .data-card-header {
+    display: flex;
+    flex-wrap: wrap;
+  }
+
+  .data-card-grid--industry-ranking .data-card-title-row {
+    flex-wrap: wrap;
+  }
+
+  .data-card-grid--industry-ranking .data-card-header h3 {
+    white-space: normal;
+  }
+
+  .data-card-grid--industry-ranking .data-card-meta {
+    width: 100%;
+    margin-top: 2px;
+    padding-left: 0;
+    flex-basis: 100%;
+    justify-content: flex-start;
+  }
 }
 
 .data-card-grid--plays .data-card-fields {
@@ -1543,6 +1837,27 @@ button {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+/* 风险信息通常包含多条热搜与处置建议；固定为纵向阅读，避免双列压缩。 */
+#marketing-findings .risk-topic-card .data-card-grid--risks {
+  grid-template-columns: 1fr;
+}
+
+#marketing-findings .data-card--marketing-finding .data-card-fields {
+  padding-top: 8px;
+}
+
+#marketing-findings .data-card--marketing-finding .data-card-field--specific-hot-search {
+  padding-top: 6px;
+}
+
+#marketing-findings .data-card--risk .data-card-fields {
+  padding-top: 8px;
+}
+
+#marketing-findings .data-card--risk .data-card-field--specific-hot-search {
+  padding-top: 6px;
+}
+
 #marketing-findings .data-card-kicker,
 #marketing-findings .data-card-industry {
   display: inline-flex;
@@ -1568,12 +1883,111 @@ button {
   margin: 0;
 }
 
+#marketing-findings .data-card--marketing-finding .data-card-header,
+#marketing-findings .data-card--risk .data-card-header {
+  min-height: 96px;
+  padding: 18px;
+  align-items: center;
+}
+
+#marketing-findings .data-card--marketing-finding .data-card-label-row {
+  position: static;
+  margin: 5px 0 0;
+  gap: 5px;
+}
+
+#marketing-findings .data-card--marketing-finding .data-card-label-row .data-card-kicker,
+#marketing-findings .data-card--marketing-finding .data-card-label-row .data-card-industry,
+#marketing-findings .data-card--risk .data-card-kicker {
+  min-height: 24px;
+  margin: 0;
+  padding: 0 8px;
+  border: 1px solid rgba(255, 255, 255, 0.82);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.68);
+  box-shadow: 0 4px 12px rgba(50, 63, 88, 0.055);
+  font-size: 12px;
+  line-height: 24px;
+  backdrop-filter: blur(10px) saturate(125%);
+  -webkit-backdrop-filter: blur(10px) saturate(125%);
+}
+
+#marketing-findings .data-card--marketing-finding .data-card-label-row .data-card-kicker,
+#marketing-findings .data-card--risk .data-card-kicker {
+  color: #514a7f;
+}
+
+#marketing-findings .data-card--marketing-finding .data-card-label-row .data-card-industry {
+  background: rgba(67, 61, 243, 0.075);
+  color: var(--accent-deep);
+}
+
+#marketing-findings .data-card--risk .data-card-kicker {
+  position: static;
+  display: inline-flex;
+  margin: 5px 0 0;
+  align-items: center;
+  align-self: flex-start;
+  background: rgba(255, 255, 255, 0.72);
+  color: #7a4757;
+}
+
+#marketing-findings .data-card--marketing-finding .data-card-title,
+#marketing-findings .data-card--risk .data-card-title {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-self: center;
+}
+
 .data-card-grid--risks .data-card:nth-child(6n + 1) { --data-card-header-bg: linear-gradient(135deg, var(--animal-card-pink), var(--animal-card-orange)); }
 .data-card-grid--risks .data-card:nth-child(6n + 2) { --data-card-header-bg: linear-gradient(135deg, var(--animal-card-blue), var(--animal-card-purple)); }
 .data-card-grid--risks .data-card:nth-child(6n + 3) { --data-card-header-bg: linear-gradient(135deg, var(--animal-card-yellow), var(--animal-card-orange)); }
 .data-card-grid--risks .data-card:nth-child(6n + 4) { --data-card-header-bg: linear-gradient(135deg, var(--animal-card-teal), var(--animal-card-green)); }
 .data-card-grid--risks .data-card:nth-child(6n + 5) { --data-card-header-bg: linear-gradient(135deg, var(--animal-card-lime), var(--animal-card-yellow)); }
 .data-card-grid--risks .data-card:nth-child(6n) { --data-card-header-bg: linear-gradient(135deg, var(--animal-card-orange), var(--animal-card-pink)); }
+
+/* Optical centering for Chinese text inside content pills.
+   The asymmetric vertical padding moves only the contents down by 1px while
+   preserving each pill's external size and position. */
+.title-count-capsule,
+.data-card-industry,
+#marketing-nodes .data-card-kicker,
+#marketing-findings .data-card-kicker,
+#marketing-nodes .data-card-grid--node-preview .data-card-header h3 time {
+  padding-top: 2px;
+  line-height: 1;
+}
+
+#marketing-nodes .data-card-grid--node-preview .data-card-header h3 time {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* The larger platform tag and the compact marketing tags need one extra
+   optical pixel compared with the count capsule. */
+.data-card-industry--hot-event,
+#marketing-findings .data-card-kicker,
+#marketing-findings .data-card-industry {
+  padding-top: 4px;
+  transform: translateY(-1px);
+}
+
+.pill-label-text {
+  display: inline-block;
+  line-height: inherit;
+}
+
+.title-count-capsule > .pill-label-text,
+.data-card-industry--hot-event > .pill-label-text {
+  transform: translateY(-0.5px);
+}
+
+#marketing-findings .data-card-kicker > .pill-label-text,
+#marketing-findings .data-card-industry > .pill-label-text {
+  transform: translateY(0.5px);
+}
 
 .table-wrap {
   width: 100%;
@@ -1721,7 +2135,7 @@ tbody tr:hover td { background: #f4f5ff; }
   width: calc(100% - 24px);
   height: auto;
   aspect-ratio: 1 / 1;
-  margin: 12px;
+  margin: 12px auto;
   place-items: center;
   align-self: center;
   overflow: hidden;
@@ -1733,7 +2147,8 @@ tbody tr:hover td { background: #f4f5ff; }
   display: block;
   width: 100%;
   height: 100%;
-  object-fit: contain;
+  object-fit: cover;
+  object-position: center;
 }
 
 .case-copy { padding: 20px; }
@@ -1763,6 +2178,8 @@ tbody tr:hover td { background: #f4f5ff; }
 
 .case-card h3 span { flex: 0 0 auto; }
 .case-card p { margin: 8px 0 0; color: var(--ink-soft); font-size: 14px; }
+.case-source-link,
+.case-source-link .key-emphasis { color: var(--accent-deep); }
 
 .behavior-insight-grid {
   display: grid;
@@ -1948,16 +2365,18 @@ tbody tr:hover td { background: #f4f5ff; }
 }
 
 @media (max-width: 900px) {
-  .data-card-grid--industry-ranking .data-card { display: block; }
   .data-card-grid--industry-ranking .data-card-header { display: flex; }
   .data-card-grid--industry-ranking .data-card-title-row { flex-wrap: wrap; }
   .data-card-grid--industry-ranking .data-card-header h3 { white-space: normal; }
+  .title-count-capsule { margin-left: 0; }
   .data-card-grid--industry-ranking .data-card-meta {
     width: 100%;
     margin-top: 0;
     flex-basis: 100%;
     flex-wrap: wrap;
     justify-content: flex-start;
+    padding-left: 0;
+    border-left: 0;
   }
   .data-card-grid--industry-ranking .data-card-fields { margin-top: 8px; }
 }
@@ -1981,7 +2400,7 @@ tbody tr:hover td { background: #f4f5ff; }
   .source-link:hover { text-decoration: none; }
   tbody tr:hover td { background: inherit; }
   .back-to-top:hover { color: var(--accent); transform: translateY(0); }
-  .report-hero::before { opacity: 0.18; background-position: 18% top; background-size: auto 100%; }
+  .report-hero::before { opacity: 0.06; background-position: center top; background-size: cover; }
   .hero-inner { width: calc(100% - 32px); padding: 34px 0 27px; }
   .hero-heading { gap: 12px; margin-top: 25px; }
   .hero-title-image img { width: clamp(280px, 50vw, 370px); }
@@ -2008,6 +2427,13 @@ tbody tr:hover td { background: #f4f5ff; }
   .data-card-grid--ranked .data-card-field--drivers .cell-list { grid-template-columns: 1fr; }
   .data-card-grid--industry-ranking .data-card { display: block; }
   .data-card-grid--industry-ranking .data-card-fields { margin-top: 8px; }
+  .data-card-grid--industry-ranking .data-card-field--drivers .cell-list { grid-template-columns: 1fr; }
+  .data-card-grid--industry-ranking .data-card-field--drivers .cell-list li,
+  .data-card-grid--industry-ranking .data-card-field--drivers .cell-list li:first-child {
+    padding: 3px 0 3px 10px;
+    border-left: 0;
+  }
+  .data-card-grid--industry-ranking .data-card-field--drivers .cell-list li::before { display: block; }
   .data-card-header { flex-wrap: wrap; }
   .data-card-meta,
   .data-card-grid--hot-events .data-card-meta {
@@ -2036,6 +2462,13 @@ tbody tr:hover td { background: #f4f5ff; }
   .subsection-card { padding: 18px 14px; }
   .footer-note { width: calc(100% - 28px); }
   .back-to-top { right: 18px; bottom: 18px; width: 56px; height: 56px; }
+}
+
+/* Some embedded mobile browsers report a 500–600px CSS viewport even on a
+   narrow phone. Stack the Hero before the period pill can be clipped. */
+@media (max-width: 600px) {
+  .hero-heading { flex-direction: column; gap: 11px; margin-top: 22px; }
+  .hero-title-image img { width: min(292px, 84vw); }
 }
 
 @media (max-width: 480px) {
@@ -2082,13 +2515,15 @@ tbody tr:hover td { background: #f4f5ff; }
     grid-template-columns: 40px minmax(0, 1fr) auto;
     padding: 14px;
     align-items: start;
-    gap: 10px 11px;
+    gap: 7px 11px;
   }
   #platform-hotspots .data-card-grid--hot-events .data-card-award,
   #platform-hotspots .data-card-grid--hot-events .data-card-rank,
   #platform-hotspots .data-card-grid--hot-events .data-card-index {
     grid-column: 1;
     grid-row: 1;
+    align-self: center;
+    transform: translateY(-8px);
   }
   #platform-hotspots .data-card-grid--hot-events .data-card-title {
     display: contents;
@@ -2213,6 +2648,9 @@ tbody tr:hover td { background: #f4f5ff; }
   #marketing-nodes .data-card { padding: 8px; }
   #marketing-nodes .data-card-header { padding: 18px 17px 16px; }
   #marketing-nodes .data-card-fields { padding: 14px 10px 10px; }
+  #marketing-nodes .data-card-grid--node-preview .data-card { padding: 0; }
+  #marketing-nodes .data-card-grid--node-preview .data-card-header { padding: 15px 15px 7px; }
+  #marketing-nodes .data-card-grid--node-preview .data-card-fields { grid-template-columns: 1fr; padding: 3px 15px 14px; }
   .case-copy { padding: 17px; }
   .behavior-insight-card { padding: 8px; }
   .behavior-insight-card > header { min-height: 68px; padding: 14px 15px; }
@@ -2236,6 +2674,368 @@ tbody tr:hover td { background: #f4f5ff; }
   #platform-hotspots .data-card-grid--hot-events.data-card-grid--ranked .data-card-meta {
     grid-column: 1 / -1;
     grid-row: 3;
+  }
+}
+
+/* Platform event cards adapt to their actual available width. This prevents
+   rank, long event title, count and heat from competing for the same row in
+   embedded reports or split-screen browser windows. */
+#platform-hotspots .data-card-grid--hot-events {
+  container-type: inline-size;
+}
+
+@container (max-width: 980px) {
+  #platform-hotspots .data-card-grid--hot-events .data-card-header {
+    display: grid;
+    grid-template-columns: 40px minmax(0, 1fr);
+    align-items: start;
+    gap: 6px 12px;
+  }
+
+  #platform-hotspots .data-card-grid--hot-events .data-card-award,
+  #platform-hotspots .data-card-grid--hot-events .data-card-rank,
+  #platform-hotspots .data-card-grid--hot-events .data-card-index {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  #platform-hotspots .data-card-grid--hot-events .data-card-title,
+  #platform-hotspots .data-card-grid--hot-events .data-card-title-row {
+    display: contents;
+  }
+
+  #platform-hotspots .data-card-grid--hot-events .data-card-title-row h3 {
+    grid-column: 2;
+    grid-row: 1;
+    min-width: 0;
+    font-size: 18px;
+    line-height: 1.45;
+  }
+
+  #platform-hotspots .data-card-grid--hot-events .title-count-capsule {
+    grid-column: 2;
+    grid-row: 2;
+    justify-self: start;
+    margin: 0;
+  }
+
+  #platform-hotspots .data-card-grid--hot-events .data-card-meta,
+  #platform-hotspots .data-card-grid--hot-events.data-card-grid--ranked .data-card-meta {
+    grid-column: 2;
+    grid-row: 3;
+    width: min(190px, 100%);
+    max-width: none;
+    margin: 0;
+    padding: 0;
+    justify-content: flex-start;
+  }
+
+  #platform-hotspots .data-card-grid--hot-events .data-card-heat-supplement {
+    width: 100%;
+  }
+
+  #platform-hotspots .data-card-grid--hot-events .data-card-field--list-grid .cell-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 7px 16px;
+  }
+}
+
+@container (max-width: 520px) {
+  #platform-hotspots .data-card-grid--hot-events .title-count-capsule {
+    grid-column: 2;
+    grid-row: 2;
+  }
+
+  #platform-hotspots .data-card-grid--hot-events .data-card-meta,
+  #platform-hotspots .data-card-grid--hot-events.data-card-grid--ranked .data-card-meta {
+    grid-column: 2;
+    grid-row: 3;
+  }
+
+  #platform-hotspots .data-card-grid--hot-events .data-card-field--list-grid .cell-list {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Keep the sticky primary navigation readable in constrained publishing frames. */
+@media (max-width: 1140px) {
+  .nav-shell { padding-right: 16px; padding-left: 16px; }
+  .toc {
+    width: 100%;
+    max-width: 100%;
+    justify-content: flex-start;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .toc::-webkit-scrollbar { display: none; }
+  .toc-link { flex: 1 0 auto; padding-right: 14px; padding-left: 14px; }
+}
+
+@media (max-width: 600px) {
+  .toc { gap: 2px; padding: 3px; justify-content: stretch; }
+  .toc-link { min-width: 0; padding-right: 4px; padding-left: 4px; flex: 1 1 0; gap: 4px; font-size: 12px; }
+  .toc-icon { width: 15px; height: 15px; flex-basis: 15px; }
+}
+
+/* Restore a useful second topic column on tablet cards after the global mobile
+   rule has stacked their contents. */
+@container (min-width: 520px) and (max-width: 939px) {
+  #industry-distribution .data-card-grid--industry-ranking .data-card-field--drivers .cell-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px 18px;
+  }
+
+  #industry-distribution .data-card-grid--industry-ranking .data-card-header {
+    display: grid;
+    grid-template-columns: 44px minmax(0, 1fr) minmax(150px, 0.36fr);
+    align-items: center;
+    gap: 10px 12px;
+  }
+
+  #industry-distribution .data-card-grid--industry-ranking .data-card-award,
+  #industry-distribution .data-card-grid--industry-ranking .data-card-rank,
+  #industry-distribution .data-card-grid--industry-ranking .data-card-index {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  #industry-distribution .data-card-grid--industry-ranking .data-card-title {
+    grid-column: 2;
+    grid-row: 1;
+    min-width: 0;
+  }
+
+  #industry-distribution .data-card-grid--industry-ranking .data-card-title-row {
+    flex-wrap: nowrap;
+  }
+
+  #industry-distribution .data-card-grid--industry-ranking .data-card-meta {
+    grid-column: 3;
+    grid-row: 1;
+    width: 100%;
+    max-width: none;
+    margin: 0;
+    padding: 0;
+    flex-basis: auto;
+    justify-content: flex-start;
+  }
+
+  #industry-distribution .data-card-grid--industry-ranking .data-card-heat-supplement {
+    width: 100%;
+  }
+}
+
+@container (min-width: 521px) and (max-width: 980px) {
+  #platform-hotspots .data-card-grid--hot-events .data-card-header {
+    grid-template-columns: 40px minmax(0, 1fr) minmax(160px, 0.36fr);
+  }
+
+  #platform-hotspots .data-card-grid--hot-events .data-card-title-row h3 {
+    grid-column: 2 / -1;
+  }
+
+  #platform-hotspots .data-card-grid--hot-events .title-count-capsule {
+    grid-column: 2;
+    grid-row: 2;
+  }
+
+  #platform-hotspots .data-card-grid--hot-events .data-card-meta,
+  #platform-hotspots .data-card-grid--hot-events.data-card-grid--ranked .data-card-meta {
+    grid-column: 3;
+    grid-row: 2;
+    width: 100%;
+    align-self: center;
+  }
+}
+
+#platform-hotspots .data-card-grid--platform-keywords {
+  container-type: inline-size;
+}
+
+@container (min-width: 520px) {
+  #platform-hotspots .data-card-grid--platform-keywords .data-card-field--list-grid .cell-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 7px 16px;
+  }
+}
+
+@container (max-width: 519px) {
+  #platform-hotspots .data-card-grid--platform-keywords .data-card-field--list-grid .cell-list {
+    grid-template-columns: 1fr;
+  }
+
+  #platform-hotspots .data-card-grid--platform-keywords .data-card-field dd {
+    text-align: left;
+  }
+}
+
+/* Let the available card width, rather than an arbitrary item count, choose
+   the number of hot-search columns. */
+#platform-hotspots .data-card-grid--hot-events .data-card-field--list-grid .cell-list,
+#platform-hotspots .data-card-grid--platform-keywords .data-card-field--list-grid .cell-list {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+  gap: 7px 16px;
+}
+
+@container (min-width: 420px) {
+  #platform-hotspots .data-card-grid--platform-keywords .data-card-header {
+    display: grid;
+    grid-template-columns: 40px minmax(0, 1fr) minmax(150px, 0.36fr);
+    align-items: center;
+    gap: 9px 12px;
+  }
+
+  #platform-hotspots .data-card-grid--platform-keywords .data-card-award,
+  #platform-hotspots .data-card-grid--platform-keywords .data-card-rank,
+  #platform-hotspots .data-card-grid--platform-keywords .data-card-index {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  #platform-hotspots .data-card-grid--platform-keywords .data-card-title {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  #platform-hotspots .data-card-grid--platform-keywords .data-card-meta {
+    grid-column: 3;
+    grid-row: 1;
+    width: 100%;
+    margin: 0;
+    align-self: center;
+    justify-content: flex-start;
+  }
+
+  #platform-hotspots .data-card-grid--platform-keywords .data-card-heat {
+    width: 100%;
+  }
+}
+
+/* Align the event rank with the title row at every non-phone card width.
+   Count and heat occupy a separate shared metric row, so a wrapped title
+   cannot pull the rank icon away from its visual partner. */
+@container (min-width: 521px) {
+  #platform-hotspots .data-card-grid--hot-events .data-card-header {
+    display: grid;
+    grid-template-columns: 40px minmax(0, 1fr) minmax(160px, 0.36fr);
+    align-items: start;
+    gap: 6px 12px;
+  }
+
+  #platform-hotspots .data-card-grid--hot-events .data-card-award,
+  #platform-hotspots .data-card-grid--hot-events .data-card-rank,
+  #platform-hotspots .data-card-grid--hot-events .data-card-index {
+    grid-column: 1;
+    grid-row: 1;
+    align-self: center;
+    transform: translateY(-8px);
+  }
+
+  #platform-hotspots .data-card-grid--hot-events .data-card-title,
+  #platform-hotspots .data-card-grid--hot-events .data-card-title-row {
+    display: contents;
+  }
+
+  #platform-hotspots .data-card-grid--hot-events .data-card-title-row h3 {
+    grid-column: 2 / -1;
+    grid-row: 1;
+    min-width: 0;
+    font-size: 18px;
+    line-height: 1.45;
+  }
+
+  #platform-hotspots .data-card-grid--hot-events .title-count-capsule {
+    grid-column: 2;
+    grid-row: 2;
+    justify-self: start;
+    margin: 0;
+  }
+
+  #platform-hotspots .data-card-grid--hot-events .data-card-meta,
+  #platform-hotspots .data-card-grid--hot-events.data-card-grid--ranked .data-card-meta {
+    grid-column: 3;
+    grid-row: 2;
+    width: 100%;
+    max-width: none;
+    margin: 0;
+    padding: 0;
+    align-self: center;
+    justify-content: flex-start;
+  }
+
+  #platform-hotspots .data-card-grid--hot-events .data-card-heat-supplement {
+    width: 100%;
+  }
+
+  #platform-hotspots .data-card-grid--hot-events .data-card-index {
+    transform: translateY(-4px);
+  }
+}
+
+@container (min-width: 680px) {
+  #platform-hotspots .data-card-grid--hot-events .data-card-title-row h3 {
+    white-space: nowrap;
+  }
+}
+
+#marketing-nodes .data-card-grid--node-summary {
+  container-type: normal;
+}
+
+#marketing-nodes .data-card-grid--node-summary .data-card {
+  container-type: inline-size;
+}
+
+@container (min-width: 420px) {
+  #marketing-nodes .data-card-grid--node-summary .data-card-header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(170px, 0.38fr);
+    align-items: center;
+    gap: 12px 18px;
+  }
+
+  #marketing-nodes .data-card-grid--node-summary .data-card-title {
+    grid-column: 1;
+    grid-row: 1;
+    min-width: 0;
+  }
+
+  #marketing-nodes .data-card-grid--node-summary .data-card-title-row {
+    flex-wrap: nowrap;
+  }
+
+  #marketing-nodes .data-card-grid--node-summary .data-card-meta {
+    grid-column: 2;
+    grid-row: 1;
+    width: 100%;
+    max-width: none;
+    margin: 0;
+    padding: 0;
+    align-self: center;
+    justify-content: flex-start;
+  }
+
+  #marketing-nodes .data-card-grid--node-summary .data-card-heat-supplement {
+    width: 100%;
+  }
+}
+
+@container (max-width: 419px) {
+  #marketing-nodes .data-card-grid--node-summary .data-card-header {
+    display: flex;
+    flex-wrap: wrap;
+  }
+
+  #marketing-nodes .data-card-grid--node-summary .data-card-title-row {
+    flex-wrap: wrap;
+  }
+
+  #marketing-nodes .data-card-grid--node-summary .data-card-meta {
+    width: 100%;
+    margin: 2px 0 0;
+    padding: 0;
+    flex-basis: 100%;
+    justify-content: flex-start;
   }
 }
 

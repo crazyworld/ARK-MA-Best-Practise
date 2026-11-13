@@ -55,6 +55,15 @@ function renderedContains(sourceText) {
 }
 
 if (/blob:/iu.test(html)) errors.push("Rendered HTML still contains a browser-session blob URL");
+if (!/\.report-hero::before\s*\{[^}]*z-index:\s*0;/su.test(html)) errors.push("Rendered Hero background must remain in the Hero stacking context");
+if (/\.report-hero\s*\{[^}]*background:\s*(?!transparent|none)/su.test(html)) errors.push("Rendered Hero has an opaque background that can create a visual seam");
+if (!/#platform-hotspots \.data-card-grid--hot-events\s*\{[^}]*container-type:\s*inline-size;/su.test(html)) errors.push("Rendered platform event cards are missing their container breakpoint");
+if (!/#platform-hotspots \.data-card-grid--platform-keywords\s*\{[^}]*container-type:\s*inline-size;/su.test(html)) errors.push("Rendered platform keyword cards are missing their container breakpoint");
+if (!/grid-template-columns:\s*repeat\(auto-fit, minmax\(min\(100%, 220px\), 1fr\)\)/su.test(html)) errors.push("Rendered hot-search lists are missing their space-aware auto-fit grid");
+if (!/#marketing-nodes \.data-card-grid--node-summary \.data-card\s*\{[^}]*container-type:\s*inline-size;/su.test(html)) errors.push("Rendered node-summary cards are missing their per-card container breakpoint");
+if (!/#platform-hotspots \.data-card-grid--hot-events \.data-card-award,[\s\S]*?align-self:\s*center;[\s\S]*?transform:\s*translateY\(-8px\);/su.test(html)) errors.push("Rendered event rank is not optically centered to its title row");
+if (!/#platform-hotspots \.data-card-grid--hot-events \.data-card-index\s*\{[^}]*transform:\s*translateY\(-4px\);/su.test(html)) errors.push("Rendered compact event rank is missing its optical alignment adjustment");
+if (!/@container \(min-width: 680px\)[\s\S]*?#platform-hotspots \.data-card-grid--hot-events \.data-card-title-row h3\s*\{[^}]*white-space:\s*nowrap;/su.test(html)) errors.push("Rendered wide event title is missing its single-line rule");
 if (/<p(?:\s[^>]*)?>\s*•(?:\s|<)/u.test(html)) errors.push("Rendered prose contains a standalone bullet marker");
 if (/<ul class="cell-list">[\s\S]*?<li>\s*[•·|｜-]\s*/u.test(html)) errors.push("Rendered data-card list contains a decorative text prefix");
 if (/(?:^|\n)\.cell-list li::before\s*\{[^}]*content:\s*["']?•/mu.test(html)) errors.push("Rendered plain data-card list still draws decorative bullets");

@@ -11,6 +11,25 @@
 
 ---
 
+## 2026-11-14
+
+### Phase G 网页模板合入客户 11-12 版修复
+
+- **现象**：客户在 `artifact-template-bluefocus-hotspot-web-report` 11-12 版修复了 WebView 顶部 Hero 断层、
+  中等宽度下卡片标题与指标互相挤压、段落内链接不可点、E4 三列舆情表（无「风险类型」列）不按风险卡渲染等问题；
+  MA 版 `topic6-web-report` 仍是 11-10 之前的状态。
+- **根因**：MA 版与客户版从 V2 vendor 版分叉后两边各自演进，直接覆盖会回退 MA 已有的修复（缺图占位、W45 同标题跨平台链接、
+  周期判定、热度值尾注、Noto 字体栈）。
+- **处理**：以 V2 vendor 版为基线做三方合并，只合入上游修复。冲突处保留 MA 语义，并对上游实现做适配
+  （上游行内链接改用 `SourceLinkIndex` 解析；「原始热点」整段链接只在存在「原始热点」行时才隐藏「链接：」行）。
+  `tests/test_topic6_ma1027_regression.py::_section` 原先以首个 `</section>` 截断主板块；
+  舆情风险现在包含嵌套的 `risk-topic-card` section，因此改为截到下一个主板块。
+- **影响文件**：`topic6-web-report/{assets/source/build-report.mjs,assets/source/styles.css,scripts/validate-rendered-content.mjs,
+  SKILL.md,assets/source/DESIGN_SPEC.md,CHANGELOG.md}`、`CUSTOMER_TO_MA_FILE_MAPPING.md`、
+  `tests/test_topic6_web_report_alignment.py`（新增 6 个用例）、`tests/test_topic6_ma1027_regression.py`。**需 update_ma.sh** 重新上传 skill。
+
+---
+
 ## 2026-11-13
 
 ### E4 打标失败导致「营销发现」降级（测试记录 1113 问题 2/3/4）

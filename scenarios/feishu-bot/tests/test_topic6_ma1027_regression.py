@@ -69,7 +69,9 @@ def _list_fields(html: str, label: str) -> list[str]:
 
 
 def _section(html: str, section_id: str) -> str:
-    m = re.search(r'<section class="report-section[^"]*" id="%s".*?</section>' % section_id, html, re.S)
+    # 截到下一个主板块或 </main>:舆情风险版块内含嵌套 <section class="risk-topic-card">,不能以首个 </section> 为界
+    m = re.search(r'<section class="report-section[^"]*" id="%s".*?(?=<section class="report-section|</main>)' % section_id,
+                  html, re.S)
     assert m, section_id
     return m.group(0)
 

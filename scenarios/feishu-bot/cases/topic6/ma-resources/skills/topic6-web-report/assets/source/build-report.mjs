@@ -144,9 +144,9 @@ const icons = {
 const backToTopIcon = '<svg viewBox="0 0 1024 1024" aria-hidden="true"><path d="M514.7 101.6c-228.3 0-413.3 185.1-413.3 413.3s185.1 413.3 413.3 413.3c228.2.1 413.3-185 413.3-413.2S742.9 101.6 514.7 101.6zm-129.2 218.9h246.2c11.6 0 21.1 9.2 21.1 20.6s-9.4 20.6-21.1 20.6H385.5c-11.6 0-21.1-9.2-21.1-20.6s9.4-20.6 21.1-20.6zm267.4 245.1c-10.2 9.9-26.7 9.9-36.8 0l-86.4-84.2v219.7c0 11.4-9.4 20.6-21.1 20.6-11.6 0-21.1-9.2-21.1-20.6V481.3l-86.4 84.2c-10.2 9.9-26.7 9.9-36.8 0-10.2-9.9-10.2-26 0-35.9L490.1 407c5.1-5 11.8-7.5 18.5-7.5s13.3 2.5 18.4 7.4l125.9 122.8c10.2 9.9 10.2 25.9 0 35.9z"/></svg>';
 
 const sectionConfig = [
-  { match: /^一、行业(?:分布)?及热门话题/u, id: "industry-distribution", label: "行业分布", icon: "industry", tone: "violet" },
+  { match: /^一、行业(?:分布)?及热门话题/u, id: "industry-distribution", label: "行业热点", icon: "industry", tone: "violet" },
   { match: /^二、营销节点/u, id: "marketing-nodes", label: "营销节点", icon: "nodes", tone: "orange" },
-  { match: /^三、平台(?:热点|新鲜事)/u, id: "platform-hotspots", label: "平台热点", icon: "platforms", tone: "cyan" },
+  { match: /^三、平台(?:热点|新鲜事)/u, id: "platform-hotspots", label: "平台新鲜事", icon: "platforms", tone: "cyan" },
   { match: /^四、营销发现/u, id: "marketing-findings", label: "营销发现", icon: "findings", tone: "pink" }
 ];
 
@@ -300,19 +300,14 @@ function renderEmphasizedLine(value) {
   return output + escapeHTML(value.slice(cursor));
 }
 
-function renderNarrativeText(value) {
-  return textLines(value).map(renderEmphasizedLine).join("<br>");
-}
-
-function renderListItem(value, sourceLinks) {
-  const text = cleanText(value).replace(/^[•·-]\s*/u, "");
+// bullet / 正文行内按 block.links 的「文本→href」逐段包链接,其余文本保持原强调渲染;
+// 同一文本出现多次时按其后紧跟的平台标注(「（抖音 · 90 分）」)取对应链接(SourceLinkIndex)
+function renderLinkedLine(text, sourceLinks) {
   const allTopics = sourceLinks instanceof SourceLinkIndex ? sourceLinks.topics() : [...(sourceLinks ?? new Map()).keys()];
   const targets = allTopics
     .filter((topic) => topic && text.includes(topic))
     .sort((a, b) => b.length - a.length);
   if (!targets.length) return renderEmphasizedLine(text);
-  // bullet 内按 block.links 的「文本→href」逐段包链接,其余文本保持原强调渲染;
-  // 同一文本出现多次时按其后紧跟的平台标注(「（抖音 · 90 分）」)取对应链接
   let output = "";
   let cursor = 0;
   while (cursor < text.length) {
@@ -330,6 +325,15 @@ function renderListItem(value, sourceLinks) {
     cursor = next.at + next.topic.length;
   }
   return output + renderEmphasizedLine(text.slice(cursor));
+}
+
+// 上游 2026-11-12:正文段落 / ⚠️ 提示也按 block.links 挂链接(此前只有 bullet 挂链接,段落内链接丢失)
+function renderNarrativeText(value, sourceLinks) {
+  return textLines(value).map((line) => renderLinkedLine(line, sourceLinks)).join("<br>");
+}
+
+function renderListItem(value, sourceLinks) {
+  return renderLinkedLine(cleanText(value).replace(/^[•·-]\s*/u, ""), sourceLinks);
 }
 
 function sentimentClass(value) {
@@ -355,6 +359,20 @@ function heatBand(score) {
 function renderHeat(value) {
   const score = Math.max(0, Math.min(100, Number.parseFloat(cleanText(value)) || 0));
   return `<div class="heat-meter heat-${heatBand(score)}" aria-label="标准化热度分 ${escapeHTML(cleanText(value))}"><span class="heat-fill" style="width:${score}%"><b>${escapeHTML(cleanText(value))}</b></span></div>`;
+}
+
+function renderSupplementalHeatMetric(value, header, modifier = "") {
+  const cleaned = cleanText(value);
+  const score = Math.max(0, Math.min(100, Number.parseFloat(cleaned) || 0));
+  return `<div class="data-card-heat-supplement${modifier ? ` ${modifier}` : ""}"><span>${escapeHTML(header)}</span><strong>${escapeHTML(cleaned)}</strong><div class="heat-meter heat-${heatBand(score)}" aria-label="标准化热度分 ${escapeHTML(cleaned)}"><span class="heat-fill" style="width:${score}%" aria-hidden="true"></span></div></div>`;
+}
+
+function renderIndustryHeatMetric(value, header) {
+  return renderSupplementalHeatMetric(value, header, "data-card-heat-supplement--industry");
+}
+
+function renderNodeHeatMetric(value, header) {
+  return renderSupplementalHeatMetric(value, header, "data-card-heat-supplement--node");
 }
 
 function renderCell(value, header, sourceLinks = exactSourceLinks) {
@@ -516,7 +534,7 @@ function renderTable(block) {
   const riskEventIndex = headers.findIndex((header) => /^风险事件$/u.test(header));
   const hasNodeTitlePair = nodeDateIndex >= 0 && nodeNameIndex >= 0;
   const isHotEventTable = rankIndex === 0 && eventNameIndex > 0;
-  const isRiskTable = riskTypeIndex >= 0 && riskEventIndex >= 0;
+  const isRiskTable = riskEventIndex >= 0 && (riskTypeIndex >= 0 || headers.some((header) => /风险影响/u.test(header)));
   const primaryIndex = hasNodeTitlePair
     ? nodeNameIndex
     : isRiskTable
@@ -526,6 +544,8 @@ function renderTable(block) {
       : 0;
   const isMarketingFindingTable = industryIndex >= 0 && /^(?:合作事件|事件)$/u.test(cleanText(headers[primaryIndex] ?? ""));
   const isIndustryRankingTable = /TOP10行业/u.test(heading);
+  const isMarketingNodeSummary = /^\s*节点\s*\//u.test(heading) && countIndex >= 0 && heatIndex >= 0;
+  const isMarketingNodePreview = hasNodeTitlePair;
   const hasImplicitIndex = /TOP10行业|玩法话题|平台热点词/u.test(headers[primaryIndex] ?? "");
   const isPlayTable = /玩法话题|平台热点词/u.test(headers[primaryIndex] ?? "");
   const isPlatformKeywordTable = /平台热点词/u.test(headers[primaryIndex] ?? "");
@@ -545,6 +565,8 @@ function renderTable(block) {
   if (isRiskTable) gridClasses.push("data-card-grid--risks");
   if (rankIndex >= 0 || hasImplicitIndex) gridClasses.push("data-card-grid--ranked");
   if (isIndustryRankingTable) gridClasses.push("data-card-grid--industry-ranking");
+  if (isMarketingNodeSummary) gridClasses.push("data-card-grid--node-summary");
+  if (isMarketingNodePreview) gridClasses.push("data-card-grid--node-preview");
   const gridClass = gridClasses.length ? ` ${gridClasses.join(" ")}` : "";
 
   let carriedRiskType = "";
@@ -561,6 +583,9 @@ function renderTable(block) {
       if (/所属事件/u.test(header) && cleaned === primaryValue) return "";
       const fieldClasses = ["data-card-field"];
       if (longFieldPattern.test(header) || textLines(cleaned).length > 2 || cleaned.length > 72) fieldClasses.push("data-card-field--wide");
+      if (/^具体热搜(?:[·・].*)?$/u.test(header)) fieldClasses.push("data-card-field--specific-hot-search");
+      if (/^适配领域$/u.test(header)) fieldClasses.push("data-card-field--industry-fit");
+      if (/^涉及品牌\/IP$/u.test(header)) fieldClasses.push("data-card-field--brand-ip");
       if (/借势方向/u.test(header)) fieldClasses.push("data-card-field--direction");
       if (/本周主要驱动话题|主要驱动话题/u.test(header)) fieldClasses.push("data-card-field--drivers");
       if (/本周主要驱动话题|主要驱动话题|代表热搜|具体热搜/u.test(header) && textLines(cleaned).length > 1) fieldClasses.push("data-card-field--list-grid");
@@ -572,8 +597,8 @@ function renderTable(block) {
       : sequence
         ? `<span class="data-card-index" data-rank="${escapeHTML(sequence)}"><span>${escapeHTML(sequence)}</span></span>`
         : "";
-    const kickerText = isRiskTable ? carriedRiskType || "风险事件" : headers[primaryIndex] ?? "";
-    const kicker = sequence || hasNodeTitlePair ? "" : `<span class="data-card-kicker">${escapeHTML(kickerText)}</span>`;
+    const kickerText = isRiskTable ? carriedRiskType : headers[primaryIndex] ?? "";
+    const kicker = sequence || hasNodeTitlePair || isMarketingNodeSummary || !kickerText ? "" : `<span class="data-card-kicker"><span class="pill-label-text">${escapeHTML(kickerText)}</span></span>`;
     const title = hasNodeTitlePair
       ? `${escapeHTML(primaryValue)}<time datetime="${escapeHTML(cleanText(row[nodeDateIndex] ?? ""))}">${escapeHTML(cleanText(row[nodeDateIndex] ?? ""))}</time>`
       : escapeHTML(primaryValue);
@@ -586,17 +611,32 @@ function renderTable(block) {
       ? `${cleanText(row[industryIndex])}${/行业$/u.test(cleanText(row[industryIndex])) ? "" : "行业"}`
       : "";
     const titleLabels = isMarketingFindingTable
-      ? (marketingFindingIndustry ? `<div class="data-card-label-row"><span class="data-card-industry">${escapeHTML(marketingFindingIndustry)}</span></div>` : "")
+      ? (marketingFindingIndustry ? `<div class="data-card-label-row"><span class="data-card-industry"><span class="pill-label-text">${escapeHTML(marketingFindingIndustry)}</span></span></div>` : "")
       : kicker;
-    const count = countIndex >= 0 && cleanText(row[countIndex] ?? "")
-      ? `<div class="data-card-stat"><span>${escapeHTML(headers[countIndex])}</span><strong>${escapeHTML(cleanText(row[countIndex]))}</strong></div>`
+    const placeLabelsAfterTitle = isMarketingFindingTable || isRiskTable;
+    const labelsBeforeTitle = placeLabelsAfterTitle ? "" : titleLabels;
+    const labelsAfterTitle = placeLabelsAfterTitle ? titleLabels : "";
+    const countValue = countIndex >= 0 ? cleanText(row[countIndex] ?? "") : "";
+    const useInlineCount = isIndustryRankingTable || isHotEventTable || isMarketingNodeSummary;
+    const inlineCount = useInlineCount && countValue
+      ? `<span class="title-count-capsule"><span class="pill-label-text">${escapeHTML(headers[countIndex])}</span><strong>${escapeHTML(countValue)}</strong></span>`
+      : "";
+    const count = !useInlineCount && countValue
+      ? `<div class="data-card-stat${isMarketingNodeSummary ? " data-card-stat--node-count" : ""}"><span>${escapeHTML(headers[countIndex])}</span><strong>${escapeHTML(countValue)}</strong></div>`
       : "";
     const heat = heatIndex >= 0 && cleanText(row[heatIndex] ?? "")
-      ? `<div class="data-card-heat"><span>${escapeHTML(headers[heatIndex])}</span>${renderCell(row[heatIndex], headers[heatIndex], sourceLinks)}</div>`
+      ? isIndustryRankingTable
+        ? renderIndustryHeatMetric(row[heatIndex], headers[heatIndex])
+        : isMarketingNodeSummary
+          ? renderNodeHeatMetric(row[heatIndex], headers[heatIndex])
+          : renderSupplementalHeatMetric(row[heatIndex], headers[heatIndex])
       : "";
     const meta = count || heat ? `<div class="data-card-meta">${count}${heat}</div>` : "";
     const fieldMarkup = fields ? `<dl class="data-card-fields">${fields}</dl>` : "";
-    return `<article class="data-card" role="listitem"><header class="data-card-header">${sequenceBadge}<div class="data-card-title">${titleLabels}<div class="data-card-title-row"><h3>${headingTitle}</h3>${industryTag}</div></div>${meta}</header>${fieldMarkup}</article>`;
+    const cardClasses = ["data-card"];
+    if (isMarketingFindingTable) cardClasses.push("data-card--marketing-finding");
+    if (isRiskTable) cardClasses.push("data-card--risk");
+    return `<article class="${cardClasses.join(" ")}" role="listitem"><header class="data-card-header">${sequenceBadge}<div class="data-card-title">${labelsBeforeTitle}<div class="data-card-title-row">${industryTag}<h3>${headingTitle}</h3>${inlineCount}</div>${labelsAfterTitle}</div>${meta}</header>${fieldMarkup}</article>`;
   }).join("");
 
   return `${chart}<div class="data-card-grid${gridClass}" role="list" aria-label="${escapeHTML(heading)}">${cards}</div>`;
@@ -631,7 +671,24 @@ function renderGridCase(block) {
     ? `<figure class="case-visual"><img src="${image.src}" alt="${escapeHTML(image.alt)}" loading="lazy" decoding="async"></figure>`
     : `<figure class="case-visual case-visual--placeholder" aria-label="配图待补充"><span class="case-visual-placeholder-icon" aria-hidden="true">🖼️</span><span>配图待补充</span></figure>`;
   const sourceLinks = blockSourceLinks(block);
-  return `<article class="case-card case-card--visual"><div class="case-copy"><h3>${escapeHTML(title)}</h3>${details.map((line) => `<p>${renderListItem(line, sourceLinks)}</p>`).join("")}</div>${media}</article>`;
+  // 上游 2026-11-12:「原始热点：」后的整段原文渲染为蓝色外链;独立「链接：URL」行作为链接目标、不单独显示。
+  // 仅在本案例存在「原始热点」行时才隐藏「链接：」行,否则保留原样,避免 URL 从页面丢失。
+  const hasOriginalLine = details.some((line) => /^原始热点\s*[：:]/u.test(line));
+  const explicitUrl = details.find((line) => /^链接\s*[：:]/u.test(line))?.match(/https?:\/\/\S+/u)?.[0] ?? "";
+  const renderCaseDetail = (line) => {
+    if (hasOriginalLine && /^链接\s*[：:]/u.test(line)) return "";
+    const originalMatch = line.match(/^(原始热点\s*[：:]\s*)([\s\S]+)$/u);
+    if (!originalMatch) return `<p>${renderListItem(line, sourceLinks)}</p>`;
+    const originalText = originalMatch[2].trim();
+    const topicOnly = originalText.replace(/\s*[（(](?:微博|抖音|B站|知乎|快手|头条|百度|多平台)[^）)]*[）)]\s*$/u, "");
+    const platform = originalText.slice(topicOnly.length).match(/(微博|抖音|B站|知乎|快手|头条|百度)/u)?.[1] ?? "";
+    const href = resolveSourceLink(sourceLinks, originalText, platform)
+      || resolveSourceLink(sourceLinks, topicOnly, platform)
+      || explicitUrl;
+    if (!href) return `<p>${renderListItem(line, sourceLinks)}</p>`;
+    return `<p>${renderEmphasizedLine(originalMatch[1])}<a class="source-link" href="${escapeHTML(href)}" target="_blank" rel="noopener noreferrer"><span class="case-source-link">${renderEmphasizedLine(originalText)}</span></a></p>`;
+  };
+  return `<article class="case-card case-card--visual"><div class="case-copy"><h3>${escapeHTML(title)}</h3>${details.map(renderCaseDetail).join("")}</div>${media}</article>`;
 }
 
 function renderFlow(items) {
@@ -652,6 +709,7 @@ function renderFlow(items) {
   };
 
   items.forEach((block) => {
+    if (block.hidden) return;
     let text = cleanText(block.text);
     if (/docx-text-block/u.test(block.className)) text = text.replace(/^•\s*/u, "");
     if (!text && !block.tables.length) return;
@@ -686,9 +744,9 @@ function renderFlow(items) {
     if (isMinorHeading(text)) {
       output += `<h3 class="minor-heading"><span aria-hidden="true">${minorIcon(text)}</span>${escapeHTML(text)}</h3>`;
     } else if (/^⚠️/u.test(text)) {
-      output += `<p class="caution-note">${renderNarrativeText(text)}</p>`;
+      output += `<p class="caution-note">${renderNarrativeText(text, blockSourceLinks(block))}</p>`;
     } else {
-      output += `<p>${renderNarrativeText(text)}</p>`;
+      output += `<p>${renderNarrativeText(text, blockSourceLinks(block))}</p>`;
     }
   });
 
@@ -778,7 +836,7 @@ function renderRiskCards(items) {
 function subsectionClasses(title) {
   const classes = ["subsection-card"];
   if (/微博|抖音|B\s*站|知乎/u.test(title)) classes.push("platform-card");
-  if (/品牌舆情风险/u.test(title)) classes.push("risk-card");
+  if (/(?:品牌)?舆情风险/u.test(title)) classes.push("risk-card");
   if (/营销案例|营销观察/u.test(title)) classes.push("marketing-case-section");
   if (/消费(?:者行为)?洞察/u.test(title)) classes.push("behavior-insights-section");
   return classes.join(" ");
@@ -787,7 +845,7 @@ function subsectionClasses(title) {
 function renderSubsection(group, options = {}) {
   const content = /消费(?:者行为)?洞察/u.test(group.title)
     ? renderBehaviorInsights(group.blocks)
-    : /品牌舆情风险/u.test(group.title)
+    : /(?:品牌)?舆情风险/u.test(group.title)
       ? renderRiskCards(group.blocks)
       : renderFlow(group.blocks);
   const classes = [subsectionClasses(group.title), options.className].filter(Boolean).join(" ");
@@ -879,6 +937,9 @@ const footerNoteText = cleanText([...blocks].reverse().find((block) => /quote_co
 const footerNoteMatch = footerNoteText.match(/^([^：:]+[：:])\s*([\s\S]*)$/u);
 const footerNoteLabel = footerNoteMatch?.[1] ?? "本周特殊说明：";
 const footerNoteBody = footerNoteMatch?.[2] ?? footerNoteText ?? "";
+const footerNoteMarkup = footerNoteText
+  ? `<aside class="footer-note" aria-label="${escapeHTML(footerNoteLabel.replace(/[：:]$/u, ""))}"><strong>${escapeHTML(footerNoteLabel)}</strong><span>${escapeHTML(footerNoteBody)}</span></aside>`
+  : "";
 const titleMarkup = titleAssetData
   ? `<h1 class="hero-title-image"><img src="data:image/png;base64,${titleAssetData}" alt="${escapeHTML(reportTitle)}"></h1>`
   : `<h1 class="hero-wordmark">${escapeHTML(reportTitle)}</h1>`;
@@ -923,7 +984,7 @@ const html = `<!doctype html>
     ${renderedSections}
   </main>
 
-  <aside class="footer-note" aria-label="${escapeHTML(footerNoteLabel.replace(/[：:]$/u, ""))}"><strong>${escapeHTML(footerNoteLabel)}</strong><span>${escapeHTML(footerNoteBody)}</span></aside>
+${footerNoteMarkup ? `  ${footerNoteMarkup}\n` : ""}
   <footer class="report-footer">Copyright@Bluefocus, 2026</footer>
   <a class="back-to-top" href="#top" aria-label="返回页面顶部" title="返回顶部">${backToTopIcon}</a>
   <script>${js}</script>

@@ -488,3 +488,77 @@ def test_template_example_html_unchanged_by_link_index(tmp_path):
     html = _build_example_variant(tmp_path, lambda b: None)
     hrefs = {l["href"] for b in blocks for l in (b.get("links") or [])}
     assert hrefs and all(h.replace("&", "&amp;") in html or h in html for h in hrefs)
+
+
+# ---------------------------------------------------------------- 上游 2026-11-12 模板更新合入
+# 上游(客户 artifact-template 11-12 版)修复:正文段落链接、原始热点整段链接、风险表识别放宽、
+# 隐藏 block、舆情风险小节命名、Hero 层级、容器断点布局。MA 侧必须保留:缺图占位非阻断、
+# SourceLinkIndex 同标题跨平台、周期判定、热度值说明尾注、Noto 字体栈。
+
+def _render_md(tmp_path: Path, tail: str) -> str:
+    return _build_md(tmp_path, _HEAD + tail)
+
+
+def test_upstream_paragraph_links_render(tmp_path):
+    """上游修复:普通段落(非 bullet)内的 [标题](url) 也挂成链接,此前段落内链接文字不可点。"""
+    md = _HEAD.replace(f"# 二、营销节点\n\n{_BODY}",
+                       f"# 二、营销节点\n\n上周关注 [成都蓉城致歉]({WB}) 引发的讨论，正文足够长满足字数要求。") + (
+        "### 消费洞察\n\n#### 洞察 1：标题\n- 群体：某群体\n- 触发事件：无\n- 行为反应：反应\n- 营销发现：发现\n")
+    html = _build_md(tmp_path, md)
+    nodes = re.search(r'id="marketing-nodes".*?(?=<section class="report-section|</main>)', html, re.S).group(0)
+    assert f'<a class="source-link" href="{WB}"' in nodes
+
+
+def test_upstream_case_original_hotspot_whole_text_link_and_hidden_url_line(tmp_path):
+    """上游修复:「原始热点：」整段原文(含平台括注)为蓝色链接,「链接：URL」行不单独显示;MA 缺图占位保留。"""
+    html = _render_md(tmp_path, (
+        "### 营销观察\n\n#### 案例 1：成都蓉城致歉（微博 · 87.2分）\n"
+        "- 原始热点：成都蓉城致歉（微博）\n- 营销发现：说明文字。\n"
+        f"- 链接：{WB}\n- [配图：待补充]\n"))
+    case = re.search(r'<article class="case-card case-card--visual">.*?</article>', html, re.S).group(0)
+    assert re.search(r'原始热点：(?:</strong>)?<a class="source-link" href="%s"[^>]*><span class="case-source-link">成都蓉城致歉（微博）</span></a>' % re.escape(WB), case)
+    assert "链接：" not in re.sub(r"<[^>]+>", "", case)
+    assert "case-visual--placeholder" in case
+
+
+def test_case_link_line_kept_when_no_original_hotspot_line(tmp_path):
+    """干净性:没有「原始热点」行的案例,「链接：」行不被吞掉(避免 URL 从页面消失)。"""
+    blocks = json.loads(EXAMPLE.read_text(encoding="utf-8"))
+    case = next(b for b in blocks if "docx-grid-block" in b["className"])
+    case["text"] = "案例 9：测试案例\n营销发现：说明。\n链接：https://example.com/x"
+    case["links"] = []
+    source = tmp_path / "source.json"
+    source.write_text(json.dumps(blocks, ensure_ascii=False), encoding="utf-8")
+    html_path = tmp_path / "index.html"
+    build = subprocess.run(["node", str(BUILDER), str(source), str(html_path)], capture_output=True, text=True, check=False)
+    assert build.returncode == 0, build.stderr
+    assert "链接：https://example.com/x" in html_path.read_text(encoding="utf-8")
+
+
+def test_upstream_risk_table_without_type_column_renders_as_risk_cards(tmp_path):
+    """上游修复:E4 舆情表只有「风险事件|具体热搜|风险影响」三列(无风险类型列)也按风险卡渲染,不出现「风险事件」通用胶囊。"""
+    html = _render_md(tmp_path, (
+        "### 舆情风险\n\n**机构/赛事争议**\n\n| 风险事件 | 具体热搜 | 风险影响 |\n| --- | --- | --- |\n"
+        f"| 成都蓉城致歉 | - [成都蓉城致歉]({WB}) · 微博 · 87.2 分<br>- [成都蓉城致歉]({DY}) · 抖音 · 100.0 分 | 影响说明 |\n"))
+    assert 'class="subsection-card risk-card"' in html
+    assert "data-card-grid--risks" in html and 'class="data-card data-card--risk"' in html
+    assert '<span class="data-card-kicker"' not in re.search(r'id="marketing-findings".*?</main>', html, re.S).group(0)
+
+
+def test_upstream_hidden_block_not_rendered(tmp_path):
+    blocks = json.loads(EXAMPLE.read_text(encoding="utf-8"))
+    target = next(b for b in blocks if "docx-text-block" in b["className"] and len(str(b.get("text", ""))) > 20
+                  and "数据" not in str(b.get("text", "")))
+    target["hidden"] = True
+    marker = str(target["text"]).strip()[:20]
+    html = _build_example_variant(tmp_path, lambda b: b.clear() or b.extend(blocks))
+    assert marker not in re.sub(r"<[^>]+>", "", html[html.find("<main"):])
+
+
+def test_upstream_layout_css_and_ma_font_stack(tmp_path):
+    """上游 Hero 层级/容器断点已合入(由 validate-rendered-content 断言);中文字体栈保持 MA 的 Noto 优先。"""
+    html = _build_example_variant(tmp_path, lambda b: None)
+    assert re.search(r"\.report-hero::before\s*\{[^}]*z-index:\s*0;", html)
+    assert "container-type: inline-size" in html
+    assert '--font-sans: "Poppins Report", "Noto Sans SC"' in html
+    assert not re.search(r'font-family:\s*"(?:Poppins Report", )?"PingFang SC"', html)
