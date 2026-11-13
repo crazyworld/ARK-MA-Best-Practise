@@ -2,6 +2,7 @@
 
 权限是这个 bot 风险最高的部分,所以测试以\"越权拿不到\"为主。事件夹具按真实结构构造。
 """
+import asyncio
 import json
 import sqlite3
 import sys
@@ -605,7 +606,7 @@ def test_start_background_schedules_the_loop_when_enabled():
 
     loop = asyncio.new_event_loop()
     cfg = type("C", (), {"authorized_open_ids": (), "feishu_app_id": "x", "doc_sync_interval_s": 1, "doc_lookback_days": 7})()
-    gw = DiagnoseGateway(cfg, _Store(), None, None, loop, None, Sched())
+    gw = DiagnoseGateway(cfg, _Store(), None, None, loop, None, doc_scheduler=Sched())
     import threading
     t = threading.Thread(target=loop.run_forever, daemon=True)
     t.start()
@@ -650,3 +651,65 @@ async def test_doc_lookup_failure_is_swallowed_and_diagnosis_still_works(tmp_pat
     result, err = await tools.call(G("oc_g"), "diagnose_task", {"task_id": "task_1"})
     assert not err and result["found"]                     # 诊断本身不受影响
     assert all(s["doc_url"] is None for s in result["sessions"])
+
+
+# ---- 收到消息贴「稍等」表情,处理完撤回 ---------------------------------------------
+class _FakeSender:
+    def __init__(self, fail_react=False):
+        self.reacted, self.deleted, self.fail_react = [], [], fail_react
+
+    def react(self, message_id, emoji_type):
+        if self.fail_react:
+            raise RuntimeError("表情接口挂了")
+        self.reacted.append((message_id, emoji_type))
+        return "rid-1"
+
+    def delete_reaction(self, message_id, reaction_id):
+        self.deleted.append((message_id, reaction_id))
+
+
+def _ack_gateway(sender):
+    loop = asyncio.new_event_loop()
+    cfg = type("C", (), {"authorized_open_ids": (), "feishu_app_id": "cli_x"})()
+    return DiagnoseGateway(cfg, None, None, None, loop, None, sender), loop
+
+
+def test_ack_then_unack_uses_one_second_emoji():
+    sender = _FakeSender()
+    gw, loop = _ack_gateway(sender)
+    try:
+        async def go():
+            msg = _Msg(message_id="m1")
+            rid = await gw._ack(msg)
+            await gw._unack(msg, rid)
+
+        loop.run_until_complete(go())
+        assert sender.reacted == [("m1", "OneSecond")]
+        assert sender.deleted == [("m1", "rid-1")]
+    finally:
+        loop.close()
+
+
+def test_no_sender_or_no_message_id_means_no_reaction():
+    gw, loop = _ack_gateway(None)                      # 没有 sender
+    try:
+        async def go():
+            assert await gw._ack(_Msg(message_id="m1")) is None
+            await gw._unack(_Msg(message_id="m1"), "rid-x")   # 无 sender,不该崩
+
+        loop.run_until_complete(go())
+    finally:
+        loop.close()
+
+
+def test_react_failure_is_degraded_to_no_reaction():
+    sender = _FakeSender(fail_react=True)
+    gw, loop = _ack_gateway(sender)
+    try:
+        async def go():
+            assert await gw._ack(_Msg(message_id="m1")) is None   # 贴失败降级,返回 None
+
+        loop.run_until_complete(go())
+        assert sender.reacted == []
+    finally:
+        loop.close()

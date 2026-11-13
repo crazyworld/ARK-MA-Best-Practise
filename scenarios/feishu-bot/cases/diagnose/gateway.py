@@ -54,7 +54,7 @@ def build_sources(db_paths: dict) -> dict:
 class DiagnoseGateway:
     def __init__(
         self, config: DiagnoseConfig, store: GatewayStore, ark, reply, loop, tools: DiagnoseTools,
-        doc_scheduler: Optional[DocScheduler] = None,
+        sender=None, doc_scheduler: Optional[DocScheduler] = None,
     ) -> None:
         self._doc_scheduler = doc_scheduler
         self._config = config
@@ -63,6 +63,7 @@ class DiagnoseGateway:
         self._reply = reply
         self._loop = loop
         self._tools = tools
+        self._sender = sender
         self._queue = KeyedQueue()
         self._authorized = set(config.authorized_open_ids)
         self._watcher = UserIdWatcher(config.feishu_app_id)
@@ -90,6 +91,9 @@ class DiagnoseGateway:
         return True
 
     async def _run(self, message: IncomingMessage) -> None:
+        # 开始处理前在原消息下贴一个「稍等」表情表示已收到;处理完(成功或失败)撤回。
+        # 与数字员工同款:回执只在处理中有意义,处理完就该消失,不刷屏。
+        reaction_id = await self._ack(message)
         try:
             await self._process(message)
             self._store.complete_event(message.event_id, "completed")
@@ -97,6 +101,27 @@ class DiagnoseGateway:
             self._store.complete_event(message.event_id, "failed")
             log.exception("diagnose failed chat=%s event=%s", message.chat_id, message.event_id)
             await self._reply(message.chat_id, f"排查失败:{str(error)[:200]}")
+        finally:
+            await self._unack(message, reaction_id)
+
+    async def _ack(self, message: IncomingMessage) -> Optional[str]:
+        if self._sender is None or not message.message_id:
+            return None
+        try:
+            return await self._loop.run_in_executor(None, self._sender.react, message.message_id, "OneSecond")
+        except Exception as error:  # noqa: BLE001 - 回执失败不影响正式回复
+            log.warning("发送「稍等」表情失败:%s", error)
+            return None
+
+    async def _unack(self, message: IncomingMessage, reaction_id: Optional[str]) -> None:
+        if not reaction_id or not message.message_id:
+            return
+        try:
+            await self._loop.run_in_executor(
+                None, self._sender.delete_reaction, message.message_id, reaction_id
+            )
+        except Exception as error:  # noqa: BLE001 - 正式回复已完成
+            log.warning("撤回「稍等」表情失败:%s", error)
 
     async def _process(self, message: IncomingMessage) -> None:
         if self._authorized and message.user_open_id not in self._authorized:
@@ -193,4 +218,4 @@ def build_gateway(config: DiagnoseConfig, ark, sender, loop: asyncio.AbstractEve
             ),
             name_resolver=name_resolver,
         )
-    return DiagnoseGateway(config, store, ark, reply, loop, tools, scheduler)
+    return DiagnoseGateway(config, store, ark, reply, loop, tools, sender, scheduler)
