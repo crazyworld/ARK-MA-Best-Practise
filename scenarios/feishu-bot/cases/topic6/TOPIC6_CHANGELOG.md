@@ -11,6 +11,17 @@
 
 ---
 
+## 2026-11-17
+
+### 「💡 行业洞察：」缺失、营销发现小标题变普通文字（W45 / W46）
+
+- **根因**：① E1 模型偶尔漏写 `**行业洞察：**`；② E4 小标题与正文之间没空行时，飞书导入成一个「前半加粗」的文本块，
+  `fetch_report_md.py` 只认整段加粗，回读后小标题丢失（W46 合作动态 3 个）。
+- **处理**：`pipeline_e._write_section_output` 对 E1 首行不含「行业洞察」时补上；`fetch_report_md.py` 回读时把
+  「加粗 + 换行 + 正文」的普通文本块拆回小标题 + 正文（列表/引用/表格不处理）。
+- **影响文件**：`topic6-insight/scripts/pipeline_e.py`、`topic6-web-report/scripts/fetch_report_md.py`、
+  `tests/test_topic6_report_subheading_stability.py`。上线需 `update_ma.sh`。
+
 ## 2026-11-16
 
 ### E2 上周节点丢失双11（job_a5f524d14a1f / W46）

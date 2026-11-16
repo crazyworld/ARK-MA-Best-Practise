@@ -83,6 +83,20 @@ def _render_inline(elements: list[dict], *, in_table: bool = False) -> tuple[str
     return rendered, whole_bold
 
 
+def _split_bold_title(elements: list[dict]) -> tuple[list[dict], list[dict]] | None:
+    """「加粗小标题 + 换行 + 正文」被飞书导入成一个文本块时,拆成 (标题, 正文);否则 None。"""
+    if len(elements) < 2 or any("text_run" not in el for el in elements):
+        return None
+    runs = [el["text_run"] for el in elements]
+    k = 0
+    while k < len(runs) and (runs[k].get("text_element_style") or {}).get("bold") and "\n" not in runs[k].get("content", ""):
+        k += 1
+    if k == 0 or k == len(runs) or not runs[k].get("content", "").startswith("\n"):
+        return None
+    rest = {"text_run": {**runs[k], "content": runs[k]["content"].lstrip("\n")}}
+    return elements[:k], [rest, *elements[k + 1:]]
+
+
 def _cell_text(cell: dict, by_id: dict) -> str:
     lines = []
     for child_id in cell.get("children", []):
@@ -129,9 +143,14 @@ def blocks_to_markdown(blocks: list[dict]) -> str:
         if btype != ORDERED:
             ordered_no = 0
 
+        split = _split_bold_title(_elements(blk)) if btype == TEXT and not quote else None
         if btype in HEADING_LEVEL:
             text, _ = _render_inline(_elements(blk))
             lines.extend(["", "#" * HEADING_LEVEL[btype] + " " + text.strip(), ""])
+        elif split:
+            title, _ = _render_inline(split[0])
+            body, _ = _render_inline(split[1])
+            lines.extend([f"**{title.strip()}**", "", body, ""])
         elif btype in (TEXT, CODE):
             text, whole_bold = _render_inline(_elements(blk))
             if not text.strip():

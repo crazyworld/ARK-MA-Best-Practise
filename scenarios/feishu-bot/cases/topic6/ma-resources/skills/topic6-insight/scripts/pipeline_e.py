@@ -1690,6 +1690,8 @@ def _write_section_output(sec: dict, result: dict, output_path: Path) -> None:
         body = _strip_leading_heading(body, sec["section_title"])
     if sec["id"] == "e3":
         body = _fix_e3_top_headings(body)
+    if sec["id"] == "e1" and "行业洞察" not in body.lstrip().split("\n", 1)[0]:
+        body = "**行业洞察：**\n" + body.lstrip()  # 模型偶尔漏写固定小标题
     _atomic_text(f"{sec['section_title']}\n\n{body}\n", output_path)
 
 
