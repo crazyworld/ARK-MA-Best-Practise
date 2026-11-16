@@ -37,7 +37,8 @@ Memory 工具暂时不可用时记录 warning 后继续,不得据此猜测 Promp
    python /mnt/skills/topic6-annotation/scripts/init_project.py \
      --text "<用户原始消息原文>" --mode {mode}
    ```
-   支持:无日期(最近完整周)/ `W35` / `09-01到09-14`(custom)/ 双周 / `继续W36`(断点续跑)
+   支持:无日期(最近完整周)/ `W35` / `继续W36`(断点续跑);只支持单周,双周与日期区间暂不支持;
+   新建周期仅限最近 4 个完整周。不支持或越界时由脚本返回 `ambiguous`,按下方规则处理
 7. 按脚本 stdout JSON 的 `status` 处理:
    - `created`:新项目，`project_dir` 取 JSON 中的值，从 Phase A 开始
    - `resumed`:从 `current_phase` 断点续跑(各状态块为 done 的分支不得重跑)
@@ -316,7 +317,7 @@ C3 覆盖率、最大事件簇、平台分布。
 上面这段的 3 个违约点:(a) JSON 块前有铺垫文本;(b) JSON 里塞了 schema 外的 `next_step_if_passed` 字段;(c) JSON 语法不闭合(多了一个 `]`)。**任一违约都会导致 gateway 兜底,审核卡片正文出现乱码残片,严重误导审核人**。
 
 用户点卡片按钮后，Gateway 注入一条 `user.message`，格式固定为
-`HC1 pass` / `HC1 reject: <原因>` / `HC1 remark: <补充>`(remark = 带备注通过),
+`HC1 pass` / `HC1 reject: <原因>` / `HC1 remark: <补充>`(remark = 带备注通过;Gateway 可配置 HC1 自动通过,此时直接收到 `HC1 pass`,处理方式不变),
 处理规则见下方「HC 决策处理」，HC2/HC3 同理。
 
 **HC 决策处理(HC1/HC2/HC3 通用)**:

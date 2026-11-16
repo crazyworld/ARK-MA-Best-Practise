@@ -398,25 +398,20 @@ def init_mod():
 TODAY = _date(2026, 10, 28)  # 周三,上一个完整周 = W43(10-19 ~ 10-25)
 
 
-@pytest.mark.parametrize("text, label, start, end, ptype", [
-    ("热点周报", "2026-W43", "2026-10-19", "2026-10-25", "weekly"),
-    ("热点周报 W41", "2026-W41", "2026-10-05", "2026-10-11", "weekly"),
-    ("热点报告 第40周", "2026-W40", "2026-09-28", "2026-10-04", "weekly"),
-    ("热点报告 09-01到09-14", "2026-W36", "2026-09-01", "2026-09-14", "custom"),
-    ("热点周报 双周", "2026-W42", "2026-10-12", "2026-10-25", "biweekly"),
-    ("热点周报 W40 双周", "2026-W40", "2026-09-28", "2026-10-11", "biweekly"),
+@pytest.mark.parametrize("text, label, start, end", [
+    ("热点周报", "2026-W43", "2026-10-19", "2026-10-25"),
+    ("热点周报 W41", "2026-W41", "2026-10-05", "2026-10-11"),
+    ("热点报告 第40周", "2026-W40", "2026-09-28", "2026-10-04"),
 ])
-def test_parse_period(init_mod, text, label, start, end, ptype):
+def test_parse_period(init_mod, text, label, start, end):
     period = init_mod.parse_period(text, TODAY)
     assert (period["period_label"], period["date_start"], period["date_end"], period["period_type"]) \
-        == (label, start, end, ptype)
+        == (label, start, end, "weekly")
 
 
 @pytest.mark.parametrize("text", [
-    "热点周报 W41 09-01到09-14",   # 周次 + 区间冲突
     "热点周报 W44",                 # 未结束
-    "热点报告 02-30到03-02",        # 非法日期
-    "热点报告 09-01到09-14 双周",   # 区间 + 双周冲突
+    "热点周报 W54",                 # 周次不存在
 ])
 def test_parse_period_ambiguous(init_mod, text):
     with pytest.raises(init_mod.Ambiguous) as info:
@@ -424,13 +419,51 @@ def test_parse_period_ambiguous(init_mod, text):
     assert len(info.value.options) == 3
 
 
+@pytest.mark.parametrize("text", [
+    "热点周报 双周",
+    "热点周报 W41 双周",
+    "热点周报 连续两周",
+    "热点报告 10-05到10-11",
+    "热点周报 W41 10-05到10-11",
+    "热点报告 02-30到03-02",        # 非法日期也按「不支持区间」处理
+])
+def test_parse_period_rejects_biweekly_and_range(init_mod, text):
+    """暂只支持单周:Phase A 只按单个 ISO 周取数,双周/区间会静默只用最后一周。"""
+    with pytest.raises(init_mod.Ambiguous) as info:
+        init_mod.parse_period(text, TODAY)
+    assert "暂不支持" in info.value.reason
+    assert info.value.resolutions == {"A": ["--prefer", "latest"], "B": None, "C": None}
+
+
+@pytest.mark.parametrize("text", [
+    "热点周报 W39",               # 窗口(W40~W43)前一周
+    "热点周报 2025W43",           # 往年同周
+])
+def test_parse_period_rejects_older_than_recent_weeks(init_mod, text):
+    with pytest.raises(init_mod.Ambiguous) as info:
+        init_mod.parse_period(text, TODAY)
+    assert "最近 4 个完整周" in info.value.reason
+    assert info.value.resolutions == {"A": ["--prefer", "latest"], "B": None, "C": None}
+
+
+def test_parse_period_recent_weeks_boundary(init_mod):
+    assert init_mod.earliest_allowed_start(TODAY) == _date(2026, 9, 28)
+    assert init_mod.parse_period("W40", TODAY)["date_start"] == "2026-09-28"
+    # 越界/不支持后选 A(--prefer latest)回到最近完整周
+    assert init_mod.parse_period("W30", TODAY, prefer="latest")["period_label"] == "2026-W43"
+    assert init_mod.parse_period("双周", TODAY, prefer="latest")["period_type"] == "weekly"
+
+
+def test_init_resume_not_limited_by_recent_weeks(init_mod, tmp_path):
+    old = init_mod.run("热点周报 W30", "full", _date(2026, 8, 5), tmp_path)
+    assert old["status"] == "created"
+    r = init_mod.run("继续W30", "full", TODAY, tmp_path)
+    assert r["status"] == "resumed" and r["project_dir"] == old["project_dir"]
+
+
 def test_project_dir_names_start_with_week(init_mod):
-    for text, expected in [
-        ("W41", "W41热点周报_20261005-20261011"),
-        ("09-01到09-14", "W36自定义_20260901-20260914"),
-        ("W40 双周", "W40双周报_20260928-20261011"),
-    ]:
-        assert init_mod.project_dir_name(init_mod.parse_period(text, TODAY)) == expected
+    assert init_mod.project_dir_name(init_mod.parse_period("W41", TODAY)) \
+        == "W41热点周报_20261005-20261011"
 
 
 def test_fetch_window_derivation(init_mod):
@@ -486,11 +519,9 @@ def test_init_ambiguous_resolutions_terminate(init_mod, tmp_path):
     cfg = yaml.safe_load((Path(r["project_dir"]) / "run_config.yaml").read_text("utf-8"))
     assert cfg["mode"] == "smoke"
     r = _resolve(init_mod, tmp_path, "W40 10-06到10-12", "full", "A")
-    assert r["period"]["period_id"] == "W40" and r["period"]["period_type"] == "weekly"
-    r = _resolve(init_mod, tmp_path, "W40 10-06到10-12", "full", "B")
-    assert r["period"]["period_type"] == "custom" and r["period"]["date_start"].endswith("10-06")
-    r = _resolve(init_mod, tmp_path, "双周 09-22到10-05", "full", "B")
-    assert r["period"]["period_type"] == "biweekly"
+    assert r["period"]["period_id"] == "W43" and r["period"]["period_type"] == "weekly"
+    r = _resolve(init_mod, tmp_path, "W44", "full", "B")
+    assert r["status"] == "created" and r["period"]["period_id"] == "W44"
     with pytest.raises(init_mod.Ambiguous) as info:
         init_mod.run("W44", "full", TODAY, tmp_path)
     assert info.value.resolutions["C"] is None  # 需用户补信息的选项不给参数
@@ -499,7 +530,8 @@ def test_init_ambiguous_resolutions_terminate(init_mod, tmp_path):
 def test_init_resume_week_does_not_prefix_match(init_mod, tmp_path):
     """继续W4 不得命中 W43/W41 项目。"""
     init_mod.run("热点周报 W41", "full", TODAY, tmp_path)
-    init_mod.run("热点周报 W4", "full", TODAY, tmp_path)
+    # W4 已超出 TODAY 的近 4 周窗口,按当时日期新建;续跑不受近 4 周限制
+    init_mod.run("热点周报 W4", "full", _date(2026, 2, 4), tmp_path)
     r = init_mod.run("继续W4", "full", TODAY, tmp_path)
     assert r["status"] == "resumed" and Path(r["project_dir"]).name.startswith("W4热点周报")
 
@@ -748,3 +780,36 @@ def test_quality_report_flags_c0_unresolved_rows(merge):
     items = {c["item"]: c["status"] for c in q["checks"]}
     assert items["C0 未决行"] == "warn"
     assert any("C0 未决 2 行" in w for w in q["warnings"])
+
+
+# ---------------------------------------------------------------- 报告/过程文件共享名单
+
+INSIGHT_SCRIPTS = MA / "skills/topic6-insight/scripts"
+
+
+def test_publish_report_admin_emails_follow_injected_env(monkeypatch):
+    """Phase F admin 名单取 Gateway 注入的 TOPIC6_SHARE_EMAILS,与 job 文件夹共享名单同源。"""
+    mod = _load("parity_publish_report", INSIGHT_SCRIPTS / "publish_report_to_feishu.py")
+    monkeypatch.delenv("TOPIC6_SHARE_EMAILS", raising=False)
+    assert mod.default_admin_emails().split(",") == [
+        "xiuyuan.zhao@bluefocus.com", "jiesong.yuan@bluefocus.com", "xueqi.wang1@bluefocus.com"]
+    monkeypatch.setenv("TOPIC6_SHARE_EMAILS", "a@b.com,c@d.com")
+    assert mod.default_admin_emails() == "a@b.com,c@d.com"
+    monkeypatch.setenv("TOPIC6_SHARE_EMAILS", "")
+    assert mod.default_admin_emails() == ""
+
+
+def test_run_publish_grants_every_admin_email():
+    mod = _load("parity_publish_report", INSIGHT_SCRIPTS / "publish_report_to_feishu.py")
+    grants = []
+    backend = {
+        "create_folder": lambda name: "fld",
+        "import_document": lambda path, folder, name: ("doc", "https://x.feishu.cn/docx/doc"),
+        "grant_operator": lambda doc, op: None,
+        "transfer_owner": lambda doc, op: None,
+        "grant_admin": lambda doc, email: grants.append(email),
+    }
+    emails = ("xiuyuan.zhao@bluefocus.com", "jiesong.yuan@bluefocus.com", "xueqi.wang1@bluefocus.com")
+    out = mod.run_publish(backend, report_path="r.md", folder_name="f", doc_name="d",
+                          operator_open_id="ou_x", admin_emails=emails)
+    assert grants == list(emails) and out["warnings"] == []

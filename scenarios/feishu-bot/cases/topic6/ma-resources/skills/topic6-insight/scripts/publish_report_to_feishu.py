@@ -45,11 +45,18 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# 默认授 full_access 的 admin 邮箱
+# 授 full_access 的 admin 邮箱：优先读 Gateway 注入的 TOPIC6_SHARE_EMAILS（与 job 文件夹
+# 共享名单同源）；未注入（旧 Gateway / 本地调试）时用下面的默认名单。
 DEFAULT_ADMIN_EMAILS = (
     "xiuyuan.zhao@bluefocus.com",
     "jiesong.yuan@bluefocus.com",
+    "xueqi.wang1@bluefocus.com",
 )
+
+
+def default_admin_emails() -> str:
+    injected = os.environ.get("TOPIC6_SHARE_EMAILS")
+    return injected if injected is not None else ",".join(DEFAULT_ADMIN_EMAILS)
 
 BACKEND_CLI = "lark-cli"
 BACKEND_FALLBACK = "feishu_api_fallback"
@@ -331,7 +338,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="项目内相对路径，如 07_报告/热点报告_2026-W42_v1.md")
     parser.add_argument("--folder-name", required=True, help="飞书文件夹名，如 热点周报_2026-W42_full")
     parser.add_argument("--doc-name", required=True, help="飞书文档标题，如 热点报告_2026-W42")
-    parser.add_argument("--admin-emails", default=",".join(DEFAULT_ADMIN_EMAILS),
+    parser.add_argument("--admin-emails", default=default_admin_emails(),
                         help="逗号分隔的 admin 邮箱；传空串表示不授权 admin")
     args = parser.parse_args(argv)
 

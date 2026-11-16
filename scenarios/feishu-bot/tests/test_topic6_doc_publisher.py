@@ -82,10 +82,14 @@ class _FakeFeishu:
         self.folders_created: list[dict] = []
         self.files_uploaded: list[dict] = []
 
-    def add_permission(self, token, token_type, member_open_id, perm="full_access"):
-        self.permissions_added.append({
+    def add_permission(self, token, token_type, member_open_id, perm="full_access",
+                       member_type="openid"):
+        record = {
             "token": token, "type": token_type, "member": member_open_id, "perm": perm,
-        })
+        }
+        if member_type != "openid":
+            record["member_type"] = member_type
+        self.permissions_added.append(record)
 
     def create_folder(self, parent_token, name):
         record = {"parent": parent_token, "name": name}
@@ -601,6 +605,55 @@ def test_create_job_folder_no_root_token():
     assert token.startswith("fldcn_sub_")
     assert len(feishu.folders_created) == 1
     assert feishu.folders_created[0]["parent"] == ""
+
+
+def test_create_job_folder_shares_with_emails():
+    """job 文件夹创建后按 share_emails 逐个授 full_access(member_type=email)。"""
+    feishu = _FakeFeishu()
+    emails = ("a@bluefocus.com", "xueqi.wang1@bluefocus.com")
+    publisher = FeishuDocPublisher(feishu, "fldcn_root", emails)
+
+    token = publisher.create_job_folder(_make_job())
+    assert [(p["token"], p["type"], p["member"], p["perm"], p["member_type"])
+            for p in feishu.permissions_added] == [
+        (token, "folder", e, "full_access", "email") for e in emails
+    ]
+
+
+def test_create_job_folder_share_failure_still_returns_token():
+    """单个邮箱授权失败不影响文件夹创建，其余邮箱照常授权。"""
+    feishu = _FakeFeishu()
+    original = feishu.add_permission
+
+    def flaky(token, token_type, member_open_id, perm="full_access", member_type="openid"):
+        if member_open_id == "bad@bluefocus.com":
+            raise RuntimeError("user not found")
+        original(token, token_type, member_open_id, perm, member_type)
+
+    feishu.add_permission = flaky
+    publisher = FeishuDocPublisher(feishu, "", ("bad@bluefocus.com", "ok@bluefocus.com"))
+    token = publisher.create_job_folder(_make_job())
+    assert token.startswith("fldcn_sub_")
+    assert [p["member"] for p in feishu.permissions_added] == ["ok@bluefocus.com"]
+
+
+def test_create_job_folder_no_share_when_creation_fails():
+    feishu = _FakeFeishu()
+    feishu.create_folder = MagicMock(side_effect=RuntimeError("forbidden"))
+    publisher = FeishuDocPublisher(feishu, "fldcn_root", ("a@bluefocus.com",))
+    assert publisher.create_job_folder(_make_job()) == ""
+    assert feishu.permissions_added == []
+
+
+def test_share_emails_config_default_and_override():
+    config_mod = _load("topic6_config_share", "config.py")
+    base = {"ARK_API_KEY": "k", "FEISHU_APP_ID": "a", "FEISHU_APP_SECRET": "s",
+            "TOPIC6_COORDINATOR_AGENT_ID": "agent", "TOPIC6_ENVIRONMENT_ID": "env"}
+    assert config_mod.load_case_config(base).share_emails == (
+        "xiuyuan.zhao@bluefocus.com", "jiesong.yuan@bluefocus.com", "xueqi.wang1@bluefocus.com")
+    assert config_mod.load_case_config({**base, "TOPIC6_SHARE_EMAILS": "x@b.com, y@b.com"}).share_emails \
+        == ("x@b.com", "y@b.com")
+    assert config_mod.load_case_config({**base, "TOPIC6_SHARE_EMAILS": ""}).share_emails == ()
 
 
 def test_publisher_enabled_property():

@@ -57,7 +57,8 @@ class _FakeFeishu:
         self.created.append({"folder": folder_token, "title": title})
         return "sht_1", "https://x.feishu.cn/sheets/sht_1"
 
-    def add_permission(self, token, token_type, member_open_id, perm="full_access"):
+    def add_permission(self, token, token_type, member_open_id, perm="full_access",
+                       member_type="openid"):
         if self.grant_error:
             raise self.grant_error
         self.grants.append((token, token_type, member_open_id, perm))

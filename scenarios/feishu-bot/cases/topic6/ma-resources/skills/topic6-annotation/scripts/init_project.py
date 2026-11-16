@@ -4,15 +4,15 @@
 对齐原版 prompt/00_角色与触发.md「日期解析」+ Projects/_项目模板/run_config.yaml,
 把原本由 Agent 临场推断的部分全部脚本化(Agent 只负责把用户原话传进来)。
 
-周期解析(--text 为用户原始消息):
-  无日期            → 最近一个完整自然周(周一~周日,今天所在周之前)   weekly
-                      (与“双周”同用时取最近两个完整周)
-  W35 / 第35周      → ISO 周 W35 的起止(年份取 --today 所在 ISO 年)   weekly
-  09-01到09-14     → 自定义 date_start/date_end                       custom
-  双周 / 连续两周   → 起始周(上述规则)+ 次周,共 14 天                 biweekly
+周期解析(--text 为用户原始消息):当前只支持单周(weekly)
+  无日期            → 最近一个完整自然周(周一~周日,今天所在周之前)
+  W35 / 第35周      → ISO 周 W35 的起止(年份取 --today 所在 ISO 年)
   继续W36          → 查 /workspace/Projects/W36*/run_config.yaml 断点续跑
-命中多种互斥写法、日期非法或续跑目标不唯一时返回 status=ambiguous,附 A/B/C 选项,
-Coordinator 必须按 R15 输出 [need_decision] 让用户裁决,不得自行猜。
+双周 / 日期区间(09-01到09-14)暂不支持,返回 ambiguous(Phase A 只按单个 ISO 周取数)。
+新建周期必须落在最近 4 个完整自然周内(RECENT_WEEKS),更早的返回 ambiguous;
+续跑已有项目不受此限。
+命中不支持的写法、周次不存在、超出近 4 周、尚未结束或续跑目标不唯一时返回
+status=ambiguous,附 A/B/C 选项,Coordinator 必须按 R15 输出 [need_decision] 让用户裁决,不得自行猜。
 
 取数窗口:fetch_start = date_start − 7 天,fetch_end = date_end + 1 天
 (fetch_hot_topics.py 需要余量才能识别完整 ISO 周)。
@@ -39,6 +39,9 @@ WORKSPACE_PROJECTS = Path(os.environ.get("MA_WORKSPACE", "/workspace")) / "Proje
 MODES = ("demo", "smoke", "full", "skip_sampling")
 FETCH_LEAD_DAYS = 7
 FETCH_TAIL_DAYS = 1
+# 新建周期只接受最近 N 个完整自然周:起始日 ≥ 最近完整周周一 − (N−1)×7 天。
+# 只约束新建,不约束「继续W..」/--resume-dir 续跑已有项目。
+RECENT_WEEKS = 4
 
 _WEEK_RE = re.compile(r"(?:(\d{4})\s*[-年]?\s*)?(?:W|w|第)\s*(\d{1,2})\s*周?")
 _RANGE_RE = re.compile(
@@ -46,8 +49,9 @@ _RANGE_RE = re.compile(
     r"(?:(\d{4})[-/.年])?(\d{1,2})[-/.月](\d{1,2})日?"
 )
 _RESUME_RE = re.compile(r"继续\s*(?:W|w|第)?\s*(\d{1,2})")
+# 双周 / 日期区间只用于识别并拒绝(暂不支持),不参与周期计算
 _BIWEEKLY_RE = re.compile(r"双周|连续两周|两周")
-DIR_SUFFIX = {"weekly": "热点周报", "biweekly": "双周报", "custom": "自定义"}
+DIR_SUFFIX = {"weekly": "热点周报"}
 
 
 class Ambiguous(Exception):
@@ -73,61 +77,33 @@ def last_complete_week(today: date) -> date:
     return today - timedelta(days=today.weekday() + 7)
 
 
+def earliest_allowed_start(today: date) -> date:
+    """最近 RECENT_WEEKS 个完整周里最早那周的周一;新建周期的起始日不得早于它。"""
+    return last_complete_week(today) - timedelta(days=7 * (RECENT_WEEKS - 1))
+
+
 def parse_period(text: str, today: date, *, prefer: str | None = None,
                  allow_incomplete: bool = False) -> dict:
-    """prefer:用户在 ambiguous 后的裁决 week|range|biweekly|latest;allow_incomplete:接受未结束周期。"""
+    """只解析单周。prefer=latest:用户在 ambiguous 后选「最近完整周」;allow_incomplete:接受未结束周。"""
     text = text or ""
-    biweekly = bool(_BIWEEKLY_RE.search(text))
-    range_m = _RANGE_RE.search(text)
-    # 日期区间里的 "09-01" 不应被当成周号:先把区间文本挖掉再找周号
-    rest = text.replace(range_m.group(0), " ") if range_m else text
-    week_m = _WEEK_RE.search(rest)
     if prefer == "latest":
-        range_m = week_m = None
-    elif prefer == "week" and week_m:
-        range_m = None
-    elif prefer in {"range", "biweekly"} and range_m:
-        week_m = None
-
-    if range_m and week_m:
-        raise Ambiguous(
-            f"同时出现周次「{week_m.group(0).strip()}」和日期区间「{range_m.group(0)}」",
-            [(f"A) 按周次 {week_m.group(0).strip()}", ["--prefer", "week"]),
-             (f"B) 按日期区间 {range_m.group(0)}", ["--prefer", "range"]),
-             ("C) 自定义(请告知具体日期)", None)],
-        )
-    if range_m:
-        if biweekly and prefer not in {"range", "biweekly"}:
-            raise Ambiguous(
-                f"日期区间「{range_m.group(0)}」与“双周”同时出现",
-                [("A) 按日期区间(custom)", ["--prefer", "range"]),
-                 ("B) 按区间起始周的双周", ["--prefer", "biweekly"]),
-                 ("C) 自定义(请告知具体日期)", None)],
-            )
-        y1, m1, d1, y2, m2, d2 = range_m.groups()
-        try:
-            start = date(int(y1 or today.year), int(m1), int(d1))
-            end = date(int(y2 or y1 or today.year), int(m2), int(d2))
-        except ValueError as error:
-            raise Ambiguous(f"日期不合法: {range_m.group(0)} ({error})",
-                            [("A) 重新给出日期区间", None),
-                             ("B) 改为最近一个完整周", ["--prefer", "latest"]),
-                             ("C) 停止", None)]) from error
-        if end < start:
-            # 跨年写法(12-25到01-07)
-            end = date(end.year + 1, end.month, end.day) if not y2 else end
-        if end < start:
-            raise Ambiguous(f"结束日早于起始日: {range_m.group(0)}",
-                            [("A) 重新给出日期区间", None),
-                             ("B) 改为最近一个完整周", ["--prefer", "latest"]),
-                             ("C) 停止", None)])
-        if prefer == "biweekly":
-            start = start - timedelta(days=start.weekday())
-            end = start + timedelta(days=13)
-            period_type = "biweekly"
-        else:
-            period_type = "custom"
+        start = last_complete_week(today)
     else:
+        range_m = _RANGE_RE.search(text)
+        # 日期区间里的 "09-01" 不应被当成周号:先把区间文本挖掉再找周号
+        rest = text.replace(range_m.group(0), " ") if range_m else text
+        unsupported = range_m.group(0) if range_m else None
+        if unsupported is None:
+            biweekly_m = _BIWEEKLY_RE.search(text)
+            unsupported = biweekly_m.group(0) if biweekly_m else None
+        if unsupported:
+            raise Ambiguous(
+                f"暂不支持「{unsupported}」,当前只支持单周(如 W45 或不写周期取最近完整周)",
+                [("A) 改为最近一个完整周", ["--prefer", "latest"]),
+                 ("B) 重新给出周次", None),
+                 ("C) 停止", None)],
+            )
+        week_m = _WEEK_RE.search(rest)
         if week_m:
             year = int(week_m.group(1) or today.isocalendar()[0])
             week = int(week_m.group(2))
@@ -139,17 +115,24 @@ def parse_period(text: str, today: date, *, prefer: str | None = None,
                                  ("B) 改为最近一个完整周", ["--prefer", "latest"]),
                                  ("C) 停止", None)]) from error
         else:
-            # 无日期:最近一个完整周;双周则取最近两个完整周
-            start = last_complete_week(today) - timedelta(days=7 if biweekly else 0)
-        end = start + timedelta(days=13 if biweekly else 6)
-        period_type = "biweekly" if biweekly else "weekly"
+            start = last_complete_week(today)
+    end = start + timedelta(days=6)
 
+    earliest = earliest_allowed_start(today)
+    if start < earliest:
+        raise Ambiguous(
+            f"周期 {start}~{end} 超出可选范围:仅支持最近 {RECENT_WEEKS} 个完整周"
+            f"({earliest} 起)",
+            [("A) 改为最近一个完整周", ["--prefer", "latest"]),
+             (f"B) 重新给出 {earliest} 之后的周次", None),
+             ("C) 停止", None)],
+        )
     if end >= today and not allow_incomplete:
         raise Ambiguous(
             f"周期 {start}~{end} 尚未结束(今天 {today}),数据不完整",
             [("A) 改为最近一个完整周", ["--prefer", "latest"]),
              ("B) 仍按该周期取已有数据", ["--allow-incomplete"]),
-             ("C) 自定义(请告知具体日期)", None)],
+             ("C) 重新给出周次", None)],
         )
     iso_year, iso_week, _ = start.isocalendar()
     return {
@@ -157,7 +140,7 @@ def parse_period(text: str, today: date, *, prefer: str | None = None,
         "period_label": f"{iso_year}-W{iso_week:02d}",
         "date_start": start.isoformat(),
         "date_end": end.isoformat(),
-        "period_type": period_type,
+        "period_type": "weekly",
     }
 
 
@@ -269,7 +252,7 @@ def main() -> int:
     p.add_argument("--today", default=None, help="测试用,默认当天 YYYY-MM-DD")
     p.add_argument("--projects-root", default=str(WORKSPACE_PROJECTS))
     # 以下参数只用于 ambiguous 裁决后的重调,取值原样来自上一次 stdout 的 resolutions
-    p.add_argument("--prefer", choices=("week", "range", "biweekly", "latest"), default=None)
+    p.add_argument("--prefer", choices=("latest",), default=None)
     p.add_argument("--allow-incomplete", action="store_true")
     p.add_argument("--overwrite", action="store_true")
     p.add_argument("--resume-dir", default=None)

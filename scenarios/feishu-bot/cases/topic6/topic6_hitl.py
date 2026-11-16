@@ -48,6 +48,10 @@ DECISION_PASS = "pass"
 DECISION_REJECT = "reject"
 DECISION_REMARK = "remark"
 PENDING_REMARK_NOTE = "等待补充说明"
+# 配置为自动通过的 HC 在审核记录与卡片上显示的操作人
+AUTO_PASS_OPERATOR = "系统自动通过"
+# 自动通过前等待当前 SSE 消费任务收尾的上限(秒)
+AUTO_PASS_STREAM_WAIT_SEC = 30
 
 # 每个 HC 的头部信息(颜色 + 图标 + 标题)。
 _HC_META = {
@@ -530,6 +534,8 @@ class Topic6HitlDeps:
     sync_root: Optional[Path] = None
     notifier: Optional["JobNotifier"] = None
     process_files: Optional["ProcessFileDelivery"] = None
+    # 不等人工、直接按 pass 续跑的 HC(TOPIC6_AUTO_PASS_HC,缺省 HC1)
+    auto_pass_hc: tuple[str, ...] = ()
 
 
 class Topic6Hitl(Topic6CardSenderProtocol):
@@ -549,6 +555,7 @@ class Topic6Hitl(Topic6CardSenderProtocol):
         self._sync_root = deps.sync_root
         self._notifier = deps.notifier
         self._process_files = deps.process_files
+        self._auto_pass_hc = frozenset(deps.auto_pass_hc)
 
     async def _deliver_process_files(self, job: PipelineJob) -> None:
         try:
@@ -672,11 +679,21 @@ class Topic6Hitl(Topic6CardSenderProtocol):
                 "topic6 send_hc_card failed job=%s hc=%s: %s",
                 _job.job_id, _hc_kind, error,
             )
+            if _hc_kind in self._auto_pass_hc:
+                # 自动通过不依赖卡片：卡片失败也照常放行，否则任务会卡在 wait_hc 无人处理
+                asyncio.get_event_loop().create_task(self._auto_pass(_job.job_id, _event_id))
+                return None
             raise
         log.info(
             "topic6 hc card shown job=%s hc=%s message_id=%s",
             _job.job_id, _hc_kind, message_id,
         )
+
+        if _hc_kind in self._auto_pass_hc:
+            # 产物发布/过程文件归档照常做完再放行；当前处于 SSE 消费任务内，resume_job 会
+            # cancel 该任务，所以必须另起任务执行，不能在这里直接 await。
+            asyncio.get_event_loop().create_task(self._auto_pass(_job.job_id, _event_id))
+            return message_id
 
         # HC 卡片已发出，主动 @ 通知审核人（任务可能运行了几小时，需要即时感知）
         if self._notifier is not None:
@@ -833,6 +850,49 @@ class Topic6Hitl(Topic6CardSenderProtocol):
         except Exception as error:  # noqa: BLE001 - resume 失败也要通知飞书
             log.exception("topic6 resume_job failed job=%s: %s", job.job_id, error)
             self._reply_sync(job.chat_id, f"⚠️ {hc_kind} 续跑失败:{error!s}"[:200])
+
+    async def _auto_pass(self, job_id: str, event_id: int) -> None:
+        """配置为自动通过的 HC：落库 pass → 卡片改已通过 → 注入「{HC} pass」续跑。
+
+        不回读在线表格（没有人工修改窗口）。与按钮回调共用 resolved_at 去重：
+        已被人工处理或任务已停止时什么都不做。
+        """
+        hc_event = self._store.get_hc_event(event_id)
+        job = self._store.get_job(job_id)
+        if hc_event is None or job is None or hc_event.resolved_at is not None:
+            return
+        # send_hc_card 运行在该 Session 的 SSE 消费任务里，返回后它还要退出 stream 上下文。
+        # 先等它自然结束再 resume，避免 resume_job 把一个尚未收尾的消费任务 cancel 掉。
+        prev = self._runner._active_streams.get(job.ma_session_id)  # noqa: SLF001
+        if prev is not None and prev is not asyncio.current_task() and not prev.done():
+            await asyncio.wait({prev}, timeout=AUTO_PASS_STREAM_WAIT_SEC)
+        job = self._store.get_job(job_id)
+        hc_event = self._store.get_hc_event(event_id)
+        if job is None or hc_event is None or hc_event.resolved_at is not None:
+            return
+        if job.status in ("stopping", "stopped"):
+            return
+        hc_kind = hc_event.hc_kind
+        self._store.resolve_hc_event(
+            event_id, DECISION_PASS, "", operator_label=AUTO_PASS_OPERATOR,
+        )
+        log.info("topic6 hc auto passed job=%s hc=%s event=%s", job_id, hc_kind, event_id)
+        try:
+            await self._runner.patch_job_card(job_id, build_hc_resolved_card(
+                job=job, hc_kind=hc_kind, payload=hc_event.payload or {},
+                decision=DECISION_PASS, note="", operator_label=AUTO_PASS_OPERATOR,
+            ))
+        except Exception as error:  # noqa: BLE001 - 卡片失败不阻塞续跑
+            log.warning("topic6 auto pass card patch failed job=%s hc=%s: %s", job_id, hc_kind, error)
+        try:
+            await self._runner.resume_job(
+                job, _build_decision_message(hc_kind, DECISION_PASS, ""),
+            )
+        except Exception as error:  # noqa: BLE001
+            log.exception("topic6 auto pass resume failed job=%s hc=%s: %s", job_id, hc_kind, error)
+            self._reply_sync(job.chat_id, f"⚠️ {hc_kind} 自动通过后续跑失败:{error!s}"[:200])
+            return
+        self._reply_sync(job.chat_id, f"{hc_kind} 已按配置自动通过，Pipeline 继续运行中。")
 
     # ---- helper --------------------------------------------------------------
 

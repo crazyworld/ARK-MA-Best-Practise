@@ -28,7 +28,7 @@ Skill `topic6-insight`（Phase E + F）：从标注宽表生成 E1~E4 四个周�
 | e3 | 平台新鲜事 | `E3_平台新鲜事` | `e3_data.md` | `# 三、平台新鲜事` | 18000 |
 | e4 | 营销发现 | `E4_营销发现` | `e4_data.md` + `e4_candidates.json` | `# 四、营销发现` | — |
 
-产出 `06_洞察/v{N}/e{1..4}_v{N}.md`、数据快照（含 `e3_word_candidates.json`、`e3_event_fulltext.json`）、子步骤审计（`e3_tagging_audit.md`、`e3_insight_draft_audit.md`、`e4_tagging_audit.md`、`e4_curation_audit.md`、`e4_arbitration_audit.md`）、`e3_word_freq_audit.md`、`pipeline_e_checkpoint_v{N}.json`、`pipeline_e_report_v{N}.json`。版本 N 默认自增，每轮独立子目录、不覆盖历史；`--sections` 定点重跑且未传 `--version` 时 MUST 写回最新一轮。E2 上周节点回顾 SHALL 使用全量宽表（不限营销可用子集），代表热搜按事件簇取 TOP3。E2 依赖 C3 结果与 `MARKETING_CALENDAR_PATH`（默认 `/mnt/skills/topic6-fetch-normalize/references/marketing_calendar_2026.csv`，兼容旧 Markdown 表格）；无节点时跳过 LLM。
+产出 `06_洞察/v{N}/e{1..4}_v{N}.md`、数据快照（含 `e3_word_candidates.json`、`e3_event_fulltext.json`）、子步骤审计（`e3_tagging_audit.md`、`e3_insight_draft_audit.md`、`e4_tagging_audit.md`、`e4_curation_audit.md`、`e4_arbitration_audit.md`）、`e3_word_freq_audit.md`、`pipeline_e_checkpoint_v{N}.json`、`pipeline_e_report_v{N}.json`。版本 N 默认自增，每轮独立子目录、不覆盖历史；`--sections` 定点重跑且未传 `--version` 时 MUST 写回最新一轮。E2 上周节点回顾 SHALL 使用全量宽表（不限营销可用子集），代表热搜按事件簇取 TOP3。E2 依赖 C3 结果与 `MARKETING_CALENDAR_PATH`（默认 `/mnt/skills/topic6-fetch-normalize/references/marketing_calendar_2026.csv`，兼容旧 Markdown 表格）；无节点时跳过 LLM。E2 查锚点日期前 MUST 先经 C3 `datahub_annotate.NAME_MAP` 映射节点名（与 C3 窗口期同一来源，展示用打标原名）；日历查不到锚点的节点 SHALL 保守归入上周节点、正文不加标注，名单写入 `e2_flags.json` 的 `last_week.unverified_nodes`，由 `report_self_check.py` 以 warn 写入 HC3 `issues_detected`。
 
 #### Scenario: 新一轮洞察
 - **WHEN** 已有 `06_洞察/v1/`，不传 `--version`
@@ -79,7 +79,7 @@ E4 SHALL 并发执行打标（`_tagging`）与草稿枚举（`_curation`），�
 - **THEN** 不判定为热度单位错误
 
 ### Requirement: 飞书文档发布
-`publish_report_to_feishu.py --project-dir --report-file --folder-name --doc-name [--admin-emails]` SHALL 执行：创建文件夹 → 导入 docx → 给 `FEISHU_USER_OPEN_ID` 授 `edit` → 转移 owner（旧 owner 保留 full_access）→ 给 admin 邮箱授 `full_access`。
+`publish_report_to_feishu.py --project-dir --report-file --folder-name --doc-name [--admin-emails]` SHALL 执行：创建文件夹 → 导入 docx → 给 `FEISHU_USER_OPEN_ID` 授 `edit` → 转移 owner（旧 owner 保留 full_access）→ 给 admin 邮箱授 `full_access`。`--admin-emails` 缺省取环境变量 `TOPIC6_SHARE_EMAILS`（Gateway 注入），未注入时用脚本内 `DEFAULT_ADMIN_EMAILS`。
 - 主路径 lark-cli `--as bot`，身份来自 Vault 注入的 `LARKSUITE_CLI_APP_ID` + `LARKSUITE_CLI_TENANT_ACCESS_TOKEN`（env-provider），MUST NOT 执行 `config init` 或打印 token；可用性用只读 `GET /drive/explorer/v2/root_folder/meta` 探测（`--dry-run` 不能作为探测）。
 - lark-cli 不可用/探测失败/在文档创建前失败 → 自动切换 `feishu_api_fallback`（Open API 直连，需 `LARK_APP_ID`/`LARK_APP_SECRET`，上传 md → import_tasks 转 docx 轮询 ≤120s → 在任何所有权转移前删除 md 源文件），可复用已建文件夹，并在 warnings 中记录切换原因。
 - 文档已创建后的失败 MUST NOT 切 fallback（避免第二份文档），直接返回错误。

@@ -749,3 +749,142 @@ class TestCleanness:
         body_text = json.dumps(card, ensure_ascii=False)
         assert "bash" in body_text
         assert "session_test456" in body_text  # 新增的 session_id 也在
+
+
+
+# ======================================================================
+# HC1 默认自动通过(TOPIC6_AUTO_PASS_HC)
+# ======================================================================
+
+
+class TestHcAutoPass:
+    def _setup(self, loop, tmp_path, auto_pass_hc, hc="HC1"):
+        runner, store, sender = _make_runner(tmp_path, loop)
+        job = store.create_job(
+            chat_id="c1", thread_id="", user_open_id="u1",
+            ma_session_id="s1", mode="full", project_dir="/workspace/Projects/W45",
+        )
+        payload = {"hc": hc, "wide_table_path": "/x"}
+        event_id = store.append_hc_event(job.job_id, hc, payload)
+        store.mark_wait_hc(job.job_id, hc)
+        resumed, patched = [], []
+
+        async def _resume(j, msg):
+            resumed.append((j.job_id, msg))
+
+        async def _patch(job_id, card):
+            patched.append(card["header"]["title"]["content"])
+            return "msg-1"
+
+        runner.resume_job = _resume
+        runner.patch_job_card = _patch
+        hitl = hitl_mod.Topic6Hitl(hitl_mod.Topic6HitlDeps(
+            store=store, runner=runner, auto_pass_hc=auto_pass_hc))
+        return hitl, store, sender, job, event_id, payload, resumed, patched
+
+    def _send(self, loop, hitl, store, job, event_id, payload):
+        async def _run():
+            await hitl.send_hc_card(store.get_job(job.job_id), payload["hc"], event_id, payload)
+            for _ in range(5):  # 让 create_task 出去的自动通过跑完
+                await asyncio.sleep(0)
+        loop.run_until_complete(_run())
+
+    def test_hc1_auto_pass_resolves_and_resumes(self, loop, tmp_path):
+        hitl, store, sender, job, event_id, payload, resumed, patched = self._setup(
+            loop, tmp_path, ("HC1",))
+        self._send(loop, hitl, store, job, event_id, payload)
+        event = store.get_hc_event(event_id)
+        assert event.user_decision == "pass" and event.resolved_at is not None
+        assert event.operator_label == hitl_mod.AUTO_PASS_OPERATOR
+        assert resumed == [(job.job_id, "HC1 pass")]
+        assert patched[-1].endswith("已通过")
+        assert any("自动通过" in txt for _, txt in sender.messages)
+
+    def test_hc2_not_in_list_waits_for_human(self, loop, tmp_path):
+        hitl, store, sender, job, event_id, payload, resumed, _ = self._setup(
+            loop, tmp_path, ("HC1",), hc="HC2")
+        self._send(loop, hitl, store, job, event_id, payload)
+        assert store.get_hc_event(event_id).resolved_at is None
+        assert resumed == []
+
+    def test_empty_list_keeps_hc1_manual(self, loop, tmp_path):
+        hitl, store, _, job, event_id, payload, resumed, _ = self._setup(loop, tmp_path, ())
+        self._send(loop, hitl, store, job, event_id, payload)
+        assert store.get_hc_event(event_id).resolved_at is None
+        assert resumed == []
+
+    def test_auto_pass_skips_resolved_or_stopped(self, loop, tmp_path):
+        hitl, store, _, job, event_id, _, resumed, _ = self._setup(loop, tmp_path, ("HC1",))
+        store.resolve_hc_event(event_id, "reject", "人工先打回", operator_label="u1")
+        loop.run_until_complete(hitl._auto_pass(job.job_id, event_id))
+        assert store.get_hc_event(event_id).user_decision == "reject"
+        assert resumed == []
+
+
+def test_auto_pass_when_card_send_fails(loop, tmp_path):
+    """自动通过的 HC 卡片发送失败时仍放行，不让任务卡在 wait_hc。"""
+    runner, store, sender = _make_runner(tmp_path, loop)
+    job = store.create_job(chat_id="c1", thread_id="", user_open_id="u1",
+                           ma_session_id="s1", mode="full", project_dir="/workspace/Projects/W45")
+    payload = {"hc": "HC1", "wide_table_path": "/x"}
+    event_id = store.append_hc_event(job.job_id, "HC1", payload)
+    resumed = []
+
+    async def _patch_fail(*_a, **_k):
+        raise RuntimeError("feishu 500")
+
+    async def _resume(j, msg):
+        resumed.append(msg)
+
+    runner.patch_job_card = _patch_fail
+    runner.resume_job = _resume
+    hitl = hitl_mod.Topic6Hitl(hitl_mod.Topic6HitlDeps(store=store, runner=runner, auto_pass_hc=("HC1",)))
+
+    async def _run():
+        assert await hitl.send_hc_card(store.get_job(job.job_id), "HC1", event_id, payload) is None
+        for _ in range(5):
+            await asyncio.sleep(0)
+    loop.run_until_complete(_run())
+    assert resumed == ["HC1 pass"]
+    assert store.get_hc_event(event_id).user_decision == "pass"
+
+
+def test_auto_pass_waits_for_running_stream(loop, tmp_path):
+    """自动通过先等当前 SSE 消费任务收尾，再 resume(避免 resume_job cancel 掉未收尾的任务)。"""
+    runner, store, sender = _make_runner(tmp_path, loop)
+    job = store.create_job(chat_id="c1", thread_id="", user_open_id="u1",
+                           ma_session_id="s1", mode="full", project_dir="/workspace/Projects/W45")
+    event_id = store.append_hc_event(job.job_id, "HC1", {"hc": "HC1"})
+    order = []
+
+    async def _stream():
+        await asyncio.sleep(0.05)
+        order.append("stream_done")
+
+    async def _resume(j, msg):
+        order.append("resume")
+
+    async def _patch(*_a, **_k):
+        return "m"
+
+    runner.resume_job = _resume
+    runner.patch_job_card = _patch
+    hitl = hitl_mod.Topic6Hitl(hitl_mod.Topic6HitlDeps(store=store, runner=runner, auto_pass_hc=("HC1",)))
+
+    async def _run():
+        runner._active_streams["s1"] = asyncio.get_event_loop().create_task(_stream())
+        await hitl._auto_pass(job.job_id, event_id)
+    loop.run_until_complete(_run())
+    assert order == ["stream_done", "resume"]
+
+
+def test_auto_pass_hc_config():
+    config_mod = _load("topic6_config_autopass", "config.py")
+    base = {"ARK_API_KEY": "k", "FEISHU_APP_ID": "a", "FEISHU_APP_SECRET": "s",
+            "TOPIC6_COORDINATOR_AGENT_ID": "agent", "TOPIC6_ENVIRONMENT_ID": "env"}
+    assert config_mod.load_case_config(base).auto_pass_hc == ("HC1",)
+    assert config_mod.load_case_config({**base, "TOPIC6_AUTO_PASS_HC": ""}).auto_pass_hc == ()
+    assert config_mod.load_case_config({**base, "TOPIC6_AUTO_PASS_HC": "hc1, HC2"}).auto_pass_hc \
+        == ("HC1", "HC2")
+    with pytest.raises(RuntimeError, match="TOPIC6_AUTO_PASS_HC"):
+        config_mod.load_case_config({**base, "TOPIC6_AUTO_PASS_HC": "HC4"})

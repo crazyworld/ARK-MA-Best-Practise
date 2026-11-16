@@ -90,7 +90,7 @@
 | `smoke` | `smoke` `冒烟` `冒烟测试` `快速测试` `test` `小样本` `试跑` |
 | `full` | `full` `完整` `正式` |
 
-无参数、或第一个词是周期写法（`W45`、`09-01到09-14`、`双周`、`继续W45`，由 `init_project.py` 解析）时返回 `full`；第一个词是纯字母但不是已知模式时返回 `None`，Gateway 用 `is_start_command` 识别后回复「无法识别的模式」+ 用法提示，MUST NOT 按 full 启动。
+无参数、或第一个词是周期写法（`W45`、`继续W45` 等，由 `init_project.py` 解析；双周/日期区间也按 full 进入并由脚本返回 ambiguous）时返回 `full`；第一个词是纯字母但不是已知模式时返回 `None`，Gateway 用 `is_start_command` 识别后回复「无法识别的模式」+ 用法提示，MUST NOT 按 full 启动。
 
 #### Scenario: 默认模式
 - **WHEN** 文本为"/start"

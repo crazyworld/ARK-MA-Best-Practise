@@ -164,6 +164,31 @@ def check(text: str) -> dict:
     return {"status": status, "failed_sections": failed, "issues": issues}
 
 
+def _add_e2_unverified_nodes(result: dict, proj: Path, report: Path, version: int | None) -> None:
+    """E2 兜底归入「上周节点」的节点(日历查不到锚点)报告正文不加标注，在这里记 warn,
+    经 coordinator 规则逐条写入 HC3 issues_detected,交审核人确认。"""
+    if version is None:
+        m = re.search(r"_v(\d+)$", report.stem)
+        version = int(m.group(1)) if m else None
+    if version is None:
+        return
+    flags_path = proj / "06_洞察" / f"v{version}" / "e2_flags.json"
+    try:
+        flags = json.loads(flags_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    nodes = (flags.get("last_week") or {}).get("unverified_nodes") or []
+    if not nodes:
+        return
+    result["issues"].append({
+        "section": "e2", "check": "上周节点日期待核对", "severity": "warn",
+        "detail": f"日历查不到锚点日期、已按上周节点展示：{'、'.join(nodes)}，请确认是否属于上周",
+        "line": None,
+    })
+    if result["status"] == "pass":
+        result["status"] = "warn"
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--project-dir", required=True)
@@ -182,6 +207,7 @@ def main() -> int:
                                       "detail": f"不存在: {report}"}]}, ensure_ascii=False))
         return 1
     result = check(report.read_text(encoding="utf-8"))
+    _add_e2_unverified_nodes(result, proj, report, args.version)
     result["report_file"] = str(report)
     out = report.with_name(f"self_check_{report.stem}.json")
     out.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")

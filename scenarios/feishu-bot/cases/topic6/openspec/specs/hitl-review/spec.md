@@ -45,6 +45,8 @@ HC1/HC2/HC3 人工审核闭环：审核卡片渲染、HC 产物发布到飞书�
 - **THEN** `granted=False`，卡片仍给出表格链接
 
 ### Requirement: 启动时共享文件夹授权
+`create_job_folder` 创建 job 文件夹后 SHALL 按 `TOPIC6_SHARE_EMAILS`（缺省赵修源 / 袁杰松 / 王雪琪三个邮箱，显式配置时整体覆盖，空串=不共享）逐个授 `full_access`（`member_type=email`）；单人失败只记 error，不影响文件夹 token 返回。文件夹内的 HC 宽表与「过程数据」随之可见。
+
 Gateway 启动时 `init_folder_permissions` SHALL 为 `AUTHORIZED_OPEN_IDS` 中每个用户在根文件夹授予 `full_access`（幂等）；根 token 或白名单为空时跳过；单个用户失败只 warning。
 
 #### Scenario: 未配置根文件夹
@@ -71,6 +73,13 @@ Gateway 启动时 `init_folder_permissions` SHALL 为 `AUTHORIZED_OPEN_IDS` 中�
 #### Scenario: 重复点击
 - **WHEN** 已通过的 HC 卡片再次收到回调
 - **THEN** 不再调用 `resume_job`
+
+### Requirement: HC 自动通过
+`TOPIC6_AUTO_PASS_HC`（缺省 `HC1`；逗号分隔，取值 HC1/HC2/HC3，非法值启动即失败；空串=全部人工）中的 HC，`send_hc_card` SHALL 照常完成产物发布、过程文件归档与卡片渲染，然后另起任务执行自动通过：`resolve_hc_event(pass, operator_label="系统自动通过")` → 卡片 patch 为「已通过」→ `resume_job` 注入 `{HC} pass` → 回复「{HC} 已按配置自动通过，Pipeline 继续运行中。」。自动通过 MUST NOT 发送 HC 待审 @通知，MUST NOT 回读在线宽表；事件已被处理（`resolved_at` 非空）或任务处于 stopping/stopped 时 MUST 不做任何事。
+
+#### Scenario: HC1 默认自动通过
+- **WHEN** 未配置 `TOPIC6_AUTO_PASS_HC`，Agent 输出 HC1 payload
+- **THEN** 宽表照常发布到飞书，审核记录为「HC1 · ✅ 通过 · 系统自动通过」，Session 收到 `HC1 pass` 继续 C→D 全量；HC2/HC3 仍等人工
 
 ### Requirement: 备注正文接续
 `handle_remark_message` SHALL 仅当会话键存在活跃任务、其 `current_phase` 对应的最新 HC 事件未 resolve 且 `user_note == "等待补充说明"` 时接管文本：以 `remark` 决策 resolve、patch 已处理卡并以 `HCx remark: <文本>` 续跑，返回 `True`；否则返回 `False` 交给后续路由。

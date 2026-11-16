@@ -11,6 +11,64 @@
 
 ---
 
+## 2026-11-16
+
+### E2 上周节点丢失双11（job_a5f524d14a1f / W46）
+
+- **现象**：W46（11-09~11-15）报告初版「上周节点」为「上周无节点」，宽表「提取节点=双11」共 23 行。
+- **根因**：C3 打标节点名「双11」，日历名「双11大促」。C3 算窗口期时经 `datahub_annotate.NAME_MAP` 映射，E2
+  `e2_nodes.prep_e2_nodes` 直接按原名查日历 → 查不到锚点；11-12「锚点仅输出已核实确定性内容」把查不到锚点的节点
+  由「保守归入上周 +（锚点未核实）」改成直接丢弃 → 双11 整段消失。原版同样查不到，靠保守归入才没丢。
+- **处理**：① E2 查日历前用 C3 同一份 `NAME_MAP`（单一来源，展示仍用打标原名）；② 查不到锚点时恢复原版保守归入上周，
+  正文不加「（锚点未核实）」；③ 兜底节点名单写入 `e2_flags.json` 的 `last_week.unverified_nodes`，`report_self_check.py`
+  记一条 warn → 按既有规则进入 HC3 `issues_detected`。
+- **不变**：查得到锚点但不在上周/未来 30 天的节点仍不展示；Prompt、日历文件未改。
+- **已知缺口（未改）**：词表 v7 中「腊八节/世界羽毛球日/跨年」两份日历都没有，C3 判「未知」后在合并阶段被过滤，进不了 E2；
+  补日历会让 C3 开始提取这些节点（产出变化）且打破与客户 V2 节点集合（223）一致，单独决策。回归测试以 `KNOWN_GAPS` 锁定。
+- **影响文件**：`topic6-insight/01_统计/e2_nodes.py`、`topic6-insight/scripts/report_self_check.py`、
+  `openspec/specs/skill-insight/spec.md`、`tests/test_topic6_report_rule_fixes.py`。上线需 `update_ma.sh`（仅新 Session 生效）。
+
+### HC1 默认自动通过
+
+- **需求**：HC1（小样本审核）不再等人工，默认通过后直接进入 C→D 全量。
+- **处理**：新增 `TOPIC6_AUTO_PASS_HC`（缺省 `HC1`，可配 HC1/HC2/HC3，空串=全部人工）。命中的 HC 在 `send_hc_card`
+  中照常发布宽表、归档过程文件、渲染卡片，随后另起任务自动 `resolve(pass, 系统自动通过)` → 卡片改「已通过」→
+  `resume_job("HC1 pass")`；不发待审 @通知、不回读在线表格。与按钮回调共用 `resolved_at` 去重，任务停止时不放行。
+  自动通过先等当前 SSE 消费任务收尾（≤30s）再 resume，避免 cancel 未收尾的任务；卡片发送失败时也照常放行。
+  Coordinator 收到的仍是 `HC1 pass`，流程分支不变。
+- **影响**：full/smoke 只剩 HC2、HC3 两道人工；demo 直接从小样本走到 HC3。Gateway 重启时若有未处理的 HC1，
+  恢复流程会走同一路径自动通过。
+- **影响文件**：`topic6_hitl.py`、`config.py`、`gateway.py`、`env.example`、`agents/coordinator.system.md`、
+  `openspec/specs/hitl-review/spec.md`、`tests/test_topic6_fix_regression.py`。
+
+### 启动周期只支持单周，且限制在最近 4 个完整周
+
+- **现象**：`init_project.py` 只校验周期“尚未结束”，没有下限；`/start full W30`、`2025W50`、
+  `01-01到11-08` 都会直接新建项目并开跑。另外双周 / 日期区间的 run_config 写的是 14 天或自定义区间，
+  但 Phase A `find_complete_week` 只保留取数窗口里最新的一个 ISO 周——报告标注双周、实际只统计一周。
+- **处理**：`parse_period` 只解析单周；`双周/连续两周/两周` 与 `MM-DD到MM-DD` 返回 `ambiguous`
+  （A `--prefer latest` / B 重新给出周次 / C 停止），`--prefer` 只保留 `latest`。新增 `RECENT_WEEKS=4`，
+  新建周期 `date_start` 必须 ≥ `last_complete_week(today) − 21d`（按运行当天动态计算），越界同样返回 ambiguous；
+  续跑已有项目（`继续W..` / `--resume-dir`）不受限。后续有需求再按 run_config 周期改造 Phase A 后放开。
+- **影响文件**：`skills/topic6-annotation/scripts/init_project.py`、`agents/coordinator.system.md`、`topic6_runner.py`（注释）、
+  `openspec/specs/{skill-annotation,coordinator-orchestration,gateway-command-routing}/spec.md`、`tests/test_topic6_parity_gaps.py`。
+
+### 任务过程/结果文件共享给王雪琪
+
+- **需求**：每个任务的过程文件与结果报告除赵修源、袁杰松外，还要共享给 `xueqi.wang1@bluefocus.com`。
+- **原状**：只有 Phase F 报告文档按 `publish_report_to_feishu.py` 硬编码的 2 个邮箱授 full_access；
+  job 文件夹（HC 宽表、过程数据）只授发起人，管理员看不到。
+- **处理**：`TOPIC6_SHARE_EMAILS`（缺省赵修源 / 袁杰松 / 王雪琪，显式配置整体覆盖，空串=不共享）为唯一名单：
+  `create_job_folder` 建 job 文件夹后按邮箱逐个授 full_access，文件夹内宽表与「过程数据」随之可见；
+  Runner 建 Session 时注入同名环境变量，`publish_report_to_feishu.py` 的 `--admin-emails` 缺省读它
+  （未注入时用脚本内默认三人名单）。`FeishuSender.add_permission` 新增 `member_type` 参数（默认 openid，兼容原调用）。
+  授权失败只记 error / warnings，不阻断任务。
+- **影响文件**：`arkagent/feishu.py`、`config.py`、`env.example`、`feishu_doc_publisher.py`、`gateway.py`、`topic6_runner.py`、
+  `skills/topic6-insight/scripts/publish_report_to_feishu.py`、`prompts/07_阶段_F发布.md`、
+  `openspec/specs/{hitl-review,skill-insight}/spec.md`、tests（doc_publisher / new_command / parity_gaps 及 3 个 fake）。
+- **生效**：需 `update_ma.sh` 重新上传 skill 与 coordinator，并重启 Gateway。邮箱授权依赖机器人与对方同租户，
+  上线后在 212 用一次真实任务核对三人能打开 job 文件夹与报告文档。
+
 ## 2026-11-14
 
 ### Phase G 网页模板合入客户 11-12 版修复

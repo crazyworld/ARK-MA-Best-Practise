@@ -146,7 +146,8 @@ class _Feishu:
         self.uploads.append((folder_token, Path(file_path).read_bytes(), file_name))
         return f"box_{len(self.uploads)}"
 
-    def add_permission(self, token, token_type, member_open_id, perm="full_access"):
+    def add_permission(self, token, token_type, member_open_id, perm="full_access",
+                       member_type="openid"):
         self.perms.append((token, token_type, member_open_id, perm))
 
     def list_permission_members(self, token, token_type):

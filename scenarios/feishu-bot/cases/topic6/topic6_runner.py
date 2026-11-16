@@ -141,7 +141,7 @@ def parse_trigger(text: str) -> Optional[str]:
 
     - 不是 `/start` 命令返回 None(普通消息不触发任务)。
     - `/start` 后第一个词按别名精确匹配模式；没有参数、或第一个词是周期写法
-      (W45 / 09-01到09-14 / 双周 / 继续W45 等，交给 init_project.py 解析)时默认 full。
+      (W45 / 继续W45 等，交给 init_project.py 解析；双周/日期区间由脚本拒绝)时默认 full。
     - 第一个词是纯字母但不是已知模式(如 `/start ful`)视为模式写错，返回 None，
       由调用方用 is_start_command 区分后回复用法提示，避免静默按 full 启动。
     """
@@ -301,6 +301,9 @@ class Topic6Config:
     environment_id: str
     memory_store_id: str = ""  # 以 memory 工具形式提供给 Agent(非文件系统挂载);为空则不挂
     vault_ids: tuple[str, ...] = ()
+    # 报告授 full_access 的邮箱；以 TOPIC6_SHARE_EMAILS 注入 Session 供 Phase F 脚本读取。
+    # None=不注入(脚本用内置默认名单)；() 注入空串=明确不共享。
+    share_emails: Optional[tuple[str, ...]] = None
     # Session 首次消息发送后,SSE 消费的整体超时(秒)。给足 3.5h 主线 + 富余。
     session_timeout_sec: int = 6 * 3600
 
@@ -531,6 +534,8 @@ class Topic6Runner:
             env_overrides["TOPIC6_MEMORY_STORE_ID"] = self._config.memory_store_id
         if task_id:
             env_overrides["TOPICX_TASK_ID"] = task_id
+        if self._config.share_emails is not None:
+            env_overrides["TOPIC6_SHARE_EMAILS"] = ",".join(self._config.share_emails)
         vault_ids = list(
             dict.fromkeys(
                 vault_id

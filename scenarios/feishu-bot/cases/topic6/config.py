@@ -7,6 +7,18 @@ from pathlib import Path
 from typing import Mapping, Optional
 
 
+# 每个任务的过程/结果文件（job 文件夹、Phase F 报告文档）都授 full_access 的邮箱。
+# TOPIC6_SHARE_EMAILS 显式配置时整体覆盖（逗号分隔；配成空串=不共享）。
+DEFAULT_SHARE_EMAILS = (
+    "xiuyuan.zhao@bluefocus.com",
+    "jiesong.yuan@bluefocus.com",
+    "xueqi.wang1@bluefocus.com",
+)
+
+# 不等人工、直接按 pass 续跑的 HC。TOPIC6_AUTO_PASS_HC 显式配置时整体覆盖(空串=全部人工)。
+DEFAULT_AUTO_PASS_HC = ("HC1",)
+_HC_KINDS = ("HC1", "HC2", "HC3")
+
 REQUIRED_KEYS = [
     "ARK_API_KEY",
     "FEISHU_APP_ID",
@@ -43,6 +55,19 @@ class Topic6Config:
     lark_bot_vault_id: str = ""
     # 可替他人续跑任务的管理员(回复他人任务的进度卡片发 /continue);留空=仅发起人。
     admin_open_ids: tuple[str, ...] = ()
+    share_emails: tuple[str, ...] = DEFAULT_SHARE_EMAILS
+    auto_pass_hc: tuple[str, ...] = DEFAULT_AUTO_PASS_HC
+
+def _auto_pass_hc(environ: Mapping[str, str]) -> tuple[str, ...]:
+    raw = environ.get("TOPIC6_AUTO_PASS_HC")
+    if raw is None:
+        return DEFAULT_AUTO_PASS_HC
+    kinds = tuple(dict.fromkeys(k.strip().upper() for k in raw.replace(",", " ").split() if k.strip()))
+    invalid = [k for k in kinds if k not in _HC_KINDS]
+    if invalid:
+        raise RuntimeError(f"TOPIC6_AUTO_PASS_HC 只能取 {'/'.join(_HC_KINDS)}，非法值:{', '.join(invalid)}")
+    return kinds
+
 
 def load_case_config(env: Optional[Mapping[str, str]] = None) -> Topic6Config:
     environ = os.environ if env is None else env
@@ -85,4 +110,14 @@ def load_case_config(env: Optional[Mapping[str, str]] = None) -> Topic6Config:
             for i in (environ.get("TOPIC6_ADMIN_OPEN_IDS") or "").replace(",", " ").split()
             if i.strip()
         ),
+        share_emails=(
+            DEFAULT_SHARE_EMAILS
+            if environ.get("TOPIC6_SHARE_EMAILS") is None
+            else tuple(
+                e.strip()
+                for e in environ["TOPIC6_SHARE_EMAILS"].replace(",", " ").split()
+                if e.strip()
+            )
+        ),
+        auto_pass_hc=_auto_pass_hc(environ),
     )

@@ -26,6 +26,32 @@ _DEFAULT_CALENDAR = (
 _calendar_env = os.environ.get("MARKETING_CALENDAR_PATH", _DEFAULT_CALENDAR)
 CALENDAR_PATH = Path(_calendar_env) if _calendar_env else None
 
+
+def _load_node_name_map() -> dict[str, str]:
+    """C3 打标节点名 → 日历节点名(如「双11」→「双11大促」)。
+
+    唯一来源是 C3 的 datahub_annotate.NAME_MAP:C3 用它算「是否窗口期内」,E2 必须用同一份
+    查锚点日期,否则 C3 判在窗口内的节点 E2 查不到(W46 双11 丢失)。导入失败只告警,
+    查不到的节点由 prep_e2_nodes 的兜底归入上周,不会丢。
+    """
+    scripts_dir = Path(__file__).resolve().parents[2] / "topic6-annotation" / "scripts"
+    sys.path.insert(0, str(scripts_dir))
+    try:
+        from datahub_annotate import NAME_MAP  # type: ignore
+
+        return dict(NAME_MAP)
+    except Exception as exc:  # noqa: BLE001 - 映射缺失只降级到兜底,不阻断 E2
+        print(f"[e2_nodes] ⚠️ 读取 C3 节点名映射失败,仅按原名查日历:{exc}", file=sys.stderr)
+        return {}
+    finally:
+        try:
+            sys.path.remove(str(scripts_dir))
+        except ValueError:
+            pass
+
+
+NODE_NAME_MAP = _load_node_name_map()
+
 # 节点类型 → 是否需要长周期筹备（对应 marketing-node-tagging/SKILL.md 候选节点窗口规则：
 # 电商大促14天/大众节日7天 vs 小众节点2天/二十四节气1天，7天为分界）。
 # "本周节点预告"密度判断不能只看节点数量——节点数量多但全是短筹备类型时，
@@ -208,8 +234,9 @@ def _build_last_week_table(bucket_df: pd.DataFrame) -> tuple[bool, str | None]:
     """按"提取节点"分组产出"上周节点回顾"汇总表markdown。
     返回 (has_data, data_md)；bucket_df 为空时 has_data=False。
 
-    只接收已按锚点日期校验落在上周窗口的节点(2026-11-11 起日历查不到锚点的节点
-    不进入报告，不再以「（锚点未核实）」标注展示，见 prep_e2_nodes 的 _classify)。
+    接收按锚点日期落在上周窗口的节点，以及日历查不到锚点、兜底归入上周的节点
+    (见 prep_e2_nodes 的 _classify)。两类节点展示方式相同，不加「（锚点未核实）」标注;
+    兜底节点名单另记在 e2_flags.json 的 last_week.unverified_nodes，由自校验写入 HC3。
 
     "涉及品牌IP"列 2026-10-09改名"涉及品牌IP候选"：这一列此前直接当最终展示值用，
     但V1→V2把"涉及品牌"和"关键实体"（人物）两个字段合并成了"商业实体"一个字段后，
@@ -297,23 +324,23 @@ def prep_e2_nodes(df_y: pd.DataFrame, pub_date: date) -> dict:
         calendar = _load_node_calendar_full()
         node_dist: dict[str, int | None] = {}
         for node in exploded["提取节点"].unique():
-            node_date = calendar.get(node)
+            # 先按 C3 同一份映射换成日历名(双11→双11大促);报告仍展示打标原名
+            node_date = calendar.get(NODE_NAME_MAP.get(node, node))
             node_dist[node] = (node_date - pub_date).days if node_date else None
 
         unknown_nodes = sorted(n for n, d in node_dist.items() if d is None)
         if unknown_nodes:
             print(
-                f"[e2_nodes] ⚠️ 日历里查不到以下节点的锚点日期，不进入报告（只展示确定性节点；"
-                f"若属命名对不上，请在 marketing_calendar_2026.csv 补一行）：{unknown_nodes}",
+                f"[e2_nodes] ⚠️ 日历里查不到以下节点的锚点日期，已兜底归入「上周节点」"
+                f"（命名对不上时在 C3 NAME_MAP 或日历补齐）：{unknown_nodes}",
                 file=sys.stderr,
             )
 
         def _classify(node: str) -> str | None:
             dist = node_dist[node]
-            # 2026-11-11:查不到锚点日期的节点不再「保守归入上周」——报告只给确定性内容
-            if dist is None:
-                return None
-            if -7 <= dist <= -1:
+            # 查不到锚点日期时保守归入上周(对齐原版):进 E2 的节点已过 C3 窗口期过滤
+            # 或经 HC2 人工确认，丢弃会把真实节点整段吞掉(W46 双11)。不加「锚点未核实」标注
+            if dist is None or -7 <= dist <= -1:
                 return "last_week"
             if 0 <= dist <= UPCOMING_SIGNAL_MAX_DIST:
                 return "upcoming"  # 还没发生、且在30天远距离上限内，折叠进预告补充信号
@@ -323,6 +350,8 @@ def prep_e2_nodes(df_y: pd.DataFrame, pub_date: date) -> dict:
 
         has_lw, md_lw = _build_last_week_table(exploded[exploded["_bucket"] == "last_week"])
         result["last_week"] = {"has_data": has_lw, "data_md": md_lw, "empty_text": "上周无节点。"}
+        if unknown_nodes:
+            result["last_week"]["unverified_nodes"] = unknown_nodes
 
         upcoming_df = exploded[exploded["_bucket"] == "upcoming"]
         if not upcoming_df.empty:

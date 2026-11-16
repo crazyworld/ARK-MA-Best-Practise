@@ -21,6 +21,10 @@ INSIGHT = Path(__file__).resolve().parents[1] / "cases" / "topic6" / "ma-resourc
 STATS = INSIGHT / "01_统计"
 E4_WRITING_B = INSIGHT / "02_洞察" / "E4_营销发现" / "_writing_marketing_consumer"
 E2_PROMPTS = INSIGHT / "02_洞察" / "E2_营销节点"
+SKILLS = INSIGHT.parent
+MARKETING_CALENDAR = SKILLS / "topic6-fetch-normalize" / "references" / "marketing_calendar_2026.csv"
+ANNOTATION_SCRIPTS = SKILLS / "topic6-annotation" / "scripts"
+ANNOTATION_PROMPTS = SKILLS / "topic6-annotation" / "prompts"
 
 
 def _load(name: str, file: str):
@@ -76,29 +80,118 @@ def test_e3_active_prompt_has_no_average_column():
 
 # ---------------------------------------------------------------- Q4
 
-def test_e2_unverified_nodes_are_excluded_not_marked(monkeypatch):
+def _node_row(node: str, title: str, score: float = 80) -> dict:
+    return {"提取节点": node, "标准化热度分": score, "商业实体": "", "行业归属": "电商",
+            "事件簇名": title, "平台": "微博", "热点标题": title, "热点链接": f"https://weibo.com/{title}"}
+
+
+def test_e2_unverified_nodes_fall_back_to_last_week_without_marker(monkeypatch):
+    """查不到锚点的节点兜底归入上周(对齐原版，W46 双11 曾因丢弃整段消失),
+    正文不出现「锚点未核实」,名单记入 e2_flags 供自校验写进 HC3。"""
     e2 = _load("t6_e2_q4", "e2_nodes.py")
     monkeypatch.setattr(e2, "_load_node_calendar_full", lambda: {"霜降": date(2026, 10, 23)})
     monkeypatch.setattr(e2, "_load_calendar_rows", lambda: [])
-    df = pd.DataFrame([
-        {"提取节点": "霜降", "标准化热度分": 70, "商业实体": "", "行业归属": "医疗健康",
-         "事件簇名": "霜降养生", "平台": "微博", "热点标题": "霜降吃什么", "热点链接": "https://weibo.com/1"},
-        {"提取节点": "开学季", "标准化热度分": 90, "商业实体": "", "行业归属": "教育",
-         "事件簇名": "开学", "平台": "微博", "热点标题": "开学第一课", "热点链接": "https://weibo.com/2"},
-    ])
-    result = e2.prep_e2_nodes(df, date(2026, 10, 26))
-    md = result["last_week"]["data_md"]
-    assert "霜降" in md
-    assert "开学季" not in md and "锚点未核实" not in md
+    df = pd.DataFrame([_node_row("霜降", "霜降吃什么"), _node_row("开学季", "开学第一课")])
+    lw = e2.prep_e2_nodes(df, date(2026, 10, 26))["last_week"]
+    assert "霜降" in lw["data_md"] and "开学季" in lw["data_md"]
+    assert "锚点未核实" not in lw["data_md"]
+    assert lw["unverified_nodes"] == ["开学季"]
 
 
-def test_e2_only_unverified_nodes_gives_empty_last_week(monkeypatch):
+def test_e2_only_unverified_nodes_still_gives_last_week(monkeypatch):
     e2 = _load("t6_e2_q4b", "e2_nodes.py")
     monkeypatch.setattr(e2, "_load_node_calendar_full", lambda: {})
     monkeypatch.setattr(e2, "_load_calendar_rows", lambda: [])
-    df = pd.DataFrame([{"提取节点": "开学季", "标准化热度分": 90, "商业实体": "", "行业归属": "教育",
-                        "事件簇名": "开学", "平台": "微博", "热点标题": "t", "热点链接": "https://weibo.com/2"}])
-    assert e2.prep_e2_nodes(df, date(2026, 10, 26))["last_week"]["has_data"] is False
+    lw = e2.prep_e2_nodes(pd.DataFrame([_node_row("开学季", "t")]), date(2026, 10, 26))["last_week"]
+    assert lw["has_data"] is True and lw["unverified_nodes"] == ["开学季"]
+
+
+def test_e2_verified_nodes_have_no_unverified_list(monkeypatch):
+    e2 = _load("t6_e2_q4c", "e2_nodes.py")
+    monkeypatch.setattr(e2, "_load_node_calendar_full", lambda: {"霜降": date(2026, 10, 23)})
+    monkeypatch.setattr(e2, "_load_calendar_rows", lambda: [])
+    lw = e2.prep_e2_nodes(pd.DataFrame([_node_row("霜降", "t")]), date(2026, 10, 26))["last_week"]
+    assert lw["has_data"] is True and "unverified_nodes" not in lw
+
+
+def test_e2_old_nodes_outside_window_still_dropped(monkeypatch):
+    """兜底只针对查不到日期的节点;查得到且不在上周/未来30天的节点仍不展示(行为不变)。"""
+    e2 = _load("t6_e2_q4d", "e2_nodes.py")
+    monkeypatch.setattr(e2, "_load_node_calendar_full", lambda: {"国庆节": date(2026, 10, 1)})
+    monkeypatch.setattr(e2, "_load_calendar_rows", lambda: [])
+    lw = e2.prep_e2_nodes(pd.DataFrame([_node_row("国庆节", "t")]), date(2026, 11, 16))["last_week"]
+    assert lw["has_data"] is False and "unverified_nodes" not in lw
+
+
+# ---------------------------------------------------------------- W46 双11 丢失回归
+
+def test_e2_w46_double11_lands_in_last_week_with_real_calendar():
+    """真实日历 + C3 打标名「双11」:发布日 11-16 时必须进上周节点，且按锚点核实(非兜底)。"""
+    e2 = _load("t6_e2_w46", "e2_nodes.py")
+    assert e2.CALENDAR_PATH is not None
+    e2.CALENDAR_PATH = MARKETING_CALENDAR
+    lw = e2.prep_e2_nodes(pd.DataFrame([_node_row("双11", f"双11-{i}") for i in range(5)]),
+                          date(2026, 11, 16))["last_week"]
+    assert lw["has_data"] is True
+    assert "| 双11 | 5 |" in lw["data_md"]  # 展示打标原名
+    assert "unverified_nodes" not in lw
+
+
+def test_e2_uses_same_name_map_as_c3():
+    """E2 查日历的映射必须就是 C3 算窗口期用的那份(单一来源),不能各自维护。"""
+    e2 = _load("t6_e2_map", "e2_nodes.py")
+    ann = ANNOTATION_SCRIPTS / "datahub_annotate.py"
+    spec = importlib.util.spec_from_file_location("t6_ann_map", ann)
+    mod = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(mod)
+    assert e2.NODE_NAME_MAP == mod.NAME_MAP and e2.NODE_NAME_MAP["双11"] == "双11大促"
+
+
+def test_every_c3_vocab_node_resolvable_by_e2_or_known_gap():
+    """C3 打标词表(节点标注最新版)里每个节点名，经 NAME_MAP 后都应能在 E2 日历查到。
+    KNOWN_GAPS 是日历本身没有的节点(由 E2 兜底归入上周);新增缺口要么补映射/日历，
+    要么显式加入这里——防止词表/日历改名后再次静默失配。"""
+    import csv
+    import io
+
+    KNOWN_GAPS = {"腊八节", "世界羽毛球日", "跨年"}
+    e2 = _load("t6_e2_vocab", "e2_nodes.py")
+    names = {r["name"].strip() for r in csv.DictReader(io.StringIO(MARKETING_CALENDAR.read_text(encoding="utf-8-sig")))}
+    vocab_md = _latest(ANNOTATION_PROMPTS / "节点标注").read_text(encoding="utf-8")
+    vocab = re.findall(r"^\|\s*([^|]+?)\s*\|\s*(?:大众节日|电商大促|二十四节气|小众节点)\s*\|", vocab_md, re.M)
+    assert len(vocab) > 50
+    missing = {n for n in vocab if e2.NODE_NAME_MAP.get(n, n) not in names}
+    assert missing == KNOWN_GAPS
+
+
+def _self_check_module():
+    spec = importlib.util.spec_from_file_location("t6_selfcheck_e2", INSIGHT / "scripts" / "report_self_check.py")
+    mod = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@pytest.mark.parametrize("nodes,expect_warn", [(["开学季"], True), (None, False)])
+def test_self_check_surfaces_e2_fallback_nodes_as_warn(tmp_path, nodes, expect_warn):
+    """兜底节点不进正文标注，但必须以 warn 进自校验结果(→ HC3 issues_detected)。"""
+    import json
+
+    sc = _self_check_module()
+    round_dir = tmp_path / "06_洞察" / "v2"
+    round_dir.mkdir(parents=True)
+    lw = {"has_data": True, "data_md": "x", "empty_text": "上周无节点。"}
+    if nodes:
+        lw["unverified_nodes"] = nodes
+    (round_dir / "e2_flags.json").write_text(json.dumps({"last_week": lw}, ensure_ascii=False), encoding="utf-8")
+    result = {"status": "pass", "failed_sections": [], "issues": []}
+    sc._add_e2_unverified_nodes(result, tmp_path, tmp_path / "07_报告" / "热点报告_W46_v2.md", None)
+    if expect_warn:
+        assert result["status"] == "warn" and "开学季" in result["issues"][0]["detail"]
+        assert result["issues"][0]["severity"] == "warn"
+    else:
+        assert result == {"status": "pass", "failed_sections": [], "issues": []}
 
 
 def test_e2_active_prompt_no_longer_mentions_unverified_marker():

@@ -57,9 +57,11 @@ class FeishuDocPublisher:
     - docs_folder_token: 飞书共享根文件夹 token（可空：建在机器人云空间根目录）
     """
 
-    def __init__(self, feishu, docs_folder_token: str):
+    def __init__(self, feishu, docs_folder_token: str, share_emails: tuple[str, ...] = ()):
         self._feishu = feishu
         self._root_folder_token = docs_folder_token
+        # job 文件夹创建后授 full_access 的邮箱；文件夹内宽表、过程数据继承该权限
+        self._share_emails = tuple(share_emails)
 
     @property
     def enabled(self) -> bool:
@@ -91,9 +93,9 @@ class FeishuDocPublisher:
     def create_job_folder(self, job: PipelineJob) -> str:
         """在根文件夹下创建 job 专属子文件夹，返回子文件夹 token。
 
-        子文件夹自动继承父级权限，白名单用户无需额外授权。
-        未配置根文件夹时 parent_token=""，即建在机器人云空间根目录（只有机器人可见，
-        宽表另行授权给发起人）。同步调用。
+        子文件夹自动继承父级权限，白名单用户无需额外授权；创建后再给 share_emails
+        授 full_access（文件夹内的 HC 宽表、过程数据随之可见）。
+        未配置根文件夹时 parent_token=""，即建在机器人云空间根目录。同步调用。
         """
         # 命名格式: {project_dir最后一段}_{job_id前12位}
         project_name = job.project_dir.rstrip("/").rsplit("/", 1)[-1] if job.project_dir else "unknown"
@@ -107,13 +109,28 @@ class FeishuDocPublisher:
                 "topic6 job docs folder created job=%s folder=%s token=%s",
                 job.job_id, folder_name, sub_folder_token,
             )
-            return sub_folder_token
         except Exception as err:  # noqa: BLE001
             log.error(
                 "topic6 create job docs folder failed job=%s: %s",
                 job.job_id, err,
             )
             return ""
+        self._share_folder(sub_folder_token, job.job_id)
+        return sub_folder_token
+
+    def _share_folder(self, folder_token: str, job_id: str) -> None:
+        """job 文件夹授 share_emails full_access；单人失败只记 error，不阻断任务。"""
+        for email in self._share_emails:
+            try:
+                self._feishu.add_permission(
+                    token=folder_token, token_type="folder", member_open_id=email,
+                    perm="full_access", member_type="email",
+                )
+            except Exception as err:  # noqa: BLE001
+                log.error(
+                    "topic6 share job folder failed job=%s folder=%s email=%s: %s",
+                    job_id, folder_token, email, err,
+                )
 
     async def publish_hc_artifacts(
         self,

@@ -11,15 +11,21 @@ Skill `topic6-annotation`（Phase C + D 及共享基础设施）：项目初始�
 `scripts/init_project.py --text <原始消息> --mode {demo|smoke|full|skip_sampling}` SHALL 是唯一的周期解析与项目创建入口，stdout 单行 JSON `{status: created|resumed|ambiguous, project_dir, mode, period, fetch, current_phase, [reason, options, resolutions]}`。周期规则：
 - 无日期 → 今天所在周之前最近一个完整自然周（周一~周日），`weekly`；
 - `W35`/`第35周` → `--today` 所在 ISO 年的该周，`weekly`；
-- `MM-DD到MM-DD` → `custom`；
-- `双周`/`连续两周` → 起始周 + 次周共 14 天，`biweekly`；
 - `继续W36` → 查找唯一的 `/workspace/Projects/W36*/run_config.yaml` 续跑。
 
-目录名 `{period_id}{热点周报|双周报|自定义}_{YYYYMMDD}-{YYYYMMDD}`；`period_label = {ISO年}-W{NN}`；取数窗口 `fetch_start = date_start − 7d`、`fetch_end = date_end + 1d`。以下情况 MUST 返回 `ambiguous` 及 A/B/C 选项与 `resolutions`（参数数组或 null）：多种互斥写法、日期非法、结束早于开始、周次不存在、周期尚未结束（可 `--allow-incomplete`）、续跑目标为 0 个（可 `--new-week`）或多个（`--resume-dir`）、同名项目已存在但 mode 不同（`--resume-dir` 续跑 / `--overwrite` 重跑）。新建时 run_config 原子写入，顶层块 `mode/period/fetch/cost.usd_to_cny=7.2/status{created_at,current_phase=init}`。
+当前只支持单周：`双周`/`连续两周`/`两周`、`MM-DD到MM-DD` 日期区间 MUST 返回 ambiguous（A `--prefer latest` / B 重新给出周次 / C 停止），因 Phase A `find_complete_week` 只保留一个 ISO 周。`--prefer` 只接受 `latest`。
+
+新建周期的 `date_start` MUST 不早于最近 4 个完整自然周中最早一周的周一（`RECENT_WEEKS=4`：`last_complete_week(today) − 21d`）；续跑已有项目（`继续W..`/`--resume-dir`）不受此限。
+
+目录名 `{period_id}热点周报_{YYYYMMDD}-{YYYYMMDD}`；`period_label = {ISO年}-W{NN}`；取数窗口 `fetch_start = date_start − 7d`、`fetch_end = date_end + 1d`。以下情况 MUST 返回 `ambiguous` 及 A/B/C 选项与 `resolutions`（参数数组或 null）：双周或日期区间、周次不存在、超出近 4 周（A `--prefer latest` / B 重新给出周期 / C 停止）、周期尚未结束（可 `--allow-incomplete`）、续跑目标为 0 个（可 `--new-week`）或多个（`--resume-dir`）、同名项目已存在但 mode 不同（`--resume-dir` 续跑 / `--overwrite` 重跑）。新建时 run_config 原子写入，顶层块 `mode/period/fetch/cost.usd_to_cny=7.2/status{created_at,current_phase=init}`。
 
 #### Scenario: 默认周期
 - **WHEN** 今天 2026-09-30（周三），`--text "热点周报 demo"`
 - **THEN** `status=created`，周期为 2026-09-21~09-27，`fetch` 为 09-14~09-28
+
+#### Scenario: 超出近 4 周
+- **WHEN** 今天 2026-10-28，请求 `W39` 或 `2025W43`（可选范围 2026-09-28 起）
+- **THEN** 返回 ambiguous，`resolutions={A:[--prefer,latest],B:null,C:null}`；`继续W30` 续跑已有项目不受影响
 
 #### Scenario: 周期未结束
 - **WHEN** 请求本周 W40 而今天在 W40 内

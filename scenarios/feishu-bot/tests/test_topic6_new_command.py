@@ -1117,3 +1117,54 @@ def test_byok_header_follows_session_model(loop, tmp_path, provider, expect_head
     loop.run_until_complete(runner._send_message("sesn-1", "hi again"))
     assert [h for _, _, h in ark.sent] == [headers if expect_header else None] * 2
 
+
+
+
+def test_start_job_injects_share_emails_env(loop, tmp_path):
+    """Gateway 配置的共享邮箱以 TOPIC6_SHARE_EMAILS 注入 Session,供 Phase F 脚本授权报告文档。"""
+    captured = {}
+
+    class _Ark(_StubArk):
+        async def create_session(self, _agent, _env, **kwargs):
+            captured.update(kwargs)
+            return "sesn-share"
+
+    store = PipelineStore(str(tmp_path / "topic6.db"))
+    cfg = RunnerConfig(coordinator_agent_id="a", environment_id="e",
+                       share_emails=("x@bluefocus.com", "xueqi.wang1@bluefocus.com"))
+    runner = Topic6Runner(_Ark(), _StubSender(), store, cfg, loop=loop)
+
+    async def _noop(*_a, **_k):
+        return None
+
+    runner._loop_run = _noop  # type: ignore[assignment]
+    runner._spawn_stream = lambda *_a, **_k: loop.create_task(_noop())  # type: ignore[assignment]
+    loop.run_until_complete(runner.start_job(
+        chat_id="c", thread_id="", user_open_id="ou_u", mode="full", user_message="/start"))
+    assert captured["env_overrides"]["TOPIC6_SHARE_EMAILS"] == "x@bluefocus.com,xueqi.wang1@bluefocus.com"
+    assert captured["env_overrides"]["FEISHU_USER_OPEN_ID"] == "ou_u"
+
+
+
+def test_start_job_share_emails_none_vs_empty(loop, tmp_path):
+    """None=不注入(脚本走默认名单);空元组=注入空串(明确不共享)。"""
+    for share, expected in ((None, None), ((), "")):
+        captured = {}
+
+        class _Ark(_StubArk):
+            async def create_session(self, _agent, _env, **kwargs):
+                captured.update(kwargs)
+                return "sesn-share"
+
+        store = PipelineStore(str(tmp_path / f"topic6_{expected}.db"))
+        cfg = RunnerConfig(coordinator_agent_id="a", environment_id="e", share_emails=share)
+        runner = Topic6Runner(_Ark(), _StubSender(), store, cfg, loop=loop)
+
+        async def _noop(*_a, **_k):
+            return None
+
+        runner._loop_run = _noop  # type: ignore[assignment]
+        runner._spawn_stream = lambda *_a, **_k: loop.create_task(_noop())  # type: ignore[assignment]
+        loop.run_until_complete(runner.start_job(
+            chat_id="c", thread_id="", user_open_id="ou_u", mode="full", user_message="/start"))
+        assert captured["env_overrides"].get("TOPIC6_SHARE_EMAILS") == expected

@@ -28,7 +28,7 @@ Coordinator 及子 Agent MUST NOT 使用 `env`、`printenv`、`set`、`export -p
 3. 按 stdout JSON `status` 处理：`created` → 从 Phase A 开始；`resumed` → 从 `current_phase` 续跑且已 done 的分支不得重跑；`ambiguous` → 输出 `[need_decision]` 列出 `reason` 与 `options`，用户 `/continue <字母>` 后把 `resolutions[<字母>]` 参数数组原样追加到上一次命令（`null` 时停止或请用户补充），MUST NOT 把选项文字拼进 `--text`。
 4. 立即输出一行 `[project_dir] /workspace/Projects/{PROJECT_DIR}`（绝对路径）。
 
-支持的周期写法：无日期（最近完整周）、`W35`、`09-01到09-14`（custom）、双周、`继续W36`（断点续跑）。
+支持的周期写法：无日期（最近完整周）、`W35`、`继续W36`（断点续跑）；只支持单周，双周与日期区间由 `init_project.py` 返回 ambiguous。
 
 #### Scenario: 周期歧义
 - **WHEN** `init_project.py` 返回 `status=ambiguous`

@@ -953,13 +953,14 @@ def build_gateway(config: Topic6Config, ark, sender, loop: asyncio.AbstractEvent
             vault_ids=tuple(
                 v for v in (config.lark_bot_vault_id, config.vault_id) if v
             ),
+            share_emails=config.share_emails,
         ),
         loop=loop,
         extra_headers=_byok_model_headers(config),
         notifier=notifier,
     )
     # [P0-2] 飞书文档发布器
-    publisher = FeishuDocPublisher(sender, config.docs_folder_token)
+    publisher = FeishuDocPublisher(sender, config.docs_folder_token, config.share_emails)
     artifact_sync = Topic6ArtifactSync(
         ark,
         Path(config.artifact_sync_dir),
@@ -977,6 +978,7 @@ def build_gateway(config: Topic6Config, ark, sender, loop: asyncio.AbstractEvent
         sync_root=Path(config.artifact_sync_dir),
         notifier=notifier,
         process_files=process_files,
+        auto_pass_hc=config.auto_pass_hc,
     ))
     runner.bind_card_sender(hitl)
     runner.bind_process_files(process_files, artifact_sync)

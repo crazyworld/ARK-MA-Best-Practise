@@ -931,8 +931,11 @@ class FeishuSender:
         token_type: str,
         member_open_id: str,
         perm: str = "full_access",
+        member_type: str = "openid",
     ) -> None:
         """给飞书云文档/文件夹添加协作者权限（幂等：already_exist 不报错）。
+
+        member_type=openid 时 member_open_id 为 open_id；=email 时为企业邮箱。
 
         走 `POST /open-apis/drive/v1/permissions/{token}/members?type={token_type}`。
         perm: full_access / edit / view。不发飞书通知（need_notification=false）。
@@ -950,7 +953,7 @@ class FeishuSender:
             "Content-Type": "application/json; charset=utf-8",
         }
         body = {
-            "member_type": "openid",
+            "member_type": member_type,
             "member_id": member_open_id,
             "perm": perm,
         }
