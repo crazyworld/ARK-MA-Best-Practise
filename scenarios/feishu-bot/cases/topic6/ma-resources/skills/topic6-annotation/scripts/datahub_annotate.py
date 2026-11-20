@@ -20,7 +20,7 @@ CLI:
   python datahub_annotate.py \\
     --task c0 --project-dir /workspace/Projects/W35 \\
     --input 03_抽样/sample_500.xlsx --model-id gpt-4o-mini \\
-    --prompt-file /mnt/skills/topic6-annotation/prompts/C0_基础事实/v13.md
+    --prompt-file /mnt/skills/topic6-annotation/prompts/C0_基础事实/v17.md
 
 Env:
   DATAHUB_API_KEY  (必填,由平台注入)
@@ -94,7 +94,11 @@ TASK_SCHEMAS: dict[str, dict] = {
     "r2": {"fields": ["是否商业合作", "判断说明"], "primary_field": "是否商业合作"},
     "r3": {"fields": ["是否风险预警", "判断说明"], "primary_field": "是否风险预警"},
     "r4": {"fields": ["是否营销发现", "判断说明"], "primary_field": "是否营销发现"},
-    "r5": {"fields": ["是否消费者行为", "判断说明"], "primary_field": "是否消费者行为"},
+    # R5 v8 起输出六字段(主字段改名为“是否消费洞察”,判断说明拆为五个洞察字段)
+    "r5": {
+        "fields": ["是否消费洞察", "适用消费人群", "观点情绪", "消费场景", "消费需求", "洞察线索"],
+        "primary_field": "是否消费洞察",
+    },
 }
 
 VALID_THRESHOLDS = {"pass": 0.92, "warn": 0.80}

@@ -155,6 +155,8 @@ def test_c_postprocess(tmp_path, mock_round, task, subdir):
         pytest.skip("线上做过失败行重试，postprocess 含重试回填，raw 不能单独复现")
     if task == "c3":
         pytest.importorskip("lunardate", reason="C3 时效窗口依赖 lunardate（沙箱已装）")
+    if task == "r5" and "r5_是否消费者行为" in _frame(files[f"04_标注/{subdir}/{task}_postprocess_r1.xlsx"]).columns:
+        pytest.skip("mock 为 R5 v3 旧 schema 产物，v8 起输出六字段（新 schema 见 test_topic6_prompt_v20261120.py）")
     runner = tmp_path / "pp.py"
     runner.write_text(_POSTPROCESS_RUNNER, encoding="utf-8")
     out = tmp_path / "post.xlsx"

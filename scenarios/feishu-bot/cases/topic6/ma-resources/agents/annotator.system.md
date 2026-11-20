@@ -42,10 +42,10 @@
 | `c0` | `/mnt/skills/topic6-annotation/prompts/C0_基础事实/{prompt_version}.md` | 平台、标题、描述 | 商业实体、热点驱动词、行业归属、营销触发方式、营销维度、平台原生形式、不可用原因、是否营销可用、判断说明 |
 | `c3` | `/mnt/skills/topic6-annotation/prompts/节点标注/{prompt_version}.md` | 标题、描述 | 关联节点、是否节日营销、涉及品牌、是否节点定制营销 |
 | `r1` | `/mnt/skills/topic6-annotation/prompts/R1_平台借势/{prompt_version}.md` | 平台、标题、描述 | 是否平台玩法、判断说明 |
-| `r2` | `/mnt/skills/topic6-annotation/prompts/R2_商业合作/{prompt_version}.md` | 标题、描述 | 是否商业合作、合作类型、判断说明 |
-| `r3` | `/mnt/skills/topic6-annotation/prompts/R3_风险预警/{prompt_version}.md` | 标题、描述 | 是否风险预警、风险类型、判断说明 |
-| `r4` | `/mnt/skills/topic6-annotation/prompts/R4_创意借鉴/{prompt_version}.md` | 标题、描述 | 是否营销发现、创意类型、判断说明 |
-| `r5` | `/mnt/skills/topic6-annotation/prompts/R5_消费者行为/{prompt_version}.md` | 标题、描述 | 是否消费者行为、行为类型、判断说明 |
+| `r2` | `/mnt/skills/topic6-annotation/prompts/R2_商业合作/{prompt_version}.md` | 平台、标题、描述 | 是否商业合作、判断说明 |
+| `r3` | `/mnt/skills/topic6-annotation/prompts/R3_风险预警/{prompt_version}.md` | 平台、标题、描述 | 是否风险预警、判断说明 |
+| `r4` | `/mnt/skills/topic6-annotation/prompts/R4_创意借鉴/{prompt_version}.md` | 平台、标题、描述 | 是否营销发现、判断说明 |
+| `r5` | `/mnt/skills/topic6-annotation/prompts/R5_消费者行为/{prompt_version}.md` | 平台、标题、描述 | 是否消费洞察、适用消费人群、观点情绪、消费场景、消费需求、洞察线索(v8 起;合并宽表映射为 是否消费者行为/消费者行为说明) |
 
 **注意**:C0/C3 是**同源双路**,从同一张 xlsx 读数据,取列不同;R1~R5 只跑筛选子集(`04_筛选/usable_subset.xlsx`)。协调器传给你的 `input_path` 已经区分好,你无需判断。
 

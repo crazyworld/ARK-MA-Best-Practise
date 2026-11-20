@@ -35,6 +35,26 @@ def default_human_outputs(st, node_id=None):
         }, ensure_ascii=False))
     if node_id == "n17_validate":
         return {"qc_report": {"has_p0": False, "p0_count": 0, "issues": []}}
+    if node_id in hc_bridge.ANNOTATION_REVIEW_NODES:
+        # FIX-30：e2e 默认给一份「全部判对」的独立 Validator 审核结果，
+        # 使 gate 走 pass 分支。抽检路由本身由 test_annotation_review 覆盖。
+        field = "sentiment" if node_id == "n09r_review_r1" else "opinion"
+        review = {
+            "accuracy": {field: 1.0},
+            "verdict_count": 10,
+            "field_stats": {field: {"total": 10, "correct": 10, "wrong": 0}},
+            "wrong_ids": {},
+            "qc_metadata": {
+                "actor_role": "Validator",
+                "mode": "independent-agent",
+                "validator_id": "topic5-validator",
+                "generated_at": "2026-01-01T00:00:00+08:00",
+                "input_artifacts": [],
+            },
+        }
+        import json as _json
+        return hc_bridge.build_human_outputs(
+            st, "pass", _json.dumps(review, ensure_ascii=False))
     return hc_bridge.build_human_outputs(st, "pass", "")
 
 
@@ -80,7 +100,7 @@ def compliant_pipeline_services():
             "cleaned_data": {"rows": [], "clean_record": {"total_out": 0}},
             "ugc_category_list": {
                 "mode": "fixed_four",
-                "categories": ["模仿打卡", "创意改编", "测评分享", "自发安利"],
+                "categories": ["模仿打卡", "创意改编", "测评分享", "晒单分享"],
                 "source": "fixed",
             },
             "annotated_round1": {"round": 1, "rows": [], "degraded": False},

@@ -198,7 +198,51 @@ def _parse_requirement(note: str) -> dict:
         raise ValueError("G1 活动开始日期不能晚于结束日期")
     if value.get("content_scope") not in ("all", "ugc", "pgc"):
         raise ValueError("G1 content_scope 必须是 all/ugc/pgc")
-    return value
+    return _with_traceability(value)
+
+
+# FIX-09：需求留痕字段（原话/更正/来源/Skill 调用/交付要求）。
+# 这些是附加字段：老载荷没有就补空，不参与必填校验，也不改变已有字段语义。
+_TRACE_FIELDS = ("raw_request", "corrections", "field_sources",
+                 "skill_invocations", "delivery_deadline", "special_notes",
+                 "keyword_generation")  # FIX-07：关键词生成 Skill 的调用结果留痕
+
+
+def _intake_module():
+    """按文件位置加载 topic5_intake，不依赖调用方的 sys.path。
+
+    该模块在 case 根目录（本文件的 ../../..），原先靠隐式 sys.path 命中：
+    单跑 hc_bridge 相关测试会 ModuleNotFoundError，属于环境脆弱点。
+    """
+    import importlib
+    import sys
+
+    root = str(Path(__file__).resolve().parents[3])
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    return importlib.import_module("topic5_intake")
+
+
+def _with_traceability(value: dict) -> dict:
+    """保证 requirement_confirmed 带上留痕字段，缺省补空结构。
+
+    下游（Validator 核对最新更正、词云 call-brief）依赖这些字段存在；
+    补齐空值比让调用方到处写 `or {}` 更稳。
+    """
+    intake = _intake_module()
+    out = dict(value)
+    out["raw_request"] = str(value.get("raw_request") or "").strip()
+    out["corrections"] = intake._clean_corrections(value.get("corrections"))
+    out["field_sources"] = intake._clean_field_sources(value.get("field_sources"))
+    out["skill_invocations"] = intake._clean_skill_invocations(
+        value.get("skill_invocations"))
+    out["delivery_deadline"] = str(value.get("delivery_deadline") or "").strip()
+    out["special_notes"] = str(value.get("special_notes") or "").strip()
+    # FIX-07：关键词生成结果原样保留（原始输出 / Skill 版本 / 调用时间），
+    # 供词云 call-brief 与 Validator 第 6 项核对最新更正。
+    raw_kw = value.get("keyword_generation")
+    out["keyword_generation"] = dict(raw_kw) if isinstance(raw_kw, dict) else {}
+    return out
 
 
 def _parse_source_file(note: str) -> dict:
@@ -213,6 +257,48 @@ def _parse_source_file(note: str) -> dict:
     if Path(mount_path).name != mount_path or not mount_path.lower().endswith(".xlsx"):
         raise ValueError("G2 source_file.mount_path 非法")
     return normalize_source_file(source)
+
+
+# FIX-30：标注审核节点（与 G3 同构）
+ANNOTATION_REVIEW_NODES = frozenset({"n09r_review_r1", "n11r_review_r2"})
+
+
+def _resume_annotation_review(st, node_id: str, decision: str, note: str) -> dict:
+    """轮次一/轮次二标注审核节点的 HB 校验（FIX-30，qc_metadata 结构同 G3）。
+
+    校验要求（原版 KS_Annotation_Review§1 / QC §5/§7）：
+      - actor_role == "Validator"
+      - mode == "independent-agent"
+      - 至少给出 accuracy（两个字段分别判定）
+      - 有 verdict_count > 0 的判定记录
+    校验通过后把整个报告写进对应的 artifact 键（r1_review / r2_review）。
+    """
+    art_key = "r1_review" if node_id == "n09r_review_r1" else "r2_review"
+    # note 可以是 JSON 字符串也可以是已解析 dict（兼容测试 helper 直接传 dict 的场景）
+    if isinstance(note, dict):
+        review = note
+    else:
+        try:
+            review = json.loads(note or "{}")
+        except (ValueError, TypeError):
+            raise ValueError(
+                f"{node_id}: 审核结果必须是 JSON（包含 accuracy 与 qc_metadata）")
+    if not isinstance(review, dict):
+        raise ValueError(f"{node_id}: 审核结果必须是 JSON 对象")
+    metadata = review.get("qc_metadata") or {}
+    if metadata.get("actor_role") != "Validator":
+        raise ValueError(f"{node_id}: qc_metadata.actor_role 必须是 Validator")
+    if metadata.get("mode") != "independent-agent":
+        raise ValueError(f"{node_id}: qc_metadata.mode 必须是 independent-agent")
+    accuracy = review.get("accuracy")
+    if not isinstance(accuracy, dict) or not accuracy:
+        raise ValueError(f"{node_id}: 审核结果缺少 accuracy（至少一个字段的正确率）")
+    verdict_count = review.get("verdict_count") or sum(
+        item.get("total", 0) for item in
+        (review.get("field_stats") or {}).values() if isinstance(item, dict))
+    if not verdict_count:
+        raise ValueError(f"{node_id}: 审核结果没有任何逐帖判定（verdict_count=0）")
+    return {art_key: {**review, "decision": decision}}
 
 
 def build_human_outputs(
@@ -239,7 +325,11 @@ def build_human_outputs(
     if decision == "remark" and not note.strip():
         return None
 
-    # n17_validate: only an independently persisted Validator result may resume G3.
+    # n09r / n11r 标注审核：与 G3 同构——只接受独立 Validator 持久化的审核结果。
+    if node_id in ANNOTATION_REVIEW_NODES:
+        return _resume_annotation_review(st, node_id, decision, note)
+
+# n17_validate: only an independently persisted Validator result may resume G3.
     if node_id == "n17_validate":
         qc_path = st.run_dir / "validation" / "qc_report.json"
         if not qc_path.exists():

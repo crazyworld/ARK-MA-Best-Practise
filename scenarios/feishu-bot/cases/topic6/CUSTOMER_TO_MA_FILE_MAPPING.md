@@ -60,14 +60,19 @@
 
 | MA 文件 | 客户原始文件 | 状态 | 说明 |
 |---|---|---|---|
-| `prompts/C0_基础事实/v13.md` | `agent/skill/topic6-annotation-skill/prompts/C0_基础事实/v13.md`（bundle_20261030） | 原样迁入 | SHA-256 一致；目录内唯一版本。v1~v4（客户原样）与 v5（MA 精简版）已于 2026-11-05 移除，历史见 git |
+| `prompts/C0_基础事实/v17.md` | 客户 `T6-标注prompt更新/C0_基础标注_V17.md`（2026-11-20） | 原样替换 | 字节一致(含 CRLF)；目录内唯一版本，v13 已移除，历史见 git |
 | `prompts/R1_平台借势/v1.md`～`v2.md` | 客户侧同路径文件 | 原样迁入 | 2 个版本全部保留 |
 | `prompts/R2_商业合作/v1.md` | 客户侧同路径文件 | 原样迁入 | SHA-256 一致 |
-| `prompts/R2_商业合作/v2.md` | 客户 V2.0 bundle(20261030)同路径文件 | 原样迁入(去 CRLF) | 2026-11-03 活跃版 |
+| `prompts/R2_商业合作/v2.md` | 客户 V2.0 bundle(20261030)同路径文件 | 原样迁入(去 CRLF) | 归档 |
+| `prompts/R1_平台借势/v7.md` | 客户 `T6-标注prompt更新/R1_V7.md`（2026-11-20） | 原样替换 | 字节一致(含 CRLF)；活跃版 |
+| `prompts/R2_商业合作/v6.md` | 客户 `T6-标注prompt更新/R2_V6.md`（2026-11-20 15:56 版） | 原样替换 | 字节一致(含 CRLF)；活跃版 |
+| `prompts/R3_风险预警/v5.md` | 客户 `T6-标注prompt更新/R3_V5.md`（2026-11-20） | 原样替换 | 字节一致(含 CRLF)；活跃版 |
+| `prompts/R4_创意借鉴/v7.md` | 客户 `T6-标注prompt更新/R4_V7.md`（2026-11-20） | 原样替换 | 字节一致(含 CRLF)；活跃版 |
+| `prompts/R5_消费者行为/v8.md` | 客户 `T6-标注prompt更新/R5_V8.md`（2026-11-20） | 原样替换 | 字节一致(含 CRLF)；活跃版，输出六字段 |
 | `prompts/R3_风险预警/v1.md` | 客户侧同路径文件 | 原样迁入 | SHA-256 一致 |
 | `prompts/R4_创意借鉴/v1.md`～`v2.md` | 客户侧同路径文件 | 原样迁入 | 2 个版本全部保留 |
 | `prompts/R5_消费者行为/v1.md`～`v2.md` | 客户侧同路径文件 | 原样迁入 | 2 个版本全部保留 |
-| `prompts/R5_消费者行为/v3.md` | 客户 V2.0 bundle 同路径文件 | 原样迁入(去 CRLF) | 2026-11-03 活跃版 |
+| `prompts/R5_消费者行为/v3.md` | 客户 V2.0 bundle 同路径文件 | 原样迁入(去 CRLF) | 归档 |
 | `prompts/节点标注/v7.md` | `topic6/skill/annotation/prompts/节点标注/v7.md` | 原样迁入 | 只打包当前活跃版 |
 | 无 | `prompts/节点标注/v1.md`～`v6.md` | 未迁移 | 历史版本未进入 MA Skill 包 |
 | 无 | `prompts/内容标注/v1.md`～`v9.md` | 未迁移 | 已被 C0 + R1-R5 分层标注方案替代 |

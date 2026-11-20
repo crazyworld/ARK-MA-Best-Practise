@@ -30,6 +30,11 @@ def find_latest_e1_data(prev_proj: Path) -> Path | None:
     return max(candidates, key=lambda x: x[0])[1]
 
 
+# C0 v17 行业白名单改名(26→37 项):上一期按旧名归档的 e1_data.md 先映射到新名再比较,
+# 避免切换当周把同一行业误报为“跌出+新进”
+LEGACY_INDUSTRY_NAMES = {"食品零食": "食品", "餐饮连锁": "餐饮"}
+
+
 def parse_top10_from_e1_data(text: str) -> list[str]:
     """从 e1_data.md 的 Markdown 表格里按行顺序解析出 TOP10行业 列（第一列）的行业名。"""
     industries = []
@@ -40,7 +45,7 @@ def parse_top10_from_e1_data(text: str) -> list[str]:
         cells = [c.strip() for c in line.strip("|").split("|")]
         if not cells or cells[0] in ("TOP10行业", "") or set(cells[0]) <= set("-: "):
             continue
-        industries.append(cells[0])
+        industries.append(LEGACY_INDUSTRY_NAMES.get(cells[0], cells[0]))
     return industries
 
 

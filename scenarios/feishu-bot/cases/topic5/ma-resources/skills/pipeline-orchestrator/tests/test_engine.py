@@ -32,7 +32,13 @@ class TestDagLoad(unittest.TestCase):
         self.assertEqual(dag.entry, "n00_intake")
         self.assertEqual(dag.slug, "marketing-activity-review")
         self.assertEqual(dag.version, "0.2")
-        self.assertEqual(len(dag.nodes), 29)
+        # 29 个 v0.2 基线节点 + FIX-30 的 6 个标注审核节点
+        self.assertEqual(len(dag.nodes), 35)
+        for node_id in ("n09r_review_r1", "n09r_gate", "n09r_rework",
+                        "n11r_review_r2", "n11r_gate", "n11r_rework"):
+            self.assertIn(node_id, dag.nodes)
+        self.assertEqual(dag.nodes["n09_annotate_r1"]["next"], "n09r_review_r1")
+        self.assertEqual(dag.nodes["n11_annotate_r2"]["next"], "n11r_review_r2")
         self.assertIn("qc_max_rounds", dag.params)
         self.assertEqual(
             dag.nodes["n20_delivery_gate"]["routes"]["has_p0_retry"],

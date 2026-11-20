@@ -473,8 +473,9 @@ class IntakeFormTest(unittest.TestCase):
         self.assertEqual(
             by_name["platforms"]["tag"], "select_static"
         )
+        # FIX-17：平台选项统一用标准中文名
         self.assertEqual(
-            by_name["platforms"]["initial_option"], "xiaohongshu"
+            by_name["platforms"]["initial_option"], "小红书"
         )
         self.assertEqual(
             by_name["content_scope"]["initial_option"], "all"
@@ -483,7 +484,7 @@ class IntakeFormTest(unittest.TestCase):
             intake.DEMO_REQUIREMENT_DEFAULTS
         )
         self.assertEqual(normalized["brand_filter"], "")
-        self.assertEqual(normalized["platforms"], ["xiaohongshu"])
+        self.assertEqual(normalized["platforms"], ["小红书"])
 
     def test_full_form_keeps_platform_multi_select(self) -> None:
         form = intake.build_requirement_form(
@@ -1925,8 +1926,8 @@ class HitlActionParsingTest(unittest.TestCase):
                     "metrics": [
                         {
                             "name": "NSR",
-                            "definition": "(正面内容数 - 负面内容数) / 正中负内容总数",
-                            "neutral_in_denominator": True,
+                            "definition": "(正面内容数 - 负面内容数) / (正面内容数 + 负面内容数)",
+                            "denominator": "正面+负面（不含中性）",
                         }
                     ],
                     "report_structure": ["品牌传播表现", "活动传播表现", "总结与建议"],
@@ -2012,7 +2013,7 @@ class HitlActionParsingTest(unittest.TestCase):
             "瑞幸×暹罗厘普联名活动",
             "瑞幸活动明细.xlsx",
             "NSR",
-            "分母含中性",
+            "分母=正面+负面，不含中性",
             "执行步骤",
             "基准期对比",
             "竞品分析已下线",

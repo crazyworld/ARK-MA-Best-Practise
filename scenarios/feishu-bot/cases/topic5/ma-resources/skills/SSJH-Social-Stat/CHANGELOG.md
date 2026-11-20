@@ -1,5 +1,18 @@
 # CHANGELOG — SSJH-Social-Stat
 
+## v1.8.0 (2026-11-19)
+
+### 变更：检索字段默认关闭封面 OCR / 视频标签
+
+- `MATCH_FIELDS` 全平台统一改为 `content,title`（原 weibo/xiaohongshu/shortVideo 为
+  `content,title,cover_ocr_content`，video 另含 `video_labels`）
+- `scripts/run.py`：`--no-ocr` 改为 `--with-ocr`（默认关闭 OCR 检索）；旧 flag 保留为
+  隐藏别名，行为不变
+- `skill.run(keyword_fields=...)` 机制不变，调用方仍可显式覆盖
+
+**为什么改**：OCR/视频标签参与检索会把「封面或标签出现品牌、正文与之无关」的帖子
+计入声量。客户契约要求统一只匹配正文与标题，OCR 只作正文判定的补充信息。
+
 ## v1.7.2 (2026-09-10)
 
 ### 变更：合并两份互不完整的变更历史

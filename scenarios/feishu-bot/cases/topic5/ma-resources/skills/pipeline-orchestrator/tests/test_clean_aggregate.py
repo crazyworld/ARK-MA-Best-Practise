@@ -241,25 +241,64 @@ class TestAggregate(unittest.TestCase):
             for bad in handlers.FORBIDDEN_METRIC_TERMS:
                 self.assertNotIn(bad, key)
 
-    def test_nsr_denominator_param(self):
+    def test_nsr_denominator_is_fixed_to_pos_plus_neg(self):
+        """FIX-13：分母恒为正面+负面，与客户 aggregate.py 一致，无参数开关。"""
+        rows = [
+            {"relevance": "是", "sentiment": 1, "interaction_cnt": 1},
+            {"relevance": "是", "sentiment": 0, "interaction_cnt": 1},
+            {"relevance": "是", "sentiment": 0, "interaction_cnt": 1},
+            {"relevance": "是", "sentiment": 1, "interaction_cnt": 1},
+            {"relevance": "是", "sentiment": -1, "interaction_cnt": 1},
+        ]
+        self._seed_annotated(rows)
+        camp = self._agg()["campaigns"]["default"]
+        # pos=2 neg=1 中性=2 → (2-1)/(2+1)=0.3333；若含中性则为 1/5=0.2
+        self.assertEqual(camp["metrics"]["NSR"], 0.3333)
+        self.assertEqual(camp["nsr_denominator"], "正面+负面（不含中性）")
+
+    def test_nsr_ignores_legacy_param_if_present(self):
+        """旧 Run 参数残留不会改变口径（参数已废弃，恒按正+负）。"""
         rows = [
             {"relevance": "是", "sentiment": 1, "interaction_cnt": 1},
             {"relevance": "是", "sentiment": 0, "interaction_cnt": 1},
             {"relevance": "是", "sentiment": -1, "interaction_cnt": 1},
+            {"relevance": "是", "sentiment": 1, "interaction_cnt": 1},
         ]
         self._seed_annotated(rows)
-        # 默认含中性：分母=3 → (1-1)/3 = 0.0
-        self.st.params["nsr_denominator_includes_neutral"] = True
-        self.assertEqual(self._agg()["campaigns"]["default"]["metrics"]["NSR"], 0.0)
-        # 不含中性：分母=2 → (1-1)/2 = 0.0（符号测试用非对称数据）
-        rows2 = rows + [{"relevance": "是", "sentiment": 1, "interaction_cnt": 1}]
-        self._seed_annotated(rows2)
-        self.st.params["nsr_denominator_includes_neutral"] = False
-        # pos=2 neg=1 denom(不含中)=3 → (2-1)/3 ≈ 0.3333
+        self.st.params["nsr_denominator_includes_neutral"] = True  # 残留参数
+        # pos=2 neg=1 → (2-1)/3 = 0.3333；若旧逻辑含中性则为 1/4 = 0.25
         self.assertEqual(self._agg()["campaigns"]["default"]["metrics"]["NSR"], 0.3333)
-        self.st.params["nsr_denominator_includes_neutral"] = True
-        # pos=2 neg=1 neu=1 denom(含中)=4 → 1/4 = 0.25
-        self.assertEqual(self._agg()["campaigns"]["default"]["metrics"]["NSR"], 0.25)
+
+    def test_dimension_nsr_threshold_uses_pos_plus_neg(self):
+        """分级门槛按「正面+负面合计 < 30」，不按总行数（客户错误案例 #35）。"""
+        rows = []
+        # 维度 A：12 正 + 12 负 + 20 中性 = 44 行，但正+负=24 < 30 → 样本不足
+        for _ in range(12):
+            rows.append({"relevance": "是", "sentiment": 1, "interaction_cnt": 1,
+                         "discussion_dimension": "品牌"})
+        for _ in range(12):
+            rows.append({"relevance": "是", "sentiment": -1, "interaction_cnt": 1,
+                         "discussion_dimension": "品牌"})
+        for _ in range(20):
+            rows.append({"relevance": "是", "sentiment": 0, "interaction_cnt": 1,
+                         "discussion_dimension": "品牌"})
+        # 维度 B：16 正 + 15 负 = 31 ≥ 30 → 可用
+        for _ in range(16):
+            rows.append({"relevance": "是", "sentiment": 1, "interaction_cnt": 1,
+                         "discussion_dimension": "产品"})
+        for _ in range(15):
+            rows.append({"relevance": "是", "sentiment": -1, "interaction_cnt": 1,
+                         "discussion_dimension": "产品"})
+        self._seed_annotated(rows)
+        dims = self._agg()["campaigns"]["default"]["dimension_nsr"]
+        # FIX-14：键名按客户 Report 命名（"品牌主导讨论"），不简称"品牌NSR"。
+        self.assertEqual(dims["品牌主导讨论"]["status"], "insufficient_sample")
+        self.assertEqual(dims["品牌主导讨论"]["sample_size"], 24)
+        self.assertEqual(dims["产品主导讨论"]["status"], "available")
+        self.assertEqual(dims["产品主导讨论"]["value"], round((16 - 15) / 31, 4))
+        # 三分类固定输出，无数据的「活动」组也在（status=insufficient_sample）。
+        self.assertIn("活动流程与获取主导讨论", dims)
+        self.assertEqual(dims["活动流程与获取主导讨论"]["row_count"], 0)
 
     def test_missing_ai_sentiment_raises(self):
         rows = [{"relevance": "是", "interaction_cnt": 1}]  # 无 sentiment/ai_sentiment

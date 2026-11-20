@@ -5,7 +5,7 @@
 判定层：`deterministic`=脚本全量检查；`semantic`=独立 Validator Agent 全文语义检查；
 `post_publish`=飞书文档创建后检查；`human_authority`=只能由用户确认。
 
-当前项目口径优先于客户旧规则：NSR 默认含中性；禁用“人均”；竞品分析下线；图片使用飞书
+客户 v1.22 口径为准（v0.6 起修正）：NSR 分母=正面+负面，不含中性；禁用“人均”；竞品分析下线；图片使用飞书
 原生 media，不要求 CDN。标记 `adapted` 的规则按“当前规则”执行，不照抄旧条件。
 
 | ID | 状态 | 判定层 | 当前规则 |
@@ -19,7 +19,7 @@
 | 2.1 | applicable | semantic | 品牌情感只回指受控统计源 `sentiment_dist` |
 | 2.2 | applicable | semantic | 活动情感只回指 AI 标注聚合 |
 | 2.3 | applicable | deterministic+semantic | 漏斗各层来自同一活动相关数据集且逐层嵌套 |
-| 2.4 | adapted | deterministic+semantic | 分维 NSR 分母按参数执行，当前默认含中性；不得套用旧“不含中性”公式 |
+| 2.4 | adopted | deterministic+semantic | 分维 NSR 分母=正面+负面，不含中性；含中性即 P0（客户 KS v0.12，历史事故 +57.6%→+15.2%） |
 | 2.5 | applicable | deterministic+semantic | UGC 类别占比分母是活动相关 UGC |
 | 2.6 | adapted | deterministic+semantic | 禁用“人均互动”；达人效能使用条均互动量或明确的总量分布 |
 | 2.7 | applicable | deterministic+semantic | 分维样本 `<30` 必须标“样本不足”，不得输出确定性结论 |

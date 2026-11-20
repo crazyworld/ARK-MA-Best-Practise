@@ -31,7 +31,6 @@ entry: n00_intake
 params:
   annotation_routing_threshold: 1000        # <阈值走小引擎，>=走 DataHub
   ugc_category_mode: dynamic                 # dynamic | fixed_four（待业务裁决，默认动态发现）
-  nsr_denominator_includes_neutral: true     # 维度 NSR 分母是否含中性（待裁决）
   report_chapters: five                      # three | five（待裁决，默认五部分）
   qc_max_rounds: 3
   user_confirm_timeout_days: 2

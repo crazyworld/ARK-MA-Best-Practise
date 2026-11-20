@@ -38,9 +38,13 @@ MSG_TYPE_DISPLAY = {"0": "主贴+评论 (0)", "1": "仅主贴 (1)", "2": "仅评
 CONTENT_MODE_DISPLAY = {"ALL": "ALL（全部）", "UGC": "UGC（用户原创）", "PGC": "PGC（机构/媒体）"}
 KW_NUMS = "①②③④⑤⑥⑦⑧⑨⑩"
 
+# 检索命中字段（客户 2026-11-02 契约，写死）
+SEARCH_FIELDS = "content,title"
+SEARCH_FIELDS_LABEL = "仅 content,title（客户契约，不含封面OCR/视频标签）"
+
 
 def build_plan_text(keywords, filterword, platforms, start_date, end_date,
-                    msg_type, content_mode, filter_ad, no_ocr=False):
+                    msg_type, content_mode, filter_ad):
     d1 = datetime.strptime(start_date, "%Y-%m-%d")
     d2 = datetime.strptime(end_date,   "%Y-%m-%d")
     days = (d2 - d1).days + 1
@@ -55,7 +59,9 @@ def build_plan_text(keywords, filterword, platforms, start_date, end_date,
         )
 
     filter_ad_label = "是" if filter_ad else "否"
-    ocr_label = "关闭" if no_ocr else "开启"
+    # 客户 2026-11-02 契约：所有 SSJH 查询显式 matchFields=content,title，
+    # 覆盖安装 Skill 含 cover_ocr_content 的默认值。口径写死，不留开关。
+    ocr_label = SEARCH_FIELDS_LABEL
 
     lines = [
         "",
@@ -100,7 +106,7 @@ def build_plan_text(keywords, filterword, platforms, start_date, end_date,
 
 
 def execute(keywords, filterword, platforms, start_date, end_date,
-            msg_type, content_mode, filter_ad, output_dir, no_ocr=False):
+            msg_type, content_mode, filter_ad, output_dir):
     skill = DatashuoshuoSocialmedia()
     results = []
 
@@ -116,7 +122,7 @@ def execute(keywords, filterword, platforms, start_date, end_date,
                 msg_type=str(msg_type),
                 content_mode=content_mode,
                 filter_ad=filter_ad,
-                keyword_fields="content,title" if no_ocr else None,
+                keyword_fields=SEARCH_FIELDS,
                 save=True,
                 output_dir=output_dir,
             )
@@ -229,8 +235,6 @@ def parse_args():
                         help="内容模式：ALL（默认）/ UGC / PGC")
     parser.add_argument("--filter-ad", action="store_true", dest="filter_ad",
                         help="过滤广告（默认不过滤）")
-    parser.add_argument("--no-ocr", action="store_true", dest="no_ocr",
-                        help="关闭视频文本识别（matchFields 去除 cover_ocr_content）")
     parser.add_argument("--mode", default="plan", choices=["plan", "execute"],
                         help="plan=展示方案（默认）; execute=执行取数")
     parser.add_argument(
@@ -255,7 +259,6 @@ def main():
             msg_type=args.msg_type,
             content_mode=args.content_mode,
             filter_ad=args.filter_ad,
-            no_ocr=args.no_ocr,
         ))
     elif args.mode == "execute":
         execute(
@@ -267,7 +270,6 @@ def main():
             msg_type=args.msg_type,
             content_mode=args.content_mode,
             filter_ad=args.filter_ad,
-            no_ocr=args.no_ocr,
             output_dir=args.output_dir,
         )
 

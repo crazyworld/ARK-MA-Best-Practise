@@ -39,35 +39,53 @@ DEFAULT_MAX_ATTEMPTS = 5
 ROUTES = {
     "r1": {
         "subdir": "R1_平台借势",
-        "prompt": "prompts/R1_平台借势/v2.md",
+        "prompt": "prompts/R1_平台借势/v7.md",
         "label": "是否平台玩法",
         "status": "r1_platform",
     },
     "r2": {
         "subdir": "R2_商业合作",
-        "prompt": "prompts/R2_商业合作/v2.md",  # 与 _版本状态.md 活跃版本保持一致
+        "prompt": "prompts/R2_商业合作/v6.md",  # 与 _版本状态.md 活跃版本保持一致
         "label": "是否商业合作",
         "status": "r2_commercial",
     },
     "r3": {
         "subdir": "R3_风险预警",
-        "prompt": "prompts/R3_风险预警/v1.md",
+        "prompt": "prompts/R3_风险预警/v5.md",
         "label": "是否风险预警",
         "status": "r3_risk",
     },
     "r4": {
         "subdir": "R4_创意借鉴",
-        "prompt": "prompts/R4_创意借鉴/v2.md",
+        "prompt": "prompts/R4_创意借鉴/v7.md",
         "label": "是否营销发现",
         "status": "r4_creative",
     },
     "r5": {
         "subdir": "R5_消费者行为",
-        "prompt": "prompts/R5_消费者行为/v3.md",  # 与 _版本状态.md 活跃版本保持一致
-        "label": "是否消费者行为",
+        "prompt": "prompts/R5_消费者行为/v8.md",  # 与 _版本状态.md 活跃版本保持一致
+        "label": "是否消费洞察",
+        # v8 输出六字段;洞察线索为必填说明字段,其余可为空字符串
+        "fields": ["适用消费人群", "观点情绪", "消费场景", "消费需求", "洞察线索"],
+        "reason_field": "洞察线索",
+        "row_tokens": 480,
         "status": "r5_consumer",
     },
 }
+
+# R1~R4 输出“主字段+判断说明”;R5 v8 起由 ROUTES 显式声明字段
+DEFAULT_ROUTE_FIELDS = ["判断说明"]
+DEFAULT_ROW_TOKENS = 160
+# 单条输入模板段起始标记:旧版 Prompt 为“## 五、输入”,客户新版为“【待标注数据】”
+INPUT_SECTION_MARKERS = ("【待标注数据】", "## 五、输入")
+
+
+def _route_fields(route: dict) -> list[str]:
+    return list(route.get("fields") or DEFAULT_ROUTE_FIELDS)
+
+
+def _reason_field(route: dict) -> str:
+    return route.get("reason_field") or "判断说明"
 
 
 def resolve_project_dir(project_dir: str | Path) -> Path:
@@ -96,29 +114,27 @@ def _parse_json_object(text: str) -> dict:
 
 def _batch_system_prompt(route: dict) -> str:
     source = (SKILL_DIR / route["prompt"]).read_text(encoding="utf-8")
-    source = source.split("## 五、输入", 1)[0].rstrip()
+    for marker in INPUT_SECTION_MARKERS:
+        if marker in source:
+            source = source.split(marker, 1)[0]
+            break
+    source = source.rstrip()
     return (
         source
         + "\n\n## Demo 批量模式\n"
         + "以下批量包装规则覆盖上文的单条输入和单行 JSON 包装要求，"
-        + "但判定标准、字段含义和 40 字说明限制不变。"
+        + "但判定标准、字段含义、字段取值与字数限制均以上文为准。"
         + "对每个 row_id 独立判断，必须原样返回全部 row_id，不得增删、合并或改名。"
     )
 
 
 def _batch_user_prompt(route: dict, rows: list[dict]) -> str:
     label = route["label"]
+    item = {"row_id": "原样返回输入 row_id", label: "是|否"}
+    item.update({field: "按上文规则填写" for field in _route_fields(route)})
     payload = {
         "records": rows,
-        "required_output": {
-            "results": [
-                {
-                    "row_id": "原样返回输入 row_id",
-                    label: "是|否",
-                    "判断说明": "单句，40字内",
-                }
-            ]
-        },
+        "required_output": {"results": [item]},
     }
     return json.dumps(payload, ensure_ascii=False)
 
@@ -136,7 +152,7 @@ def _request_route(
 ) -> dict:
     body = {
         "model": model,
-        "max_tokens": max(2000, len(rows) * 160),
+        "max_tokens": max(2000, len(rows) * int(route.get("row_tokens") or DEFAULT_ROW_TOKENS)),
         "temperature": 0,
         "messages": [
             {"role": "system", "content": _batch_system_prompt(route)},
@@ -218,6 +234,8 @@ def _normalize_results(route_name: str, rows: list[dict], results: object) -> li
         raise ValueError(f"{route_name} results must be a list")
     route = ROUTES[route_name]
     label = route["label"]
+    fields = _route_fields(route)
+    reason_field = _reason_field(route)
     expected = [str(row["row_id"]) for row in rows]
     by_id: dict[str, dict] = {}
     for item in results:
@@ -225,14 +243,14 @@ def _normalize_results(route_name: str, rows: list[dict], results: object) -> li
             continue
         row_id = str(item.get("row_id") or "")
         verdict = str(item.get(label) or "").strip()
-        reason = str(item.get("判断说明") or "").strip()
+        values = {field: str(item.get(field) or "").strip() for field in fields}
         if row_id in by_id:
             raise ValueError(f"{route_name} duplicate row_id: {row_id}")
-        if row_id in expected and verdict in {"是", "否"} and reason:
+        if row_id in expected and verdict in {"是", "否"} and values[reason_field]:
             by_id[row_id] = {
                 "row_id": row_id,
                 f"{route_name}_{label}": verdict,
-                f"{route_name}_判断说明": reason,
+                **{f"{route_name}_{field}": value for field, value in values.items()},
                 f"{route_name}_parse_error": 0,
             }
     missing = [row_id for row_id in expected if row_id not in by_id]
@@ -478,7 +496,10 @@ def _finalize_route(
                 route["label"]: result_by_id[row_id][
                     f"{route_name}_{route['label']}"
                 ],
-                "判断说明": result_by_id[row_id][f"{route_name}_判断说明"],
+                **{
+                    field: result_by_id[row_id].get(f"{route_name}_{field}", "")
+                    for field in _route_fields(route)
+                },
             },
             ensure_ascii=False,
         )

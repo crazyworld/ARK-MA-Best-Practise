@@ -109,7 +109,7 @@ C3 时效窗口：节点定义来自 `references/marketing_calendar/nodes_defini
 - **THEN** 只重新调用缺失批次
 
 ### Requirement: 七路合并宽表
-`merge_annotations.py --project-dir --mode --run-id` SHALL 输出 28 列 `05_合并/wide_table_{mode}_r{N}.xlsx`（基础 9 列 + C0 7 列〔商业实体、热点驱动词、行业归属、营销触发方式、营销维度、是否营销可用、判断说明〕+ 提取节点、事件簇名 + R1~R5 各 2 列〔是否平台玩法/平台玩法说明、是否商业合作/合作动态说明、是否风险预警/风险判断说明、是否营销发现/营销发现说明、是否消费者行为/消费者行为说明〕），`row_id` 改名为 `序号`；单路缺失补空列只告警不中断，并写 `health_summary_{mode}_r{N}.md`。stdout JSON MUST 含 `gate_ok`（行数守恒且 `dup_rows=0`）、`quality_status`、`quality_checks`、`quality_warnings`、`hc_metrics`。质量判定：任一路有效率 <0.80 或 ≥2 路整批缺失或 C0 缺失 → `fail`；恰 1 路缺失 → `degraded`；有效率 0.80~0.92、C2 营销可用行事件簇非空率 ≤0.50、C0 未决行 >0、C0 营销可用率偏离 37%~41% 超过 5pp、某平台占比 <5%、最大事件簇 >营销可用行 10% → `warn`；否则 `pass`。`quality_status` MUST NOT 改变 `gate_ok`。
+`merge_annotations.py --project-dir --mode --run-id` SHALL 输出 28 列 `05_合并/wide_table_{mode}_r{N}.xlsx`（基础 9 列 + C0 7 列〔商业实体、热点驱动词、行业归属、营销触发方式、营销维度、是否营销可用、判断说明〕+ 提取节点、事件簇名 + R1~R5 各 2 列〔是否平台玩法/平台玩法说明、是否商业合作/合作动态说明、是否风险预警/风险判断说明、是否营销发现/营销发现说明、是否消费者行为/消费者行为说明〕；R5 v8 由 `是否消费洞察/洞察线索` 映射而来，其余四个洞察字段只保留在 r5_postprocess），`row_id` 改名为 `序号`；单路缺失补空列只告警不中断，并写 `health_summary_{mode}_r{N}.md`。stdout JSON MUST 含 `gate_ok`（行数守恒且 `dup_rows=0`）、`quality_status`、`quality_checks`、`quality_warnings`、`hc_metrics`。质量判定：任一路有效率 <0.80 或 ≥2 路整批缺失或 C0 缺失 → `fail`；恰 1 路缺失 → `degraded`；有效率 0.80~0.92、C2 营销可用行事件簇非空率 ≤0.50、C0 未决行 >0、C0 营销可用率偏离 37%~41% 超过 5pp、某平台占比 <5%、最大事件簇 >营销可用行 10% → `warn`；否则 `pass`。`quality_status` MUST NOT 改变 `gate_ok`。
 
 #### Scenario: 行数守恒
 - **WHEN** 基础表 500 行，合并后 500 行且无重复序号
@@ -127,8 +127,8 @@ C3 时效窗口：节点定义来自 `references/marketing_calendar/nodes_defini
 - **THEN** 打印"已存在，跳过重复记录"，jsonl 不变
 
 ### Requirement: Prompt 版本管理
-活跃版本 SHALL 为 C0 v13、R1 v2、R2 v2、R3 v1、R4 v2、R5 v3、节点标注 v7（SKILL.md 为权威源，memory `_版本状态.md` 为镜像）。Prompt 文件 MUST 只增不改：调整时新建 `v{N+1}.md`，旧版保留（C0 例外：`C0_基础事实/` 目录只保留活跃版本，升版后旧版移除、历史以 git 为准，避免多版本并存造成误取），重新打包上传生成新 SkillHub version，并同步 `SKILL.md`、`_版本状态.md`、`version_mapping.md`。`ks/`（9 篇判定口径）与 `prompts/00~09`、`run_config契约.md`、`运行前置.md` 为客户原样迁入文件，修改属于业务口径变更。
+活跃版本 SHALL 为 C0 v17、R1 v7、R2 v6、R3 v5、R4 v7、R5 v8、节点标注 v7（SKILL.md 为权威源，memory `_版本状态.md` 为镜像）。Prompt 文件 MUST 只增不改：调整时新建 `v{N+1}.md`，旧版保留（C0 例外：`C0_基础事实/` 目录只保留活跃版本，升版后旧版移除、历史以 git 为准，避免多版本并存造成误取），重新打包上传生成新 SkillHub version，并同步 `SKILL.md`、`_版本状态.md`、`version_mapping.md`。`ks/`（9 篇判定口径）与 `prompts/00~09`、`run_config契约.md`、`运行前置.md` 为客户原样迁入文件，修改属于业务口径变更。
 
 #### Scenario: 升级 C0
 - **WHEN** 需要调整 C0 判定
-- **THEN** 新增 `C0_基础事实/v14.md` 并移除 v13（目录内只留 v14），更新三处版本记录并重新上传 Skill
+- **THEN** 新增 `C0_基础事实/v18.md` 并移除 v17（目录内只留 v18），更新三处版本记录并重新上传 Skill

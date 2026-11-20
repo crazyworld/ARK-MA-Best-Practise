@@ -78,7 +78,7 @@ class TestSpecificHandlers(unittest.TestCase):
         })
         self.st.write_artifact("ugc_category_list", {
             "mode": "fixed_four",
-            "categories": ["模仿打卡", "创意改编", "测评分享", "自发安利"],
+            "categories": ["模仿打卡", "创意改编", "测评分享", "晒单分享"],
         })
         out = handlers.opinion_policy_gate(
             {"id": "n10_hc_opinion", "outputs": ["confirmed_opinion_labels"]},
@@ -161,7 +161,6 @@ class TestSpecificHandlers(unittest.TestCase):
         self.assertIn("run_record", out["artifacts"])
 
     def test_plan_compile_builds_reviewable_plan_from_confirmed_requirement(self):
-        self.st.params["nsr_denominator_includes_neutral"] = True
         self.st.write_artifact("requirement_confirmed", {
             "confirmed": True,
             "brand": "瑞幸",
@@ -192,7 +191,8 @@ class TestSpecificHandlers(unittest.TestCase):
             list(handlers.METRIC_WHITELIST),
         )
         nsr = next(metric for metric in analysis["metrics"] if metric["name"] == "NSR")
-        self.assertTrue(nsr["neutral_in_denominator"])
+        self.assertEqual(nsr["definition"], "(正面内容数 - 负面内容数) / (正面内容数 + 负面内容数)")
+        self.assertEqual(nsr["denominator"], "正面+负面（不含中性）")
         self.assertIn("竞品分析已下线，不生成竞品章节", analysis["guardrails"])
         self.assertEqual(len(execution["stages"]), 5)
         self.assertIn("product_funnel", modules["conditional"])

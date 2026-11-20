@@ -41,12 +41,15 @@ PLATFORM_UNSUPPORTED = {
 PLATFORM_NO_INTERACTION_SORT = {"news", "forum", "ecom"}
 
 # matchFields 策略（各平台固定配置）
+# 默认值保留 OCR 字段是原版行为（客户 2026-11-02 确认）。Topic5 要求"覆盖安装
+# Skill 包含 OCR 的默认值"，做法是调用方显式传 keyword_fields（见 ssjh.py
+# DEFAULT_KEYWORD_FIELDS），而不是改这里的默认值——本文件被多个 topic 共用。
 MATCH_FIELDS = {
-    "weibo":      "content,title,cover_ocr_content",          # 正文+标题+封面OCR
+    "weibo":      "content,title,cover_ocr_content",
     "weixin":     "content,title",
     "xiaohongshu":"content,title,cover_ocr_content",
     "shortVideo": "content,title,cover_ocr_content",
-    "video":      "content,title,cover_ocr_content,video_labels",  # B站加视频标签
+    "video":      "content,title,cover_ocr_content,video_labels",
     "qa":         "content,title",
     "news":       "content,title",
     "forum":      "content,title",

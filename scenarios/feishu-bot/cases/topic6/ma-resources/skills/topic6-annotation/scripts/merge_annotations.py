@@ -61,8 +61,11 @@ TASK_MERGE_SPECS: dict[str, dict] = {
            "rename": {"r3_是否风险预警": "是否风险预警", "r3_判断说明": "风险判断说明"}},
     "r4": {"subdir": "R4_创意借鉴", "raw_cols": ["r4_是否营销发现", "r4_判断说明"],
            "rename": {"r4_是否营销发现": "是否营销发现", "r4_判断说明": "营销发现说明"}},
-    "r5": {"subdir": "R5_消费者行为", "raw_cols": ["r5_是否消费者行为", "r5_判断说明"],
-           "rename": {"r5_是否消费者行为": "是否消费者行为", "r5_判断说明": "消费者行为说明"}},
+    # R5 v8 主字段改名为“是否消费洞察”、说明字段为“洞察线索”;宽表沿用原列名,下游 E4 不变
+    "r5": {"subdir": "R5_消费者行为", "raw_cols": ["r5_是否消费洞察", "r5_洞察线索"],
+           "rename": {"r5_是否消费洞察": "是否消费者行为", "r5_洞察线索": "消费者行为说明"},
+           # v3 及更早的 r5_postprocess(历史项目重跑合并)仍是旧列名,新列缺失时按旧列读
+           "legacy_cols": {"r5_是否消费者行为": "r5_是否消费洞察", "r5_判断说明": "r5_洞察线索"}},
 }
 TASK_ORDER = ["c0", "r1", "r2", "r3", "r4", "r5"]
 
@@ -72,7 +75,7 @@ C3_SOURCE_COLS = ["提取节点", "是否节日营销", "是否窗口期内", "c
 VALID_PASS = 0.92
 VALID_FAIL = 0.80
 C2_COVERAGE_MIN = 0.50          # 营销可用行中「事件簇名」非空率
-USABLE_BASELINE = (0.37, 0.41)  # C0 是否营销可用=是 的基线(DeepSeek-V4-Flash + C0 v13, W43 全量 37.52%/小样本 41%)
+USABLE_BASELINE = (0.37, 0.41)  # C0 是否营销可用=是 的基线(DeepSeek-V4-Flash + C0 v13, W43 全量 37.52%/小样本 41%);C0 v17 放宽可用口径,实跑后回填
 USABLE_TOLERANCE = 0.05         # 偏离基线超过该值才提示人工复核
 PLATFORM_MIN_SHARE = 0.05       # 单平台行数占比低于该值视为「平台行数异常偏少」
 CLUSTER_MAX_SHARE = 0.10        # 最大事件簇占营销可用行比例超过该值视为「聚类规模极端」
@@ -300,6 +303,10 @@ def run(project_dir: str, mode: str, run_id: int) -> dict:
         if df_task is None:
             continue
 
+        legacy = {old: new for old, new in spec.get("legacy_cols", {}).items()
+                  if old in df_task.columns and new not in df_task.columns}
+        if legacy:
+            df_task = df_task.rename(columns=legacy)
         keep = ["row_id"] + [c for c in spec["raw_cols"] if c in df_task.columns]
         df = df.merge(df_task[keep], on="row_id", how="left")
         if f"{task}_parse_error" in df_task.columns:

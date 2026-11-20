@@ -97,6 +97,8 @@ pack_one() {
   fi
 
   local out="$OUT_DIR/$zip_name"
+  # zip -r 对已存在的 zip 是增量更新,源目录已删除的文件会残留在包里(如已移除的旧版 Prompt),必须先删
+  rm -f "$out" "$out.sha256"
   (cd "$stage" && zip -qr "$out" "$top_name")
   rm -rf "$stage"
 

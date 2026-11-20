@@ -33,7 +33,9 @@ try:
         IntakeValidationError,
         build_requirement_form,
         format_requirement_snapshot,
+        resolved_request_to_g1_defaults,
         normalize_requirement,
+        requirement_parsed_summary,
         summarize_requirement,
     )
     from .topic5_runner import Topic5CardSenderProtocol, Topic5Runner
@@ -45,7 +47,9 @@ except ImportError:  # pragma: no cover - standalone compatibility
         IntakeValidationError,
         build_requirement_form,
         format_requirement_snapshot,
+        resolved_request_to_g1_defaults,
         normalize_requirement,
+        requirement_parsed_summary,
         summarize_requirement,
     )
     from topic5_runner import Topic5CardSenderProtocol, Topic5Runner
@@ -279,7 +283,7 @@ def _plan_review_elements(payload: dict) -> list[dict]:
             continue
         suffix = ""
         if metric.get("name") == "NSR":
-            suffix = "（分母含中性）" if metric.get("neutral_in_denominator") else "（分母不含中性）"
+            suffix = "（分母=正面+负面，不含中性）"
         metric_lines.append(
             f"- **{metric.get('name') or '指标'}**：{metric.get('definition') or '未说明'}{suffix}"
         )
@@ -741,12 +745,15 @@ def build_hc_card(
     review_end = len(elements)
     elements.append({"tag": "hr"})
     if hc_kind == "G1":
+        parsed = requirement_parsed_summary(
+            (payload or {}).get("requirement") or payload or {})
         elements.append(
             {
                 "tag": "markdown",
                 "content": (
-                    "**需求确认**\n"
-                    "请填写并提交下面的需求问卷。需求确认后将编制分析方案。"
+                    (parsed + "\n\n" if parsed else "")
+                    + "**需求确认**\n"
+                    "请确认下面的业务解析并提交。需求确认后将编制分析方案。"
                 ),
             }
         )
@@ -760,7 +767,15 @@ def build_hc_card(
                     decision,
                     form_revision="requirement",
                 ),
-                defaults=DEMO_REQUIREMENT_DEFAULTS if job.mode == "demo" else None,
+                # FIX-07：有 campaign-keyword-generation 的 resolved_request 时预填 G1；
+                # demo 模式仍用固定样例。
+                defaults=(
+                    DEMO_REQUIREMENT_DEFAULTS if job.mode == "demo"
+                    else resolved_request_to_g1_defaults(
+                        ((payload or {}).get("keyword_generation") or {})
+                        .get("resolved_request")
+                    ) or None
+                ),
             )
         )
     else:

@@ -69,7 +69,7 @@ class TestReportRepairStructure(unittest.TestCase):
     def test_wordcloud_retries_forbidden_action_using_same_evidence(self):
         import wordcloud_adapter as adapter
         bad = {"topics": [{"title": "渠道参与", "terms": ["山姆"], "post_ids": ["post-1"],
-                            "rationale": "源词及原帖依据", "interpretation": "提升用户参与和转化。"}]}
+                            "rationale": "源词及原帖依据", "interpretation": "提升用户参与和购买转化。"}]}
         good = {"topics": [{**bad["topics"][0], "interpretation": "样本中出现试饮参与。"}]}
         with patch("semantic.llm_available", return_value=True), \
                 patch("semantic.chat_json", side_effect=[bad, good]) as model:
@@ -86,7 +86,7 @@ class TestReportRepairStructure(unittest.TestCase):
         with patch("semantic.llm_available", return_value=True), \
                 patch("semantic.chat_json", return_value={"topics": [{
                     "title": "渠道参与", "terms": ["山姆"], "rationale": "依据",
-                    "post_ids": ["post-1"], "interpretation": "提升转化。"}]}) as model:
+                    "post_ids": ["post-1"], "interpretation": "提升购买转化。"}]}) as model:
             with self.assertRaisesRegex(RuntimeError, "禁用措辞"):
                 adapter.ask(adapter.SYSTEM, "原帖post-1",
                             lambda data: adapter.validate_topics(data, {"山姆"}, {"post-1"},

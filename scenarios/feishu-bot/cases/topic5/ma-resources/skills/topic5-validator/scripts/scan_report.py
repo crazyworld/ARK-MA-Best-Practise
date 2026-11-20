@@ -32,10 +32,18 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
+# 本脚本可能被 validator.py 以 importlib.util.spec_from_file_location 直接加载，
+# 那种方式不会把本目录加入 sys.path，因此显式补齐后再导入同目录的 policy。
+_HERE = str(Path(__file__).resolve().parent)
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
 
-# ── 口径红线常量（与 handlers.py 对齐，单一事实源在 DAG params + knowledge/）──
-FORBIDDEN_TERMS = ("人均", "转化率", "转化", "性价比")
-METRIC_WHITELIST = ("条均互动量", "品牌提及率", "产品提及占比", "NSR")
+import policy  # noqa: E402  口径唯一事实源
+
+
+# ── 口径红线常量：全部来自 policy.py，本文件不再重复定义（FIX-57）──────
+FORBIDDEN_TERMS = policy.FORBIDDEN_METRIC_TERMS
+METRIC_WHITELIST = policy.METRIC_WHITELIST
 # 相加合计声量：多活动“不相加”，出现这些措辞视为口径违规（P0）。
 AGGREGATE_SUM_PATTERNS = ("合计声量", "总声量", "声量总和", "累计声量", "声量合计")
 # 否定/免责标记：同一行出现时说明是“不相加”口径声明而非违规断言，跳过。
@@ -78,9 +86,40 @@ SMALL_SAMPLE_DISCLOSURE_PATTERN = (
 )
 
 
-def _issue(iid: str, severity: str, title: str, evidence: str, locus: str = "") -> dict:
+def _issue(iid: str, severity: str, title: str, evidence: str, locus: str = "",
+           artifact: str = "report_md", fix_required: bool = True,
+           suggested_fix: str = "") -> dict:
+    """质检问题条目。
+
+    FIX-34：在客户要求的 severity/artifact/location/issue/fix_required/suggested_fix
+    之上保留原有 id/title/evidence/locus 字段，保证 HITL 卡片与 fix_report 的旧读取路径不变。
+      - title 即客户契约里的 issue
+      - locus 即客户契约里的 location
+    """
     return {"id": iid, "severity": severity, "title": title,
-            "evidence": evidence[:300], "locus": locus}
+            "evidence": evidence[:300], "locus": locus,
+            "artifact": artifact, "fix_required": bool(fix_required),
+            "suggested_fix": suggested_fix[:200]}
+
+
+_EVIDENCE_BLOCK = re.compile(
+    r"<!-- report-module:start -->.*?<!-- report-module:end -->", re.S)
+
+
+def _split_evidence_lines(md: str) -> tuple[str, int]:
+    """把代码生成的证据模块（热门表、代表原文）整块挖空，用于“作者措辞”类扫描。
+
+    证据里的原文引用属于事实，不是作者用词，不能被禁用词规则误判。
+    挖空时保持行数不变（整块替换为等量空行），使后续行号仍可对应原文件。
+    """
+    count = 0
+
+    def _blank(match):
+        nonlocal count
+        count += 1
+        return "\n" * match.group(0).count("\n")
+
+    return _EVIDENCE_BLOCK.sub(_blank, md or ""), count
 
 
 def _section(md, prefix):
@@ -192,12 +231,41 @@ def scan_markdown(
     lines = md.splitlines()
 
     # 1) 禁用措辞（P0）——逐行定位，给行号证据。
-    for ln_no, line in enumerate(lines, 1):
+    #    FIX-20： unconditionally 禁用的词用精确词表；语境相关的（性价比/渗透率）用正则，
+    #    避免把产品讨论里的“性价比”误判为指标越界。
+    #    代码生成的证据模块（hot tables / 观点代表原文）里的原文引用不属作者措辞，先剔除再扫。
+    scan_md, evidence_lines = _split_evidence_lines(md)
+    for ln_no, line in enumerate(scan_md.splitlines(), 1):
         for term in FORBIDDEN_TERMS:
             if term in line:
                 issues.append(_issue(
                     f"P0-forbidden-{term}", "P0", f"出现禁用措辞「{term}」",
                     f"L{ln_no}: {line.strip()}", locus=f"L{ln_no}"))
+        for pattern in policy.FORBIDDEN_METRIC_PATTERNS:
+            if pattern.search(line):
+                issues.append(_issue(
+                    f"P0-forbidden-metric-{ln_no}", "P0", "指标名称或解释越界（3.8）",
+                    f"L{ln_no}: {line.strip()}", locus=f"L{ln_no}"))
+
+    # 1b) NSR 分母口径写错（P0）——客户公式分母为正+负，不含中性（FIX-13 / 检查清单 2.4）。
+    for ln_no, line in enumerate(scan_md.splitlines(), 1):
+        if any(p.search(line) for p in policy.NSR_WRONG_DENOMINATOR_PATTERNS):
+            issues.append(_issue(
+                f"P0-nsr-denominator-{ln_no}", "P0",
+                "NSR 分母口径错误（应为正面+负面，不含中性）",
+                f"L{ln_no}: {line.strip()}", locus=f"L{ln_no}"))
+
+    # 1c) 声量贡献参考越界（P0）——分母<分子时不输出，不得出现 >100%（FIX-19 / LM #46）。
+    for ln_no, line in enumerate(scan_md.splitlines(), 1):
+        if "声量贡献参考" not in line:
+            continue
+        for pct in re.findall(r"(\d+(?:\.\d+)?)\s*%", line):
+            if float(pct) > 100.0:
+                issues.append(_issue(
+                    f"P0-voice-share-overflow-{ln_no}", "P0",
+                    "声量贡献参考超过 100%（分母小于分子时不应输出该指标）",
+                    f"L{ln_no}: {line.strip()}", locus=f"L{ln_no}"))
+                break
 
     # 2) 多活动相加/合计声量（P0）——同行含“不相加/逐个”等免责标记则视为口径声明，跳过。
     single_campaign = len((stats or {}).get("campaigns") or {}) == 1 or len(expected_campaigns or []) == 1
@@ -475,7 +543,7 @@ def scan_markdown(
         "forbidden_terms": list(FORBIDDEN_TERMS),
         "scan_mode": "full_scan",
         "degraded": bool(degraded),
-        "rules_version": "topic5-validator-qc-v1.8",
+        "rules_version": policy.RULES_VERSION,
     }
 
 
@@ -560,7 +628,7 @@ def main() -> int:
         "validator": "topic5-validator",
         "validation_id": f"validation_{uuid.uuid4().hex}",
         "subject": subject,
-        "rules_version": "topic5-validator-qc-v1.8",
+        "rules_version": policy.RULES_VERSION,
         "execution_source": args.execution_source,
         "validator_version": args.validator_version,
         "execution_ref": {

@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import os
 import sys
+
+import platforms
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -87,8 +89,21 @@ def _plan_window(plan: dict, *, baseline: bool) -> tuple[Optional[str], Optional
 
 
 def _keywords(plan: dict) -> list[str]:
-    """取品牌/关键词：优先 plan.keywords，回退 brand_words，再回退 brand。"""
-    kws = plan.get("keywords") or plan.get("brand_words")
+    """取检索式（FIX-01）。
+
+    优先用完整品牌检索表达式 ``brand_query``；其次 ``keywords``；再回退 ``brand_words``/``brand``。
+    **返回给 SSJH 的必须是可独立执行的检索式**，不能是拆开的字面词——
+    拆词后逐个查询会丢失 “+” 的且语义，并把重叠帖子重复计数。
+    """
+    for key in ("brand_query", "keywords"):
+        value = plan.get(key)
+        if isinstance(value, str) and value.strip():
+            return [value.strip()]
+        if isinstance(value, (list, tuple)):
+            items = [str(v).strip() for v in value if str(v).strip()]
+            if items:
+                return items
+    kws = plan.get("brand_words")
     if isinstance(kws, str):
         kws = [kws]
     if not kws:
@@ -97,17 +112,37 @@ def _keywords(plan: dict) -> list[str]:
     return [str(k) for k in kws if str(k).strip()]
 
 
+# FIX-02：所有 SSJH 文本检索显式关 OCR 字段（客户契约）。
+# 取数阶段关 OCR，与处理阶段读取封面识别字段是两件事。
+DEFAULT_KEYWORD_FIELDS = "content,title"
+
+
+def _combined_query(keywords: list[str]) -> str:
+    """多个检索式合并为一次查询（OR 连接），由 SSJH 服务端去重。"""
+    if len(keywords) == 1:
+        return keywords[0]
+    return "(" + ")|(".join(keywords) + ")"
+
+
 def _platforms(plan: dict) -> list[str]:
+    """平台 → SSJH 平台键（FIX-17）：中文标准名/slug 都经 platforms.py 归一。"""
     ps = plan.get("platforms")
     if isinstance(ps, str):
         ps = [p.strip() for p in ps.split(",") if p.strip()]
-    return list(ps) if ps else list(_FALLBACK_PLATFORMS)
+    keys = platforms.ssjh_keys(ps) if ps else []
+    return keys or list(_FALLBACK_PLATFORMS)
 
 
 def pull(plan: dict, *, baseline: bool = False, wordcloud: bool = False,
          filterword: str = "", content_mode: str = "ALL", msg_type: str = "1",
-         filter_ad: bool = False) -> dict:
-    """SSJH 取数（真路径）。多关键词各查一次后按 SSJH 合并语义合并声量维度。
+         filter_ad: bool = False,
+         keyword_fields: Optional[str] = None) -> dict:
+    """SSJH 取数（真路径）。
+
+    FIX-01：完整检索式只查询一次，由服务端按帖子去重；多检索式用 OR 合并成一次查询。
+    不再逐词查询后 ``_merge_full_results`` 相加——那会把同一条帖子按命中词重复计数，
+    并把“且”语义降级为“或”。
+    FIX-02：显式传 ``keyword_fields=content,title`` 关闭封面 OCR / 视频标签检索。
 
     返回 SSJH 11 维聚合 dict（含 articles/cloud_word/...）。失败抛异常由调用方降级。
     """
@@ -118,21 +153,21 @@ def pull(plan: dict, *, baseline: bool = False, wordcloud: bool = False,
     if not kws:
         raise ValueError("SSJH: confirmed_plan 缺少关键词（keywords/brand）")
     platforms = _platforms(plan)
+    fields = (keyword_fields or plan.get("ssjh_keyword_fields")
+              or DEFAULT_KEYWORD_FIELDS)
+    query = _combined_query(kws)
 
     Skill = _load_skill()
     client = Skill()  # 凭据从环境变量 SSJH_API_TOKEN 读取
-    results = []
-    for kw in kws:
-        r = client.run(
-            keyword=kw, start_date=start, end_date=end, platforms=platforms,
-            filterword=filterword, content_mode=content_mode, msg_type=msg_type,
-            filter_ad=filter_ad, mode="full", save=False,
-        )
-        results.append(r)
-    merged = results[0] if len(results) == 1 else client._merge_full_results(results)
+    merged = client.run(
+        keyword=query, start_date=start, end_date=end, platforms=platforms,
+        filterword=filterword, content_mode=content_mode, msg_type=msg_type,
+        filter_ad=filter_ad, keyword_fields=fields, mode="full", save=False,
+    )
     merged.setdefault("meta", {})
     merged["meta"].update({"start_date": start, "end_date": end,
-                           "keywords": kws, "platforms": platforms,
+                           "keywords": kws, "query": query,
+                           "keyword_fields": fields, "platforms": platforms,
                            "window": "baseline" if baseline else "campaign"})
     # RunState canonicalizes dict keys for hashing. Arrays retain source order,
     # which the customer's Top100 tie rule requires across artifact persistence.

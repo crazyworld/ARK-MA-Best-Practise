@@ -35,7 +35,7 @@ class TestSemanticDegradedContract(unittest.TestCase):
         self.st.params["ugc_category_mode"] = "fixed_four"
         out = handlers.ugc_discovery({"id": "n08", "name": "ugc"}, self.st, {})
         art = out["artifacts"]["ugc_category_list"]
-        self.assertEqual(art["categories"], ["模仿打卡", "创意改编", "测评分享", "自发安利"])
+        self.assertEqual(art["categories"], ["模仿打卡", "创意改编", "测评分享", "晒单分享"])
         self.assertEqual(art["source"], "fixed")
         self.assertNotIn("degraded", art)  # 固定四类不是降级，是正常口径路径
 
@@ -134,19 +134,45 @@ class TestSemanticDegradedContract(unittest.TestCase):
         with self.assertRaises(ValueError):
             handlers._assert_no_forbidden_terms("本活动人均互动量很高")
 
-    def test_report_guardrail_drops_forbidden_sentence_without_rewrite(self):
+    def test_report_guardrail_flags_forbidden_without_deleting_sentences(self):
+        """FIX-20：命中禁用措辞只标记，不删句（删句会连带删掉数据与原文）。"""
         md = (
             "# 总结与建议\n"
             "品牌提及率保持稳定。购买转化仍需后续观察。NSR 表现积极。\n"
             "- 性价比是主要优势\n"
         )
-        cleaned, removed = handlers._strip_forbidden_sentences(md)
-        self.assertIn("品牌提及率保持稳定。", cleaned)
-        self.assertIn("NSR 表现积极。", cleaned)
-        self.assertNotIn("转化", cleaned)
-        self.assertNotIn("性价比", cleaned)
-        self.assertEqual(len(removed), 2)
-        handlers._assert_no_forbidden_terms(cleaned)
+        hits = handlers._scan_forbidden(md)
+        # 正文原样保留（不删句）
+        self.assertIn("购买转化", md)
+        self.assertIn("性价比是主要优势", md)
+        # KS_Metrics_Calculation.md:212-219 禁用词表里「购买转化」「转化率」属无条件
+        # 禁用；单字「转化」不在表内（不收，避免误伤用户原话），故断言具体词组。
+        self.assertTrue(any(h["term"] == "购买转化" for h in hits), hits)
+        self.assertFalse(any(h["term"] == "转化" for h in hits), hits)
+        with self.assertRaisesRegex(ValueError, "禁用措辞"):
+            handlers._assert_no_forbidden_terms(md)
+
+    def test_metric_scope_only_flags_contextual_terms(self):
+        """“性价比/渗透率”是条件禁用：达人/层级/声量语境越界，产品讨论放行。"""
+        bad = handlers._scan_forbidden("头部达人性价比更高，适合投放。")
+        self.assertTrue(any(h["kind"] == "metric_scope" for h in bad))
+        bad2 = handlers._scan_forbidden("活动声量渗透率为 12%。")
+        self.assertTrue(any(h["kind"] == "metric_scope" for h in bad2))
+        good = handlers._scan_forbidden("用户普遍反馈性价比高，愿意回购。")
+        self.assertEqual(good, [])
+
+    def test_report_guardrail_exempts_evidence_quotes(self):
+        """证据模块里的原文引用不是作者措辞，必须放行（避免误删产品讨论）。"""
+        md = (
+            "# 口碑分析\n"
+            "正面观点以口感讨论为主。\n"
+            "<!-- report-module:start -->\n"
+            "| 排名 | 内容 |\n"
+            "| 1 | 用户说这杯性价比很高、值得回购 |\n"
+            "<!-- report-module:end -->\n"
+        )
+        self.assertEqual(handlers._scan_forbidden(md), [])
+        handlers._assert_no_forbidden_terms(md)
 
     def test_write_report_rejects_invalid_structure_without_fallback(self):
         stats = {"campaigns": {"campA": {"metrics": {}}}, "brand": {}}

@@ -15,7 +15,7 @@ class LabelGroundingTest(unittest.TestCase):
             "content": "中奖了之后在门店购买了酸奶。", "content_mode": "UGC",
             "author": "不得复制的作者字段", "_review_source_index": 8,
         }]
-        self.samples, self.catalog = label_review.source_catalog(self.rows)
+        self.samples, self.catalog, self.sampling = label_review.source_catalog(self.rows)
         quote_id = next(key for key in self.catalog if ":content:" in key)
         self.response = {"candidates": [{
             "name": "购买行动", "definition": "明确描述购买行为。", "boundary": "仅出现话题不纳入。",

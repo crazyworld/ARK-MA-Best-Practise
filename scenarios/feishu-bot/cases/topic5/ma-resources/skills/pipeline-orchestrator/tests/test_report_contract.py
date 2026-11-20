@@ -51,7 +51,7 @@ class TestReportContract(unittest.TestCase):
                  "ai_sentiment": 1, "content": str(i), "interaction_cnt": i}
                 for i in range(12)]
         rows[0]["opinion"] = "N/A"
-        bundle = handlers._campaign_stats(rows, [], [], True)
+        bundle = handlers._campaign_stats(rows, [], [])
         opinion = bundle["opinion_analysis"]["positive"]
         self.assertEqual(opinion["sample_size"], 12)
         self.assertEqual(opinion["top5"][0]["share"], 11 / 12)
@@ -69,7 +69,7 @@ class TestReportContract(unittest.TestCase):
                  "ai_sentiment": 1 if i < 12 else -1 if i < 23 else 0,
                  "opinion": "口味好" if i < 12 else "体验差", "ugc_category": "测评",
                  "discussion_dimension": "品牌"} for i in range(30)]
-        bundle = handlers._campaign_stats(rows, ["口味"], [], True)
+        bundle = handlers._campaign_stats(rows, ["口味"], [])
         stats = {"brand": {"trend": {"xiaohongshu": {"20261001": 5, "20261002": 7}},
                            "wordcloud": {"xiaohongshu": {"口味": 12}},
                            "top_content": contract.top_content(rows)},

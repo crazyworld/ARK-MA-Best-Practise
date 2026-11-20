@@ -85,7 +85,7 @@ C0_PROMPT_DIR = (
     / "prompts"
     / "C0_基础事实"
 )
-C0_V13_PROMPT = C0_PROMPT_DIR / "v13.md"
+C0_ACTIVE_PROMPT = C0_PROMPT_DIR / "v17.md"
 MARKETING_CALENDAR = (
     TOPIC6_DIR
     / "ma-resources"
@@ -1235,19 +1235,19 @@ def test_pipeline_e_checkpoints_each_section_and_resumes_only_failure(
     assert set(saved["sections"]) == {"e1", "ex"}
 
 
-def test_c0_active_version_is_v13_and_keeps_output_contract():
-    """C0 活跃版 = 客户 V2 锁定的 v13;SKILL.md 权威表、版本镜像与 Prompt 文件三处一致,9 字段契约不变。"""
-    prompt = C0_V13_PROMPT.read_text(encoding="utf-8")
+def test_c0_active_version_is_v17_and_keeps_output_contract():
+    """C0 活跃版 = 客户 2026-11-20 原样替换的 v17;SKILL.md 权威表、版本镜像与 Prompt 文件三处一致,9 字段契约不变。"""
+    prompt = C0_ACTIVE_PROMPT.read_text(encoding="utf-8")
     for field in ("商业实体", "热点驱动词", "行业归属", "营销触发方式", "营销维度",
                   "平台原生形式", "不可用原因", "是否营销可用", "判断说明"):
         assert f'"{field}"' in prompt
     for placeholder in ("{{platform}}", "{{title}}", "{{desc}}"):
         assert placeholder in prompt
-    assert sorted(p.name for p in C0_PROMPT_DIR.glob("*.md")) == ["v13.md"]  # 只保留活跃版,防误取
+    assert sorted(p.name for p in C0_PROMPT_DIR.glob("*.md")) == ["v17.md"]  # 只保留活跃版,防误取
     ann = C0_PROMPT_DIR.parents[1]
-    assert "C0 v13" in (ann / "SKILL.md").read_text(encoding="utf-8")
+    assert "C0 v17" in (ann / "SKILL.md").read_text(encoding="utf-8")
     status = (ann.parents[1] / "memory" / "topic6" / "_版本状态.md").read_text(encoding="utf-8")
-    assert "/mnt/skills/topic6-annotation/prompts/C0_基础事实/v13.md" in status
+    assert "/mnt/skills/topic6-annotation/prompts/C0_基础事实/v17.md" in status
 
 
 def test_run_config_state_deep_merges_parallel_task_results(tmp_path):

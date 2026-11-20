@@ -417,6 +417,25 @@ class TestBuildHumanOutputs(unittest.TestCase):
             )
 
 
+def _review_note(node_id):
+    """FIX-30：标注审核节点的独立 Validator 产物（全判对，走 pass 分支）。"""
+    import json
+    field = "sentiment" if node_id == "n09r_review_r1" else "opinion"
+    return json.dumps({
+        "accuracy": {field: 1.0},
+        "verdict_count": 10,
+        "field_stats": {field: {"total": 10, "correct": 10, "wrong": 0}},
+        "wrong_ids": {},
+        "qc_metadata": {
+            "actor_role": "Validator",
+            "mode": "independent-agent",
+            "validator_id": "topic5-validator",
+            "generated_at": "2026-01-01T00:00:00+08:00",
+            "input_artifacts": [],
+        },
+    }, ensure_ascii=False)
+
+
 class TestEndToEndViaBridge(unittest.TestCase):
     """用 hc_bridge 驱动所有人工关卡跑到 completed（模拟 Gateway resume 回路）。"""
 
@@ -446,6 +465,8 @@ class TestEndToEndViaBridge(unittest.TestCase):
                 )
                 if st.human["node"] == "n17_validate":
                     _write_qc(st)
+                if st.human["node"] in hc_bridge.ANNOTATION_REVIEW_NODES:
+                    note = _review_note(st.human["node"])
                 outs = hc_bridge.build_human_outputs(st, "pass", note)
                 hc_bridge.clear_hc_pending(st.run_dir)
                 engine.resume(self.dag, st, human_outputs=outs or {})

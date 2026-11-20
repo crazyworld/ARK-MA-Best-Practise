@@ -73,11 +73,10 @@ governance:
 params:
   annotation_routing_threshold: 1000
   ugc_category_mode: dynamic                 # 根据真实UGC发现类别，经标签关卡确认
-  nsr_denominator_includes_neutral: true     # 默认含中性
   report_chapters: five                      # 默认五部分
   qc_max_rounds: 3
   user_confirm_timeout_days: 2
-  validator_rules_version: topic5-validator-qc-v1.7
+  validator_rules_version: topic5-validator-qc-v1.9
 
 # ─── 可执行节点层（engine 直接驱动；gate/module/control_plane 为治理标注）───
 nodes:
@@ -172,7 +171,11 @@ nodes:
     side_effect: external-stat-pull
     idempotency: "ssjh:baseline:{task_id}:{resource_lock}"
     retry: {max: 2, on_fail: exception_bypass}
-    next: n12_aggregate                      # 基准直接汇入聚合(join)，不串在清洗链上
+    # 基准期只提供 brand_stats_baseline（n12 的 inputs 已声明该依赖）；
+    # 不再把 n12 挂在本节点 next 上：否则 n12 会被提前入队，
+    # 轮次二一完成就绪并抢在 n11r_gate 之前执行（FIX-30 审核形同虚设）。
+    # n12 的唯一触发器是 n11r_gate 的 pass 路由。
+    next: null
 
   - id: n07_clean
     name: 活动数据清洗
@@ -185,7 +188,8 @@ nodes:
     side_effect: none
     retry: {max: 1, on_fail: pause}
     checkpoint: true
-    next: [n08_ugc_discovery, n09_annotate_r1]   # fan-out：UGC 发现 ∥ 轮次一标注，都只吃 cleaned_data
+    # FIX-31：UGC 发现改吃轮次一的「相关且 UGC」行，移到 n09r 审核通过之后
+    next: n09_annotate_r1
 
   # ③ AI 标注（含操作级 HC：观点确认）
   - id: n08_ugc_discovery
@@ -194,7 +198,7 @@ nodes:
     mode: agent
     handler: ugc_discovery
     module: ugc_participation
-    inputs: [cleaned_data]
+    inputs: [annotated_round1, r1_review]
     outputs: [ugc_category_list]
     success: 动态发现类别及 review_items（定义、边界、核验原帖）；categories 字符串数组兼容保留
     retry: {max: 1, on_fail: pause}
@@ -213,7 +217,45 @@ nodes:
     idempotency: "annot:r1:{task_id}:{resource_lock}"
     retry: {max: 2, on_fail: pause}
     checkpoint: true
-    next: n09b_opinion_candidates
+    next: n09r_review_r1
+
+  # ③-1 轮次一标注审核（FIX-30·独立 Validator 抽检，不重写数据）
+  - id: n09r_review_r1
+    name: 轮次一标注审核（Validator 语义抽检）
+    owner: Validator
+    mode: agent
+    handler: annotation_review
+    pause_capable: true
+    # 待审行为 annotated_round1，清洗上下文为 cleaned_data（本流水线的清洗产物名）
+    inputs: [annotated_round1, cleaned_data]
+    outputs: [r1_review]
+    success: 分层抽检情感/相关性并给出逐帖判定与正确率；只输出结论，不改标注
+    # 只读审核：不改数据、不改标注字段；抽样为确定性计划（seed=42）
+    side_effect: none
+    checkpoint: true
+    next: n09r_gate
+
+  - id: n09r_gate
+    name: 轮次一审核路由
+    owner: engine
+    mode: decision
+    handler: annotation_review_decision
+    routes:
+      pass: [n09b_opinion_candidates, n08_ugc_discovery]   # 观点发现 ∥ UGC 发现
+      retry: n09r_rework
+      maxed: n_hc7_escalate
+
+  - id: n09r_rework
+    name: 轮次一重标准备（invalidate + 增量重标范围）
+    owner: Topic5Agent
+    mode: code
+    handler: annotation_rework
+    inputs: [r1_review]
+    outputs: [annotation_rework_plan]
+    success: 按错误类型判定重标范围；invalidate 该轮标注产物及其下游，rerun_epoch 递增
+    side_effect: none
+    retry: {max: 0, on_fail: pause}
+    next: n09_annotate_r1
 
   - id: n09b_opinion_candidates
     name: 观点候选生成（供 HC 确认）
@@ -253,7 +295,43 @@ nodes:
     idempotency: "annot:r2:{task_id}:{resource_lock}"
     retry: {max: 2, on_fail: pause}
     checkpoint: true
-    next: n12_aggregate
+    next: n11r_review_r2
+
+  # ③-2 轮次二标注审核（FIX-30·独立 Validator 抽检）
+  - id: n11r_review_r2
+    name: 轮次二标注审核（Validator 语义抽检）
+    owner: Validator
+    mode: agent
+    handler: annotation_review
+    pause_capable: true
+    inputs: [annotated_data, confirmed_opinion_labels]
+    outputs: [r2_review]
+    success: 分层抽检观点/UGC方式/讨论维度并给出逐帖判定与正确率；只输出结论
+    side_effect: none
+    checkpoint: true
+    next: n11r_gate
+
+  - id: n11r_gate
+    name: 轮次二审核路由
+    owner: engine
+    mode: decision
+    handler: annotation_review_decision
+    routes:
+      pass: n12_aggregate
+      retry: n11r_rework
+      maxed: n_hc7_escalate
+
+  - id: n11r_rework
+    name: 轮次二重标准备（invalidate + 增量重标范围）
+    owner: Topic5Agent
+    mode: code
+    handler: annotation_rework
+    inputs: [r2_review]
+    outputs: [annotation_rework_plan]
+    success: 按错误类型判定重标范围；invalidate 该轮标注产物及其下游，rerun_epoch 递增
+    side_effect: none
+    retry: {max: 0, on_fail: pause}
+    next: n11_annotate_r2
 
   # ④ 统计聚合
   - id: n12_aggregate
@@ -262,7 +340,9 @@ nodes:
     mode: code
     handler: aggregate
     module: activity_performance
-    inputs: [annotated_data, brand_stats, brand_stats_baseline]
+    # r2_review 是聚合的前置条件：轮次二审核未完成不得进入统计（FIX-30）。
+    # 该 artifact 由 n11r_review_r2 产出，缺失时 n12 不就绪，避免被 n06 提前入队后抢跑。
+    inputs: [annotated_data, r2_review, brand_stats, brand_stats_baseline]
     outputs: [stats_bundle]
     success: 各活动独立统计（趋势/互动/情感/PGC与UGC各Top10/正负观点及代表原文/UGC占比及代表内容/分维NSR）
     # 口径修订 2026-10-21:活动层所有指标分母=活动相关内容条数;指标用条均互动量/品牌提及率/产品提及占比

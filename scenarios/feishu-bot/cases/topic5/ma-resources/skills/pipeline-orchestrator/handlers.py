@@ -28,16 +28,47 @@ import feishu
 import validator as validator_mod
 import report_contract
 import label_review
+import platforms
+import lift  # FIX-15 活动拉升（日均口径）
+import campaign_type_inference  # FIX-10 信号矩阵
+import annotation_structure as annotation_structure_mod  # FIX-29 结构预检
+import review_plan as review_plan_mod  # FIX-30 标注抽检计划
 
 # ── 业务口径常量（源：飞书 wiki 活动复盘口径 + knowledge/_字段速查.md）────────
 # 指标命名白名单：活动层只允许这些指标名；禁用“人均/转化率/性价比”等无数据支撑说法。
-METRIC_WHITELIST = ("条均互动量", "品牌提及率", "产品提及占比", "NSR")
-FORBIDDEN_METRIC_TERMS = ("人均", "转化率", "转化", "性价比")
-# 平台中文名 → 规整英文 slug（site_name 回退映射）。
-_PLATFORM_CN = {
-    "小红书": "xiaohongshu", "抖音": "douyin", "哔哩哔哩": "bilibili",
-    "B站": "bilibili", "微博": "weibo", "微信": "weixin", "微信公众号": "weixin",
-}
+_POLICY = validator_mod.load_policy()
+# 口径唯一事实源是 topic5-validator/scripts/policy.py（FIX-57）。定位失败时回退本地兼容
+# 常量，并由 test_policy_single_source 断言两侧一致——不在导入期抛错。
+METRIC_WHITELIST = tuple(
+    getattr(_POLICY, "METRIC_WHITELIST", None)
+    or ("条均互动量", "条均互动倍数", "品牌提及率", "品牌主导讨论占比",
+        "产品提及占比", "声量贡献参考", "NSR")
+)
+FORBIDDEN_METRIC_TERMS = tuple(
+    getattr(_POLICY, "FORBIDDEN_METRIC_TERMS", None)
+    or ("人均", "转化率", "转化", "性价比")
+)
+FORBIDDEN_METRIC_PATTERNS = tuple(
+    getattr(_POLICY, "FORBIDDEN_METRIC_PATTERNS", None) or ()
+)
+NSR_WRONG_DENOMINATOR_PATTERNS = tuple(
+    getattr(_POLICY, "NSR_WRONG_DENOMINATOR_PATTERNS", None) or ()
+)
+DISCUSSION_DIMENSION_LABELS = dict(
+    getattr(_POLICY, "DISCUSSION_DIMENSION_LABELS", None)
+    or {"品牌": "品牌主导讨论", "产品": "产品主导讨论", "活动": "活动流程与获取主导讨论"}
+)
+DIMENSION_NSR_MIN_PN = int(
+    getattr(_POLICY, "DIMENSION_NSR_MIN_POSITIVE_NEGATIVE", 30)
+)
+KOL_THRESHOLDS = dict(getattr(_POLICY, "KOL_THRESHOLDS", None) or {})
+KOL_LEVEL_LABELS = dict(getattr(_POLICY, "KOL_LEVEL_LABELS", None) or {})
+KOL_EFFECTIVENESS_LEVELS = tuple(
+    getattr(_POLICY, "KOL_EFFECTIVENESS_LEVELS", None) or ("head", "waist", "tail")
+)
+RULES_VERSION = str(getattr(_POLICY, "RULES_VERSION", "") or "topic5-validator-qc-v1.9")
+# content_scope → SSJH content_mode（FIX-03）。平台映射见 platforms.py。
+CONTENT_MODE_BY_SCOPE = {"all": "ALL", "ugc": "UGC", "pgc": "PGC"}
 # 内容类型规整：SSJH content_mode 的“未知”归一为 UKN。
 _CONTENT_TYPE = {"UGC": "UGC", "PGC": "PGC", "未知": "UKN", "UKN": "UKN"}
 # 周期过滤后被剔除比例超过此阈值 → 置 needs_sampling_review，供人工抽查。
@@ -94,25 +125,89 @@ def _iter_ssjh_rows(brand_stats: dict) -> list[dict]:
 
 
 def _normalize_platform(row: dict, fallback: str | None) -> str:
-    """派生规整平台 slug：优先行内 _platform；回退 site_name 中文映射。"""
+    """派生平台 slug（FIX-17）：优先行内 _platform，回退 site_name 映射。
+
+    行内 _platform 在 excel_source 阶段已是 slug；这里兜中文名/别名与旧 Run 值，
+    最后按站点名映射，未映射落 other。展示中文见 platforms.display()。
+    """
     p = row.get("_platform") or fallback
     if p:
-        return str(p)
-    return _PLATFORM_CN.get(str(row.get("site_name") or ""), "unknown")
+        text = str(p)
+        if text in platforms.CANON:
+            return platforms.to_slug(text)
+        if text == platforms.OTHER:
+            return platforms.OTHER_SLUG
+        for canon, slug in platforms.CANON.items():
+            if slug == text:
+                return slug
+        alias = platforms.ALIASES.get(text)
+        if alias:
+            return platforms.to_slug(alias)
+    slug, _ = platforms.normalize_slug(str(row.get("site_name") or ""))
+    return slug
+
+
+# 达人层级平台阈值（FIX-16）：KS_Data_Processing.md:44-55 平台阈值表。
+# 键为 platforms.CANON 的标准中文名；值为 (头部, 腰部, 尾部) 的下限。
+# 「新闻」「公众号」不参与达人层级（原文 N/A）。
+KOL_THRESHOLDS: dict[str, tuple[int, int, int] | None] = {
+    "抖音": (1_000_000, 100_000, 10_000),
+    "微博": (1_000_000, 100_000, 10_000),
+    "B站": (1_000_000, 100_000, 10_000),
+    "快手": (1_000_000, 100_000, 10_000),
+    "小红书": (500_000, 50_000, 10_000),
+    "视频号": (500_000, 50_000, 10_000),
+    "知乎": (100_000, 10_000, 1_000),
+    "新闻": None,
+    "微信": None,
+    "电商": None,
+    "其他": None,
+}
+
+KOL_LEVEL_LABELS = {
+    "head": "头部", "waist": "腰部", "tail": "尾部",
+    "ordinary": "素人", "unknown": "未知", "n/a": "不适用",
+}
+# 只有这三层参与达人层级效能统计（排除素人与未知）。
+KOL_EFFECTIVE_LEVELS = ("head", "waist", "tail")
+
+
+def _kol_fans(row: dict) -> int | None:
+    """粉丝数：缺失、空、0 一律视为未知（FIX-16，原版不把 0 当素人）。"""
+    fans = row.get("fans") if row.get("fans") is not None else row.get("fans_count")
+    if fans is None or (isinstance(fans, str) and not fans.strip()):
+        return None
+    try:
+        value = int(fans)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
 
 
 def _derive_kol_level(row: dict) -> str:
-    """派生 KOL 层级：按粉丝数分级；无有效粉丝数 → unknown（下游不生成达人层级图）。"""
-    fans = row.get("fans") if row.get("fans") is not None else row.get("fans_count")
-    try:
-        fans = int(fans)
-    except (TypeError, ValueError):
+    """按平台阈值派生达人层级（FIX-16）。
+
+    先取行内平台（FIX-17 已标准化为 slug），再查平台阈值表：
+      - 新闻/公众号等不参与平台 → "n/a"；
+      - 粉丝数缺失或为 0 → "unknown"；
+      - 其余按该平台的头部/腰部/尾部下限分级，低于尾部下限 → 素人。
+    """
+    slug = row.get("_platform")
+    if not slug:
+        slug = _normalize_platform(row, None)
+    canon = platforms.display(str(slug or ""))
+    thresholds = KOL_THRESHOLDS.get(canon)
+    if thresholds is None:
+        return "n/a"
+    fans = _kol_fans(row)
+    if fans is None:
         return "unknown"
-    if fans >= 500_000:
+    head, waist, tail = thresholds
+    if fans >= head:
         return "head"
-    if fans >= 50_000:
+    if fans >= waist:
         return "waist"
-    if fans >= 5_000:
+    if fans >= tail:
         return "tail"
     return "ordinary"
 
@@ -176,6 +271,32 @@ def load_context(node, state, ctx):
     return {"artifacts": {"exec_context": _stub_payload(node, "lm_error_cases")}}
 
 
+def _apply_filterword_decision(plan: dict, rows: list, state) -> tuple[list, int]:
+    """按 filterword_decision 剔除命中活动过滤词的行（FIX-11）。"""
+    decided = state.read_artifact("filterword_decision") or {}
+    if str(decided.get("decision") or "").strip() not in ("剔除命中行", "drop", "exclude"):
+        return rows, 0
+    campaigns = [c for c in (plan.get("campaigns") or []) if isinstance(c, dict)]
+    if not campaigns:
+        campaigns = [{"id": plan.get("activity_name"),
+                      "filter_words": plan.get("activity_filter") or []}]
+    drop: set[int] = set()
+    for camp in campaigns:
+        words = camp.get("filter_words") or plan.get("activity_filter") or []
+        if not words:
+            continue
+        name = str(camp.get("id") or camp.get("name") or "")
+        scoped = [row for row in rows
+                  if not name or str(row.get("analysis_object") or name) == name]
+        result = excel_source.check_filterwords(scoped, words)
+        for hit in result["hits"]:
+            drop.add(id(scoped[hit["row_index"]]))
+    if not drop:
+        return rows, 0
+    kept = [row for row in rows if id(row) not in drop]
+    return kept, len(rows) - len(kept)
+
+
 @handler("clean_campaign")
 def clean_campaign(node, state, ctx):
     """活动数据清洗（本地确定性，无副作用）。
@@ -197,7 +318,10 @@ def clean_campaign(node, state, ctx):
     raw_rows = list(excel_data["rows"])
     meta = excel_data.get("meta") or {}
     source = "user_uploaded_excel"
-    total_in = len(raw_rows)
+    # FIX-11：用户在 filterword_decision 里选择剔除时，清洗阶段按同一套过滤词剔除命中行。
+    # 决定由 n04 的 HumanPause 拿到；这里只在明确要求剔除时动手。
+    raw_rows, filterword_removed = _apply_filterword_decision(plan, raw_rows, state)
+    total_in = len(raw_rows) + filterword_removed
 
     # 活动窗口：优先 confirmed_plan，回退 SSJH meta 的 start/end（YYYY-MM-DD → YYYYMMDD）。
     def _ymd(s):
@@ -211,7 +335,8 @@ def clean_campaign(node, state, ctx):
 
     seen: set[str] = set()
     cleaned: list[dict] = []
-    removed = {"out_of_period": 0, "duplicate": 0, "no_date": 0}
+    removed = {"out_of_period": 0, "duplicate": 0, "no_date": 0,
+               "filterword": filterword_removed}  # FIX-11
     for r in raw_rows:
         ymd = _publish_ymd(r)
         if ymd is None:
@@ -325,15 +450,19 @@ def _mentions(row: dict, words: list[str]) -> bool:
 
 
 def _campaign_stats(rows: list[dict], brand_words: list[str], product_words: list[str],
-                    include_neutral: bool) -> dict:
+                    brand_avg_interaction: float | None = None) -> dict:
     """单活动指标：只统计传入的活动相关行；指标名走白名单。"""
     n = len(rows)
     interaction = sum(int(r.get("interaction_cnt") or 0) for r in rows)
     pos = sum(1 for r in rows if _row_sentiment(r) == 1)
     neu = sum(1 for r in rows if _row_sentiment(r) == 0)
     neg = sum(1 for r in rows if _row_sentiment(r) == -1)
-    nsr_denom = (pos + neu + neg) if include_neutral else (pos + neg)
+    # NSR 分母恒为「正面+负面」，不含中性（客户 KS_Metrics_Calculation v0.12 /
+    # 错误案例 #13：含中性会把 NSR 严重稀释，历史事故 +57.6% 被算成 +15.2%）。
+    nsr_denom = pos + neg
     # 提及漏斗（嵌套）：产品提及只在品牌提及行中计，保证次层 ≤ 首层。
+    # 原版口径（aggregate.py:187-193）：只有提供品牌词时才输出 Tier2 及以上，
+    # 没有品牌词时仅输出 Tier1，不输出 0% 的品牌提及率。
     brand_rows = [r for r in rows if _mentions(r, brand_words)]
     brand_hits = len(brand_rows)
     product_hits = sum(1 for r in brand_rows if _mentions(r, product_words))
@@ -343,6 +472,7 @@ def _campaign_stats(rows: list[dict], brand_words: list[str], product_words: lis
     platform_dist: dict[str, int] = {}
     kol_dist: dict[str, int] = {}
     kol_interactions: dict[str, int] = {}
+    all_level_dist: dict[str, int] = {}
     content_dist: dict[str, int] = {}
     ugc_dist: dict[str, int] = {}
     dimension_rows: dict[str, list[dict]] = {}
@@ -354,11 +484,17 @@ def _campaign_stats(rows: list[dict], brand_words: list[str], product_words: lis
                 r.get("interaction_cnt") or 0
             )
         platform_dist[r.get("_platform", "unknown")] = platform_dist.get(r.get("_platform", "unknown"), 0) + 1
-        kol_dist[r.get("_kol_level", "unknown")] = kol_dist.get(r.get("_kol_level", "unknown"), 0) + 1
-        kol_interactions[r.get("_kol_level", "unknown")] = (
-            kol_interactions.get(r.get("_kol_level", "unknown"), 0)
-            + int(r.get("interaction_cnt") or 0)
-        )
+        level = r.get("_kol_level", "unknown")
+        all_level_dist[level] = all_level_dist.get(level, 0) + 1
+        # 达人层级效能只统计活动相关 PGC 的头部/腰部/尾部（FIX-16）：
+        # 排除素人与未知，分母是三层的帖子总数，不含 UGC。
+        if (level in KOL_EFFECTIVE_LEVELS
+                and _CONTENT_TYPE.get(str(r.get("content_mode") or ""), "UKN") == "PGC"):
+            kol_dist[level] = kol_dist.get(level, 0) + 1
+            kol_interactions[level] = (
+                kol_interactions.get(level, 0)
+                + int(r.get("interaction_cnt") or 0)
+            )
         ct = _CONTENT_TYPE.get(str(r.get("content_mode") or ""), "UKN")
         content_dist[ct] = content_dist.get(ct, 0) + 1
         category = str(r.get("ugc_category") or "").strip()
@@ -368,30 +504,64 @@ def _campaign_stats(rows: list[dict], brand_words: list[str], product_words: lis
         if dimension and dimension != "N/A":
             dimension_rows.setdefault(dimension, []).append(r)
 
+    # 主要讨论对象三分类（FIX-14）：键名按客户 Report 命名映射，
+    # 禁止简称为「品牌NSR/产品NSR/活动NSR」。
+    _DIM_KEY_MAP = {
+        "品牌": "品牌主导讨论",
+        "产品": "产品主导讨论",
+        "活动": "活动流程与获取主导讨论",
+    }
     dimension_nsr = {}
-    for dimension, group in dimension_rows.items():
+    for dim_key, dim_label in _DIM_KEY_MAP.items():
+        group = dimension_rows.get(dim_key) or []
         gpos = sum(1 for row in group if _row_sentiment(row) == 1)
         gneu = sum(1 for row in group if _row_sentiment(row) == 0)
         gneg = sum(1 for row in group if _row_sentiment(row) == -1)
-        gdenom = gpos + gneu + gneg if include_neutral else gpos + gneg
-        enough = len(group) >= 30
-        dimension_nsr[dimension] = {
+        # 分维 NSR：分母与门槛都按「正面+负面」，不按总行数
+        # （客户错误案例 #35：KS 与脚本对中性占比高的维度结论相反）。
+        gdenom = gpos + gneg
+        enough = gdenom >= 30
+        dimension_nsr[dim_label] = {
             "status": "available" if enough else "insufficient_sample",
-            "sample_size": len(group),
+            # sample_size 即门槛所用口径（正面+负面），row_count 保留该维度总行数。
+            "sample_size": gdenom,
+            "row_count": len(group),
+            "positive": gpos,
+            "negative": gneg,
+            "neutral": gneu,
             "value": round((gpos - gneg) / gdenom, 4)
             if enough and gdenom else None,
         }
+    # 三组覆盖之和（FIX-14）。原版 aggregate.py:161-164 的做法是打印警告并说明
+    # 「分维度覆盖声量将偏低」，不报错 —— 这里同样只留痕交报告说明。
+    dimension_nsr_total = sum(item["row_count"] for item in dimension_nsr.values())
+    dimension_missing = max(n - dimension_nsr_total, 0)
 
+    # 达人层级效能的分母：只算头部/腰部/尾部（FIX-16），不含素人、未知、不适用。
+    kol_effective_total = sum(kol_dist.values())
+    ugc_total = content_dist.get("UGC", 0)
     metrics = {
         "活动相关条数": n,
         "互动量": interaction,
         # 白名单指标：条均互动量 = 互动量 ÷ 活动相关条数（替代“人均”）
         "条均互动量": round(interaction / n, 2) if n else None,
-        # 品牌提及率 = 品牌提及条数 ÷ 活动相关条数
-        "品牌提及率": round(brand_hits / n, 4) if n else None,
+        # 品牌提及率 = 品牌提及条数 ÷ 活动相关条数；
+        # 无品牌词时不输出（原版 aggregate.py:187 无 --brand-name 时仅 Tier1）。
+        "品牌提及率": (round(brand_hits / n, 4) if n and brand_words else None),
         # 产品提及占比 = 产品提及条数 ÷ 品牌提及条数（有产品关键词时）
         "产品提及占比": (round(product_hits / brand_hits, 4) if brand_hits and product_words else None),
-        # NSR = (正-负) ÷ 分母（分母是否含中性由 params 决定）
+        # 条均互动倍数 = 活动条均互动量 ÷ 品牌条均互动量（KS_Metrics_Calculation:207）。
+        # 分母取品牌期同一份数据的 互动量÷条数；品牌条均缺失或为 0 时不输出。
+        "条均互动倍数": (
+            round((interaction / n) / brand_avg_interaction, 2)
+            if n and brand_avg_interaction else None
+        ),
+        # 品牌主导讨论占比 = 品牌主对象帖数 ÷ 活动相关总帖数（:204）。
+        # 用 AI 主讨论对象口径，不是品牌名出现率（品牌提及率另列）。
+        "品牌主导讨论占比": (
+            round(len(dimension_rows.get("品牌", [])) / n, 4) if n else None
+        ),
+        # NSR = (正面-负面) ÷ (正面+负面)
         "NSR": (round((pos - neg) / nsr_denom, 4) if nsr_denom else None),
     }
     # 指标命名白名单硬校验：禁止出现“人均/转化/性价比”等措辞键。
@@ -403,28 +573,59 @@ def _campaign_stats(rows: list[dict], brand_words: list[str], product_words: lis
         "row_count": n,
         "metrics": metrics,
         "sentiment_dist": {"positive": pos, "neutral": neu, "negative": neg},
-        "nsr_denominator_includes_neutral": include_neutral,
+        "nsr_denominator": "正面+负面（不含中性）",
         "mention_funnel": {"brand_hits": brand_hits, "product_hits": product_hits,
                            "has_product_keywords": bool(product_words)},
         "trend": dict(sorted(trend.items())),
         "interaction_trend": dict(sorted(interaction_trend.items())),
         "platform_dist": platform_dist,
-        "kol_level_dist": kol_dist,
+        # 全量层级分布（含素人/未知/不适用）保留用于说明占比，不参与效能分母。
+        "kol_level_dist": all_level_dist,
+        "kol_level_labels": dict(KOL_LEVEL_LABELS),
+        # 达人层级效能（FIX-16）：仅活动相关 PGC 的头部/腰部/尾部，分母为三层合计。
         "kol_effectiveness": {
             level: {
                 "volume": count,
-                "volume_share": round(count / n, 6) if n else None,
+                "volume_share": round(count / kol_effective_total, 6)
+                if kol_effective_total else None,
                 "avg_interaction": round(
                     kol_interactions.get(level, 0) / count, 2
                 ) if count else None,
             }
             for level, count in kol_dist.items()
         },
+        "kol_effective_total": kol_effective_total,
+        "kol_notes": {
+            # UGC 内容以素人为主（占 XX%）—— 原版说明要求
+            "ugc_amateur_share": (
+                round(all_level_dist.get("ordinary", 0)
+                      / ugc_total, 4) if ugc_total else None
+            ),
+            "unknown_share": (
+                round(all_level_dist.get("unknown", 0) / n, 4) if n else None
+            ),
+            # 粉丝数据全部缺失 → 不出图，改灰色斜体固定说明
+            "all_unknown": bool(n) and not kol_effective_total
+            and all_level_dist.get("unknown", 0) >= n,
+            "ugc_total": ugc_total,
+        },
         "content_type_dist": content_dist,
         "ugc_category_dist": ugc_dist,
         "opinion_analysis": report_contract.opinion_analysis(rows, _row_sentiment),
         "ugc_analysis": report_contract.ugc_analysis(rows),
         "dimension_nsr": dimension_nsr,
+        # 主讨论对象三分类的覆盖情况（FIX-14）：三组 row_count 之和 vs 活动相关条数。
+        "dimension_coverage": {
+            "total": n,
+            "covered": dimension_nsr_total,
+            "missing": dimension_missing,
+            "ratio": round(dimension_nsr_total / n, 4) if n else None,
+            # 原版措辞：缺失/非法时提示先补标，分维覆盖声量偏低。
+            "note": (
+                f"{dimension_missing}/{n} 条活动相关内容的 discussion_dimension "
+                "缺失/非法，分维度覆盖声量将偏低——请先补标再使用分组 NSR"
+            ) if dimension_missing else None,
+        },
         "top_content": {
             "pgc": sorted(
                 [
@@ -448,14 +649,176 @@ def _campaign_stats(rows: list[dict], brand_words: list[str], product_words: lis
     }
 
 
+def _voice_share(activity_n: int, brand_period: dict, start, end,
+                 coverage_warnings: list) -> dict:
+    """声量贡献参考 = 活动相关声量 / 品牌同期总声量（FIX-19）。
+
+    原版口径（KS_Metrics_Calculation v0.15 / KS_Report_Template:491）：
+      - 分母一律取第一章同一份 brand_stats 的逐日声量，按该活动自己的周期求和；
+        不为单个活动另行取数（两次取数会让同一指标出现两个数值）。
+      - 分母 < 分子时不输出，不得出现 >100%（LM #46）。
+      - 品牌口径未覆盖活动口径时（FIX-08 coverage_warnings）也不输出。
+    """
+    s = str(start).replace("-", "")[:8] if start else ""
+    e = str(end).replace("-", "")[:8] if end else ""
+    out = {"value": None, "numerator": activity_n, "denominator": None,
+           "period": {"start": s or None, "end": e or None},
+           "source": "brand_stats.volume_trend", "reason": None}
+    if coverage_warnings:
+        out["reason"] = "品牌口径未覆盖活动口径"
+        return out
+    try:
+        daily = charts.daily_totals((brand_period or {}).get("volume_trend") or {})
+    except ValueError as exc:
+        out["reason"] = f"品牌逐日声量格式无效：{exc}"
+        return out
+    if not daily:
+        out["reason"] = "品牌逐日声量缺失"
+        return out
+    total = sum(v for day, v in daily.items() if (not s or day >= s) and (not e or day <= e))
+    out["denominator"] = total
+    if not activity_n:
+        out["reason"] = "活动相关声量为 0"
+    elif total < activity_n:
+        out["reason"] = "分母小于分子（品牌同期总声量 < 活动相关声量）"
+    else:
+        out["value"] = round(activity_n / total, 4)
+    return out
+
+
 @handler("aggregate")
+def _structure_config(
+    opinion_labels: list[str] | None = None,
+    ugc_categories: list[str] | None = None,
+    ugc_not_applicable: bool = False,
+) -> dict:
+    """构造结构预检的已批准类别配置（FIX-29，对齐原版 config 契约）。
+
+    观点候选正负两套在本系统共用一份已确认清单（原版按正负分别确认），
+    因此两边填同一份；UGC 仅 PGC 项目显式声明不适用。
+    """
+    labels = [str(x) for x in (opinion_labels or []) if str(x).strip()]
+    ugc = [str(x) for x in (ugc_categories or []) if str(x).strip()]
+    return {
+        "positive_labels": labels,
+        "negative_labels": labels,
+        # 仅 PGC 项目：ugc_applicable=False，预检要求相关行一律 N/A。
+        "ugc_labels": ugc,
+        "ugc_applicable": not ugc_not_applicable,
+    }
+
+
+def _apply_structure_gate(
+    result: dict, *, stage: str, config: dict, mode: str, label: str
+) -> dict:
+    """跑结构预检并按开关处理（FIX-29）。
+
+    mode=block（默认）：errors 非空抛 ValueError，交引擎 retry/pause；
+    mode=warn：只把报告写进产物，不阻断（用于历史 Run 过渡）。
+    产物始终写 structure_check，供 FIX-30 审核与 Validator 第 7 项核对。
+    """
+    report = annotation_structure_mod.check_structure(
+        result.get("rows") or [], config=config, stage=stage)
+    result[f"structure_check_{stage}"] = report
+    if report["status"] != "pass" and mode == "block":
+        sample = report["errors"][:5]
+        raise ValueError(
+            f"annotate {label}: 结构预检未通过（{report['error_count']} 条）"
+            f"reasons={report['errors_by_reason']} sample={sample}")
+    return report
+
+
+def _calibration_samples(review: dict, rows: list[dict]) -> list[dict]:
+    """从审核结果里取判错样例，供重标时作为 few-shot 校准（FIX-30）。
+
+    只使用带 expected 的逐帖判定；没有判定明细时返回空（不注入、不臆造正确值）。
+    """
+    verdicts = review.get("verdicts") if isinstance(review, dict) else None
+    if not isinstance(verdicts, list):
+        return []
+    by_id = {str(r.get("_annot_id") or ""): r for r in rows}
+    samples = []
+    for item in verdicts:
+        if not isinstance(item, dict) or str(item.get("verdict")) != "wrong":
+            continue
+        row = by_id.get(str(item.get("id") or ""))
+        expected = str(item.get("expected") or "").strip()
+        if row is None or not expected:
+            continue
+        field = str(item.get("field") or "判定")
+        samples.append({
+            "content": str(row.get("title") or "")[:60] + " " +
+                       str(row.get("content") or "")[:60],
+            "field": field,
+            "wrong": str(row.get(field) or item.get("wrong") or "").strip(),
+            "correct": expected,
+        })
+    return samples
+
+
+def _rerun_scope(state, stage: str, review_key: str, rows: list[dict]):
+    """读取重标计划，返回 (rerun_ids, calibration)。
+
+    仅在 rework 节点的产物存在且阶段匹配时启用增量重标；
+    否则返回 (None, []) 即全量标注。
+    """
+    plan = state.read_artifact("annotation_rework_plan") or {}
+    if not isinstance(plan, dict) or plan.get("stage") != stage:
+        return None, []
+    rerun_ids = plan.get("rerun_ids") or None
+    if plan.get("scope") == "all":
+        rerun_ids = None
+    review = state.read_artifact(review_key) or {}
+    return rerun_ids, _calibration_samples(review, rows)
+
+
+def _r1_context_from_plan(plan: dict) -> dict:
+    """从 confirmed_plan 构造轮次一标注上下文（FIX-27）。
+
+    三个必填项都来自需求确认单，缺任一项由 annotate 侧 fail-closed 抛错：
+      - campaign_name：活动名（多活动时取活动列表拼成可读说明）；
+      - campaign_context：活动边界（活动边界 / 实际举办期 / 活动类型）；
+      - activity_keywords：活动取数表达式（保留 OR/AND 分支关系）。
+    """
+    plan = plan or {}
+    campaigns = [c for c in (plan.get("campaigns") or []) if isinstance(c, dict)]
+    name = str(plan.get("activity_name") or "").strip()
+    if not name and campaigns:
+        name = "、".join(str(c.get("name") or c.get("id") or "") for c in campaigns)
+
+    context_parts = []
+    for label, key in (("活动边界", "activity_boundary"),
+                       ("实际举办期", "actual_event_period"),
+                       ("活动类型", "campaign_type")):
+        value = plan.get(key)
+        if isinstance(value, dict):
+            value = value.get("start") and f"{value.get('start')} ~ {value.get('end')}"
+        text = str(value or "").strip()
+        if text and text != "待数据推断":
+            context_parts.append(f"{label}：{text}")
+    window = (f"{plan.get('period_start')} ~ {plan.get('period_end')}"
+              if plan.get("period_start") and plan.get("period_end") else "")
+    if window:
+        context_parts.append(f"统计窗口：{window}")
+
+    keywords = str(plan.get("activity_query") or "").strip()
+    return {
+        "campaign_name": name,
+        "campaign_context": "；".join(context_parts),
+        "activity_keywords": keywords,
+        "campaign_type": (str(plan.get("campaign_type") or "").strip()
+                          if str(plan.get("campaign_type") or "") != "待数据推断" else ""),
+    }
+
+
 def aggregate(node, state, ctx):
     """分对象统计聚合（本地确定性，无副作用）。
 
     口径（源：飞书 wiki + knowledge/_字段速查）：
       - 逐活动独立统计，**不相加为合计声量**（多活动 campaigns 各算）。
       - 活动层所有指标**只统计活动相关**内容（relevance=是），分母=活动相关条数。
-      - NSR 分母是否含中性由 params.nsr_denominator_includes_neutral 决定（默认 true）。
+      - NSR 分母恒为「正面+负面」，不含中性（客户 KS_Metrics_Calculation v0.12）；
+        分维 NSR 的样本门槛同样按「正面+负面合计 < 30」。无参数开关。
       - 指标命名白名单（条均互动量/品牌提及率/产品提及占比），禁用人均/转化/性价比。
       - 情感以 AI 标注为准；活动相关行缺 AI 情感 → 直接报错，不兜底。
     """
@@ -470,8 +833,6 @@ def aggregate(node, state, ctx):
     if rows is None:
         rows = cleaned.get("rows") if isinstance(cleaned, dict) else None
     rows = rows or []
-
-    include_neutral = bool(state.params.get("nsr_denominator_includes_neutral", True))
 
     # 活动相关过滤：有 relevance 标注时按标注筛；全未标注时用全部并标记 relevance_missing。
     relevance_vals = [_is_relevant(r) for r in rows]
@@ -500,6 +861,14 @@ def aggregate(node, state, ctx):
     brand_words = plan.get("brand_words") or ([brand] if (brand := plan.get("brand")) else [])
     product_words = plan.get("product_words") or []
 
+    # 品牌条均互动量：同一份 brand_stats 的 互动量 ÷ 条数（FIX-04 / :207 分母口径）。
+    _bp_volume = brand_period.get("total_volume") if isinstance(brand_period, dict) else None
+    _bp_interaction = brand_period.get("total_interaction") if isinstance(brand_period, dict) else None
+    brand_avg_interaction = (
+        _bp_interaction / _bp_volume
+        if isinstance(_bp_interaction, (int, float)) and isinstance(_bp_volume, (int, float))
+        and _bp_volume > 0 else None
+    )
     per_campaign: dict[str, dict] = {}
     for camp in campaigns:
         cid = camp.get("id", "default")
@@ -512,7 +881,15 @@ def aggregate(node, state, ctx):
             ]
         else:
             crows = [r for r in relevant_rows if _mentions(r, fw)] if fw else list(relevant_rows)
-        per_campaign[cid] = _campaign_stats(crows, brand_words, product_words, include_neutral)
+        per_campaign[cid] = _campaign_stats(
+            crows, brand_words, product_words, brand_avg_interaction)
+        per_campaign[cid]["voice_share"] = _voice_share(
+            len(crows), brand_period,
+            camp.get("period_start") or plan.get("period_start"),
+            camp.get("period_end") or plan.get("period_end"),
+            plan.get("coverage_warnings") or [],
+        )
+        per_campaign[cid]["metrics"]["声量贡献参考"] = per_campaign[cid]["voice_share"]["value"]
 
     baseline_meta = baseline.get("meta") if isinstance(baseline, dict) else {}
     baseline_unavailable = bool(
@@ -552,6 +929,13 @@ def aggregate(node, state, ctx):
             "degraded": bool(brand_period.get("degraded")),
         },
         "campaigns": per_campaign,
+        # FIX-10：campaign_type=待数据推断 时按信号矩阵推断；用户已给类型时不推断。
+        "inferred_campaign_type": (
+            campaign_type_inference.infer_campaign_type(relevant_rows, brand_words)
+            if str(plan.get("campaign_type") or "待数据推断").strip() == "待数据推断"
+            else None
+        ),
+        "campaign_goal": list(plan.get("campaign_goal") or ["待数据推断"]),
         "relevance_missing": relevance_missing,
         "metric_whitelist": list(METRIC_WHITELIST),
         "baseline": (
@@ -563,17 +947,7 @@ def aggregate(node, state, ctx):
              if baseline else None)
         ),
         "baseline_lift": (
-            {
-                "status": "available",
-                "period_volume": brand_period.get("total_volume"),
-                "baseline_volume": baseline.get("total_volume"),
-                "volume_change": (
-                    brand_period.get("total_volume") - baseline.get("total_volume")
-                    if isinstance(brand_period.get("total_volume"), (int, float))
-                    and isinstance(baseline.get("total_volume"), (int, float))
-                    else None
-                ),
-            }
+            lift.from_bundles(brand_period, baseline)
             if baseline and not baseline_unavailable else
             {"status": "unavailable", "value": None}
         ),
@@ -705,6 +1079,11 @@ def ssjh_pull(node, state, ctx):
     plan = state.read_artifact("confirmed_plan") or {}
     baseline = "brand_stats_baseline" in out
     wordcloud = "wordcloud_data" in out
+    # FIX-03：content_scope 必须贯通到 SSJH 的 content_mode（ALL/UGC/PGC），
+    # 否则用户选「仅 UGC」时第一章仍统计全部内容，与第二章口径不一致。
+    content_mode = CONTENT_MODE_BY_SCOPE.get(
+        str(plan.get("content_scope") or "all").lower(), "ALL"
+    )
 
     if wordcloud:
         campaigns = plan.get("campaigns") or [{
@@ -746,6 +1125,9 @@ def ssjh_pull(node, state, ctx):
             for dimension, query in query_map.items():
                 scoped_plan = {
                     **plan,
+                    # FIX-01：brand_query 优先级最高，必须一并覆盖，
+                    # 否则词云维度会退化成品牌整式查询。
+                    "brand_query": query,
                     "brand_words": [query],
                     "keywords": [query],
                 }
@@ -756,6 +1138,7 @@ def ssjh_pull(node, state, ctx):
                             baseline=False,
                             wordcloud=True,
                             filterword=str(plan.get("activity_filter") or ""),
+                            content_mode=content_mode,
                         )
                         if ssjh.api_available()
                         else ssjh.fallback(scoped_plan, baseline=False)
@@ -808,6 +1191,7 @@ def ssjh_pull(node, state, ctx):
                     baseline=baseline,
                     wordcloud=wordcloud,
                     filterword=str(plan.get("brand_filter") or ""),
+                    content_mode=content_mode,
                 )
             except Exception:
                 return ssjh.fallback(plan, baseline=baseline)
@@ -864,7 +1248,14 @@ def annotate(node, state, ctx):
         cleaned = state.read_artifact("cleaned_data") or {}
         src_rows = cleaned.get("rows") if isinstance(cleaned, dict) else None
         rows = [dict(r) for r in (src_rows or [])]
-        result = annotate_mod.annotate_round1(rows, threshold=threshold)
+        plan = state.read_artifact("confirmed_plan") or {}
+        context = _r1_context_from_plan(plan)
+        rerun_ids, calibration = _rerun_scope(state, "round1", "r1_review", rows)
+        # FIX-30 标注缓存放在 run_dir 下；键含 prompt 指纹，上下文/校准一变即失效。
+        result = annotate_mod.annotate_round1(
+            rows, context=context, threshold=threshold,
+            rerun_ids=rerun_ids, calibration=calibration,
+            cache_dir=state.run_dir)
         if result.get("degraded"):
             raise RuntimeError("annotate r1: 标注能力不可用，禁止确定性伪标注")
         coverage = result.get("coverage") or {}
@@ -877,6 +1268,10 @@ def annotate(node, state, ctx):
                 f"sentiment_missing={coverage.get('sentiment_missing', 0)}, "
                 f"relevance_missing={coverage.get('relevance_missing', 0)}"
             )
+        sc_mode = str(state.params.get("annotation_structure_check", "block")).lower()
+        sc_config = _structure_config()  # round1 只检 id+域，不需要类别
+        _apply_structure_gate(result, stage="round1", config=sc_config,
+                              mode=sc_mode, label="r1")
         return {"artifacts": {"annotated_round1": result}}
 
     if "annotated_data" in out:
@@ -901,12 +1296,17 @@ def annotate(node, state, ctx):
             ugc_list.get("categories") if isinstance(ugc_list, dict) else None
         ) or []
 
+        r2_rerun, r2_calib = _rerun_scope(state, "round2", "r2_review", rows)
         result = annotate_mod.annotate_round2(
-            rows, opinion_labels=list(opinion_labels),
+            rows, rerun_ids=r2_rerun, calibration=r2_calib,
+            opinion_labels=list(opinion_labels),
             ugc_categories=list(ugc_categories), threshold=threshold,
             ugc_not_applicable=ugc_not_applicable,
             opinion_review_items=confirmed.get("opinion_review_items") or [],
-            ugc_review_items=confirmed.get("ugc_review_items") or [])
+            ugc_review_items=confirmed.get("ugc_review_items") or [],
+            campaign_name=str(
+                (state.read_artifact("confirmed_plan") or {}).get("activity_name")
+                or ""))
         if result.get("degraded"):
             raise RuntimeError("annotate r2: 标注能力不可用，禁止确定性伪标注")
         # 覆盖检查缺口（真路径 ERROR）→ 直接报错，交引擎按 retry/on_fail=pause 处理。
@@ -915,6 +1315,13 @@ def annotate(node, state, ctx):
             miss = {t: cov[t]["missing"] for t in ("opinion", "ugc_category",
                     "discussion_dimension") if cov.get(t, {}).get("status") == "ERROR"}
             raise ValueError(f"annotate r2: 覆盖检查存在缺口（missing），按口径报错：{miss}")
+        sc_mode = str(state.params.get("annotation_structure_check", "block")).lower()
+        sc_config = _structure_config(
+            opinion_labels=list(opinion_labels),
+            ugc_categories=list(ugc_categories),
+            ugc_not_applicable=ugc_not_applicable)
+        _apply_structure_gate(result, stage="full", config=sc_config,
+                              mode=sc_mode, label="r2")
         return {"artifacts": {"annotated_data": result}}
 
     # 兜底：未知 outputs，保持 schema 可跑（不应触达）。
@@ -977,7 +1384,9 @@ def feishu_export(node, state, ctx):
 
 # ── agent 节点（语义，接真：Ark Chat + 确定性降级）─────────────
 # 旧固定四类仅作为显式兼容选项；默认按真实UGC动态发现。
-_UGC_FIXED_FOUR = ["模仿打卡", "创意改编", "测评分享", "自发安利"]
+# FIX-32：「自发安利」含倾向词「安利」。FIX_PLAN 建议的「推荐分享」同样命中原版
+# SENTIMENT_WORDS 的「推荐」，改用原版 UGC prompt 的示例名「晒单分享」。
+_UGC_FIXED_FOUR = ["模仿打卡", "创意改编", "测评分享", "晒单分享"]
 
 
 def _sample_texts(rows: list[dict], limit: int = 40, maxlen: int = 120) -> list[str]:
@@ -1007,6 +1416,52 @@ def _wordcloud_platforms(wc: dict) -> dict[str, list[str]]:
             elif isinstance(words, list):
                 plats[plat] = [str(w) for w in words][:50]
     return plats
+
+
+# ── 类别发现（FIX-31）：原版 opinion/ugc-discovery run.py + pipeline_config.phase_discovery
+DISCOVERY_MIN_POSTS = 10            # 该方向 < 10 条 → not_applicable，不调模型、无需人工确认
+OPINION_DISCOVERY_SAMPLE = 200      # KS 区间 150~200，池不足取全量
+UGC_DISCOVERY_SAMPLE = 150          # KS 区间 100~150
+
+
+def _rows_by_campaign(rows: list[dict]) -> dict[str, list[dict]]:
+    """按 analysis_object 逐活动分组（与 aggregate 同一权威字段）。
+
+    没有 analysis_object 的行归入单活动键 "default"；原版 per_campaign=true，
+    多活动时禁止混池抽样。
+    """
+    groups: dict[str, list[dict]] = {}
+    for index, row in enumerate(rows):
+        cid = str(row.get("analysis_object") or "").strip() or "default"
+        groups.setdefault(cid, []).append({**row, "_review_source_index": index})
+    return groups
+
+
+def _discover(pool: list[dict], *, key: str, kind: str, size: int,
+              campaign_name: str, max_items: int) -> dict:
+    """单个（活动 × 方向）的类别发现。
+
+    池 < DISCOVERY_MIN_POSTS → not_applicable（原版 status=not_applicable，不调模型）；
+    否则 mixed 抽样 → 模型发现 → 引用核验 → 命名/数量告警（只告警不中断）。
+    """
+    if len(pool) < DISCOVERY_MIN_POSTS:
+        return {
+            "status": "not_applicable", "not_applicable": True,
+            key: [], "review_items": [],
+            "reason": f"该方向内容仅 {len(pool)} 条，不足 {DISCOVERY_MIN_POSTS} 条，不做类别发现",
+            "sampling": {"pool_size": len(pool), "sampled": 0},
+        }
+    samples, catalog, sampling = label_review.source_catalog(pool, size)
+    data = semantic.chat_json(
+        label_review.discovery_prompt(key, kind=kind, campaign_name=campaign_name),
+        json.dumps(samples, ensure_ascii=False), max_tokens=6144,
+    )
+    review = label_review.ground_candidates(data, key, catalog, max_items)
+    review["sampling"].update(sampling)
+    review["sampling"]["population_size"] = len(pool)
+    review["warnings"] = label_review.lint_categories(review[key], kind)
+    review["status"] = "ok"
+    return review
 
 
 @handler("ugc_discovery")
@@ -1039,71 +1494,182 @@ def ugc_discovery(node, state, ctx):
     mode = state.params.get("ugc_category_mode", "dynamic")
     if mode == "fixed_four":
         return {"artifacts": {"ugc_category_list": {
-            "mode": mode, "categories": list(_UGC_FIXED_FOUR), "source": "fixed"}}}
-
-    cleaned = state.read_artifact("cleaned_data") or {}
-    rows = cleaned.get("rows") if isinstance(cleaned, dict) else None
-    ugc_rows = [
-        {**row, "_review_source_index": index} for index, row in enumerate(rows or [])
-        if str(row.get("content_mode") or "").upper() == "UGC"
-    ]
-    if rows and not ugc_rows and all(
-        str(row.get("content_mode") or "").upper() in ("PGC", "UKN", "未知")
-        for row in rows
-    ):
-        return {"artifacts": {"ugc_category_list": {
-            "mode": "not_applicable", "categories": [], "source": "cleaned_data",
-            "not_applicable": True, "reason": "清洗后无UGC内容",
+            "mode": mode, "categories": list(_UGC_FIXED_FOUR), "source": "fixed",
+            # FIX-32：客户已废弃固定四类，保留仅为显式兼容
+            "warnings": ["fixed_four 已废弃（客户口径改为 dynamic 发现），仅作兼容保留"],
         }}}
-    samples, catalog = label_review.source_catalog(ugc_rows)
-    if not semantic.llm_available() or not samples:
-        raise RuntimeError("ugc_discovery: 动态类别发现能力不可用")
 
-    data = semantic.chat_json(
-        label_review.discovery_prompt("categories", ugc=True),
-        json.dumps(samples, ensure_ascii=False), max_tokens=6144,
-    )
-    review = label_review.ground_candidates(data, "categories", catalog, 6)
-    review["sampling"]["population_size"] = len(ugc_rows)
-    review["source_subject"] = state.artifact_ref("cleaned_data")
+    # FIX-31：样本取「活动相关 且 UGC」（原版 phase-ugc-discovery run.py:155-157），
+    # 因此依赖轮次一的相关性判定。
+    if not semantic.llm_available():
+        raise RuntimeError("ugc_discovery: 动态类别发现能力不可用")
+    r1 = state.read_artifact("annotated_round1") or {}
+    rows = r1.get("rows") if isinstance(r1, dict) else None
+    if not rows:
+        raise RuntimeError("ugc_discovery: 缺少轮次一标注结果，无法按活动相关性抽样")
+
+    campaigns: dict[str, dict] = {}
+    for cid, crows in _rows_by_campaign(rows).items():
+        pool = [row for row in crows
+                if _is_relevant(row) is True
+                and str(row.get("content_mode") or "").upper() == "UGC"]
+        name = plan.get("activity_name") if cid == "default" else cid
+        campaigns[cid] = {"ugc": _discover(
+            pool, key="categories", kind="ugc", size=UGC_DISCOVERY_SAMPLE,
+            campaign_name=str(name or ""),
+            max_items=label_review.CATEGORY_COUNT["ugc"][1])}
+
+    names, items, warnings = _merge_discoveries(campaigns, "categories")
+    if not names:
+        # 全部活动都不适用（无 UGC / UGC < 10 条）：ugc_category 全填 N/A，无需人工确认
+        reasons = [c["ugc"].get("reason") for c in campaigns.values()]
+        return {"artifacts": {"ugc_category_list": {
+            "mode": "not_applicable", "categories": [], "source": "annotated_round1",
+            "not_applicable": True, "reason": "；".join(r for r in reasons if r),
+            "campaigns": campaigns,
+        }}}
     return {"artifacts": {"ugc_category_list": {
-        **review, "mode": mode, "source": "llm",
+        "categories": names,
+        "review_items": items,
+        "review_schema_version": label_review.REVIEW_SCHEMA_VERSION,
+        "campaigns": campaigns,
+        "warnings": warnings,
+        "mode": mode,
+        "source": "llm",
+        "source_subject": state.artifact_ref("annotated_round1"),
     }}}
 
 
 @handler("opinion_candidates")
 def opinion_candidates(node, state, ctx):
-    """观点候选生成（供 n10_hc_opinion 人工确认后注入轮次二）。
+    """观点类别发现（FIX-31，原版 blueai-opinion-discovery-skill）。
 
-    基于轮次一标注的活动相关内容，语义聚类出观点候选（正/负/属性讨论的主题标签）。
-    缺语义能力报错；保留 candidates[]，另附版本内 review_items 审核口径与原帖。
+    - 按活动逐个运行；每个活动正面、负面各发现一次（相关 且 情感为该方向）。
+    - mixed 抽样（互动 Top50% + 随机 50%，seed=42），每方向至多 200 条。
+    - 某方向 < 10 条 → not_applicable，不调模型。
+    - 产物：campaigns[cid].{positive, negative}；顶层 candidates / review_items
+      为全部适用方向的合并去重结果，供 n10 / n11 沿用既有读取方式。
     """
+    if not semantic.llm_available():
+        raise RuntimeError("opinion_candidates: 观点发现能力不可用")
     r1 = state.read_artifact("annotated_round1") or {}
     rows = r1.get("rows") if isinstance(r1, dict) else None
     if not rows:
-        cleaned = state.read_artifact("cleaned_data") or {}
-        rows = cleaned.get("rows") if isinstance(cleaned, dict) else None
-    relevant_rows = [
-        {**row, "_review_source_index": index} for index, row in enumerate(rows or [])
-        if _is_relevant(row) is not False
-    ]
-    samples, catalog = label_review.source_catalog(relevant_rows)
+        raise RuntimeError("opinion_candidates: 缺少轮次一标注结果，无法按正负方向发现观点")
+    plan = state.read_artifact("confirmed_plan") or {}
 
-    if not semantic.llm_available() or not samples:
-        raise RuntimeError("opinion_candidates: 观点发现能力不可用")
+    campaigns: dict[str, dict] = {}
+    for cid, crows in _rows_by_campaign(rows).items():
+        relevant = [row for row in crows if _is_relevant(row) is True]
+        name = plan.get("activity_name") if cid == "default" else cid
+        campaigns[cid] = {
+            polarity: _discover(
+                [row for row in relevant if _row_sentiment(row) == sign],
+                key="candidates", kind=polarity, size=OPINION_DISCOVERY_SAMPLE,
+                campaign_name=str(name or ""),
+                max_items=label_review.CATEGORY_COUNT[polarity][1])
+            for polarity, sign in (("positive", 1), ("negative", -1))
+        }
 
-    data = semantic.chat_json(
-        label_review.discovery_prompt("candidates"),
-        json.dumps(samples, ensure_ascii=False), max_tokens=6144,
-    )
-    review = label_review.ground_candidates(data, "candidates", catalog, 8)
-    review["sampling"]["population_size"] = len(relevant_rows)
-    review["source_subject"] = state.artifact_ref(
-        "annotated_round1" if r1.get("rows") else "cleaned_data"
-    )
+    merged, items, warnings = _merge_discoveries(campaigns, "candidates")
     return {"artifacts": {"opinion_candidates": {
-        **review, "source": "llm", "r1_ref": bool(r1),
+        "candidates": merged,
+        # 正负两套候选分开保存，供轮次二两个观点任务各自注入（FIX-28/31）
+        "positive_candidates": _direction_names(campaigns, "positive", "candidates"),
+        "negative_candidates": _direction_names(campaigns, "negative", "candidates"),
+        "not_applicable_directions": sorted({
+            f"{cid}/{direction}"
+            for cid, directions in campaigns.items()
+            for direction, result in directions.items()
+            if result.get("not_applicable")}),
+        "review_items": items,
+        "review_schema_version": label_review.REVIEW_SCHEMA_VERSION,
+        "evidence_count": sum(
+            int(result.get("evidence_count") or 0)
+            for camp in campaigns.values() for result in camp.values()),
+        "campaigns": campaigns,
+        "warnings": warnings,
+        "source": "llm",
+        "r1_ref": True,
+        "source_subject": state.artifact_ref("annotated_round1"),
     }}}
+
+
+def _direction_names(campaigns: dict, direction: str, key: str) -> list[str]:
+    """某方向在全部活动里的类别名（按出现顺序去重）。"""
+    names: list[str] = []
+    for directions in campaigns.values():
+        for name in (directions.get(direction) or {}).get(key) or []:
+            if name not in names:
+                names.append(name)
+    return names
+
+
+def _merge_discoveries(campaigns: dict, key: str) -> tuple[list[str], list[dict], list[str]]:
+    """合并各活动各方向的发现结果，告警带上来源。
+
+    names 为全部类别名去重（兼容旧读取方式）；review_items 按 (方向, 名称) 去重——
+    正负两套各自独立，同名类别的定义可能不同，不能互相覆盖。
+    """
+    names: list[str] = []
+    items: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    warnings: list[str] = []
+    for cid, directions in campaigns.items():
+        for direction, result in directions.items():
+            for warn in result.get("warnings") or []:
+                warnings.append(f"[{cid}/{direction}] {warn}")
+            for item in result.get("review_items") or []:
+                name = item.get("name")
+                if name not in names:
+                    names.append(name)
+                if (direction, name) not in seen:
+                    seen.add((direction, name))
+                    items.append({**item, "campaign": cid, "direction": direction})
+    return names, items, warnings
+
+
+def _opinion_count_reasons(opinion: dict, labels: list[str]) -> list[str]:
+    """观点类别数量校验（FIX-31）：按方向分别检查，not_applicable 方向豁免。
+
+    新产物带 positive_candidates / negative_candidates：正面 5-8、负面 3-5；
+    旧产物只有一套合并候选时沿用 5-8。
+    """
+    if "positive_candidates" not in opinion and "negative_candidates" not in opinion:
+        return [] if 5 <= len(labels) <= 8 else ["观点标签数量不在 5-8 个范围"]
+    skipped = {item.split("/")[-1] for item in opinion.get("not_applicable_directions") or []}
+    reasons = []
+    for direction in ("positive", "negative"):
+        names = opinion.get(f"{direction}_candidates") or []
+        if direction in skipped and not names:
+            continue
+        low, high = label_review.CATEGORY_COUNT[direction]
+        if not low <= len(names) <= high:
+            label = label_review.POLARITY_LABEL[direction]
+            reasons.append(f"{label}观点标签数量 {len(names)} 不在 {low}-{high} 个范围")
+    return reasons
+
+
+def _label_source_review(opinion: dict, ugc: dict) -> dict:
+    """观点 + UGC 两套类别的来源审核，合并为一份 validator_review（FIX-30）。
+
+    UGC 不适用（仅 PGC）时只审观点。
+    """
+    p0_opinion, opinion_meta = label_review.run_source_review("opinion", opinion)
+    if ugc.get("not_applicable"):
+        p0_ugc, ugc_meta = [], {}
+    else:
+        p0_ugc, ugc_meta = label_review.run_source_review("ugc", ugc)
+    p0 = [f"观点：{x}" for x in p0_opinion] + [f"UGC：{x}" for x in p0_ugc]
+    return {
+        "actor_role": label_review.SOURCE_REVIEW_ACTOR,
+        "mode": label_review.SOURCE_REVIEW_MODE,
+        "rules_version": label_review.SOURCE_REVIEW_RULES_VERSION,
+        "opinion": opinion_meta,
+        "ugc": ugc_meta,
+        "p0": p0,
+        "has_p0": bool(p0),
+    }
 
 
 @handler("opinion_policy_gate")
@@ -1125,12 +1691,16 @@ def opinion_policy_gate(node, state, ctx):
     reasons = []
     if opinion.get("source") != "llm" or opinion.get("degraded"):
         reasons.append("观点候选不是独立语义模型的完整结果")
-    if not 5 <= len(labels) <= 8:
-        reasons.append("观点标签数量不在 5-8 个范围")
+    reasons.extend(_opinion_count_reasons(opinion, labels))
     if len(set(labels)) != len(labels):
         reasons.append("观点标签存在重复")
     if any(len(label) > 20 or label in vague_labels for label in labels):
         reasons.append("观点标签过长或语义过于宽泛")
+    # FIX-32：类别名带倾向（原版 SENTIMENT_WORDS / EVAL_SUFFIX）转人工
+    tendency = [name for name in [*labels, *ugc_categories]
+                if label_review.tendency_hits(name)]
+    if tendency:
+        reasons.append("类别名带倾向：" + "、".join(tendency))
     if int(opinion.get("evidence_count") or 0) < len(labels):
         reasons.append("候选标签缺少足够样本支撑")
     if (
@@ -1143,8 +1713,6 @@ def opinion_policy_gate(node, state, ctx):
         )
     ):
         reasons.append("UGC 类别不完整或不稳定")
-    if ugc.get("mode") == "dynamic":
-        reasons.append("动态 UGC 类别需要人工确认业务可用性")
     for title, artifact in (("观点", opinion), ("UGC", ugc)):
         if artifact.get("review_schema_version"):
             expected_names = artifact.get("candidates") or artifact.get("categories") or []
@@ -1164,7 +1732,17 @@ def opinion_policy_gate(node, state, ctx):
             expect=node.get("outputs", []),
         )
 
+    # FIX-30：确定性策略通过后，委派独立 Validator 做 D1/D2 来源审核。
+    # 审核通过即可自动确认（动态 UGC 不再一律转人工）；有 P0 转人工。
+    validator_review = _label_source_review(opinion, ugc)
+    if validator_review["has_p0"]:
+        raise HumanPause(
+            prompt="观点与 UGC 标签来源审核未通过：" + "；".join(validator_review["p0"]),
+            expect=node.get("outputs", []),
+        )
+
     return {"artifacts": {"confirmed_opinion_labels": {
+        "validator_review": validator_review,
         "labels": labels,
         "ugc_categories": ugc_categories,
         "ugc_not_applicable": bool(ugc.get("not_applicable")),
@@ -1314,11 +1892,12 @@ def write_report(node, state, ctx):
         md = semantic.chat(sys_p, user_p, max_tokens=16384)
         if not md.strip():
             raise ValueError("模型返回空报告")
-        md, removed_sentences = _strip_forbidden_sentences(md)
+        # FIX-20：命中禁用措辞不再删除整句（删除会连带删掉数据与原文，且掩盖问题）。
+        # 记录命中交 n17 质检判 P0、n19 定向改写；结构问题仍在节点内 fail-closed。
+        guardrail_hits = _scan_forbidden(md)
         source = "llm"
         guardrail_reason = ""
         try:
-            _assert_no_forbidden_terms(md)
             _assert_report_structure(
                 md, list((stats.get("campaigns") or {}).keys())
             )
@@ -1328,14 +1907,14 @@ def write_report(node, state, ctx):
             md, plan=state.read_artifact("confirmed_plan") or {}, stats=stats,
             charts=charts, insight=wc_insight,
         )
-        _assert_no_forbidden_terms(md)
+        guardrail_hits = _scan_forbidden(md) or guardrail_hits
         _assert_report_structure(md, list((stats.get("campaigns") or {}).keys()))
         return {"artifacts": {"report_md": {
             "markdown": md,
             "chapters": chapters,
             "version": version,
             "source": source,
-            "guardrail_removed_sentences": removed_sentences,
+            "guardrail_hits": guardrail_hits,
             **(
                 {"guardrail_fallback_reason": guardrail_reason}
                 if guardrail_reason else {}
@@ -1416,14 +1995,19 @@ def fix_report(node, state, ctx):
             try:
                 if not md.strip():
                     raise ValueError("模型返回空修订")
-                md, removed_sentences = _strip_forbidden_sentences(md)
+                # FIX-20：返修节点保留禁用措辞硬校验（节点内最多 3 次返修 + Validator 预检兜底），
+                # 但不删句——删句会掩盖问题并连带删数据和原文。
                 md = report_contract.assemble(md, **assembly_args)
                 _assert_no_forbidden_terms(md)
                 _assert_report_structure(
                     md, list((stats.get("campaigns") or {}).keys()),
                 )
                 report_contract.assert_preserved_structure(canonical_previous, md)
-                report_contract.assert_hot_tables(md, stats)
+                report_contract.assert_hot_tables(
+                    md, stats,
+                    str((assembly_args.get("plan") or {}).get("content_scope")
+                        or "all").lower(),
+                )
             except ValueError as error:
                 # Keep the last valid full document. Never feed a truncated or
                 # structurally invalid replacement forward as the new baseline.
@@ -1451,7 +2035,7 @@ def fix_report(node, state, ctx):
                     "markdown": md, "chapters": chapters, "version": version,
                     "fixed_round": rnd,
                     "source": "llm",
-                    "guardrail_removed_sentences": removed_sentences,
+                    "guardrail_hits": _scan_forbidden(md),
                     "deterministic_preflight": {
                         "attempts": repair_attempt,
                         "p0_count": 0,
@@ -1479,36 +2063,47 @@ def fix_report(node, state, ctx):
         raise
 
 
-def _strip_forbidden_sentences(md: str) -> tuple[str, list[str]]:
-    """删除含禁用措辞的整句；不做同义改写，避免制造无数据支撑的新表述。"""
-    cleaned_lines: list[str] = []
-    removed: list[str] = []
-    for line in md.splitlines():
-        if not any(term in line for term in FORBIDDEN_METRIC_TERMS):
-            cleaned_lines.append(line)
-            continue
-        if line.lstrip().startswith("#"):
-            cleaned_lines.append(line)
-            continue
-        parts = re.split(r"(?<=[。！？；])", line)
-        kept = []
-        for part in parts:
-            if any(term in part for term in FORBIDDEN_METRIC_TERMS):
-                if part.strip():
-                    removed.append(part.strip())
-            else:
-                kept.append(part)
-        cleaned = "".join(kept).rstrip()
-        if cleaned:
-            cleaned_lines.append(cleaned)
-    return "\n".join(cleaned_lines), removed
+_EVIDENCE_BLOCK = re.compile(
+    r"<!-- report-module:start -->.*?<!-- report-module:end -->", re.S)
+
+
+def _mask_evidence(md: str) -> str:
+    """挖空代码生成的证据模块（热门表 / 代表原文），保持行数不变。
+
+    证据里的原文引用属于事实，不是作者措辞：产品讨论中的“性价比”等表达必须放行，
+    否则会误删证据（FIX-20）。
+    """
+    return _EVIDENCE_BLOCK.sub(
+        lambda m: "\n" * m.group(0).count("\n"), md or "")
+
+
+def _scan_forbidden(md: str) -> list[dict]:
+    """检测禁用措辞与越界指标名，返回逐条命中（不修改正文）。
+
+    命中不再自动删句：删除会连带删掉数据与原文，且掩盖问题。
+    交由 n17 质检判 P0、n19 改写（FIX-20）。
+    """
+    hits: list[dict] = []
+    for ln_no, line in enumerate(_mask_evidence(md).splitlines(), 1):
+        for term in FORBIDDEN_METRIC_TERMS:
+            if term in line:
+                hits.append({"line": ln_no, "term": term,
+                             "text": line.strip()[:200], "kind": "term"})
+        for pattern in FORBIDDEN_METRIC_PATTERNS:
+            if pattern.search(line):
+                hits.append({"line": ln_no, "term": pattern.pattern,
+                             "text": line.strip()[:200], "kind": "metric_scope"})
+    return hits
 
 
 def _assert_no_forbidden_terms(md: str) -> None:
-    """报告正文禁用措辞硬校验：命中“人均/转化率/转化/性价比”直接报错。"""
-    for bad in FORBIDDEN_METRIC_TERMS:
-        if bad in md:
-            raise ValueError(f"report: 正文命中禁用措辞 '{bad}'")
+    """报告正文禁用措辞硬校验：命中即报错（证据模块内的原文引用豁免）。"""
+    hits = _scan_forbidden(md)
+    if hits:
+        first = hits[0]
+        raise ValueError(
+            f"report: 正文命中禁用措辞 '{first['term']}'（L{first['line']}）"
+        )
 
 
 def _assert_report_structure(md: str, campaign_ids: list[str]) -> None:
@@ -1546,6 +2141,20 @@ _REPORT_LABELS = {
 def _report_label(value: object) -> str:
     text = str(value or "").strip()
     return _REPORT_LABELS.get(text, text or "未知")
+
+
+def _fmt_ratio(value: object) -> str:
+    """比率 0-1 → 百分比文案；None 输出「不适用」（不补 0）。"""
+    if not isinstance(value, (int, float)):
+        return "不适用"
+    return f"{value * 100:.1f}%"
+
+
+def _pct_text(value: object) -> str:
+    """变化率文案：None → 「不适用」（原版 fmt_pct 口径）。"""
+    if not isinstance(value, (int, float)):
+        return "不适用"
+    return f"{value:+.1f}%"
 
 
 def _format_report_number(value: object) -> str:
@@ -1681,9 +2290,22 @@ def _fallback_report_md(stats, charts, wc_insight, chapters, version) -> str:
         lines.append(f"#### 2.{index}.1 传播概况")
         lines.append(f"- 活动相关条数：{m.get('活动相关条数')}")
         lines.append(f"- 条均互动量：{m.get('条均互动量')}")
+        # 条均互动倍数：活动条均 ÷ 品牌条均，分母缺失时不输出（不补 1.0 冒充）。
+        mult = m.get("条均互动倍数")
+        if mult is not None:
+            lines.append(f"- 条均互动倍数：{mult}（活动条均互动量 ÷ 品牌条均互动量）")
         lines.append(f"#### 2.{index}.2 活动声量渗透分析")
-        lines.append(f"- 品牌提及率：{m.get('品牌提及率')}")
-        lines.append(f"- 产品提及占比：{m.get('产品提及占比')}")
+        lines.append(f"- 品牌提及率：{_fmt_ratio(m.get('品牌提及率'))}")
+        lines.append(f"- 产品提及占比：{_fmt_ratio(m.get('产品提及占比'))}")
+        # 品牌主导讨论占比：AI 主对象口径，与品牌提及率是两种方法，须分别记录。
+        dom = m.get("品牌主导讨论占比")
+        if dom is not None:
+            lines.append(
+                f"- 品牌主导讨论占比：{_fmt_ratio(dom)}"
+                "（AI 主讨论对象=品牌，非品牌名出现率）")
+        coverage = (s or {}).get("dimension_coverage") or {}
+        if coverage.get("note") and coverage.get("missing"):
+            lines.append(f"- *{coverage['note']}*")
         lines.append(f"#### 2.{index}.3 口碑分析")
         lines.append(f"- NSR：{m.get('NSR')}")
         lines.append(f"#### 2.{index}.4 内容分析")
@@ -1701,10 +2323,27 @@ def _fallback_report_md(stats, charts, wc_insight, chapters, version) -> str:
     lines += ["## 03 综合表现定位", "", "### 3.1 活动期与基准期对比", ""]
     baseline = (stats or {}).get("baseline_lift") or {}
     if baseline.get("status") == "available":
-        lines.append(
-            "- 活动期间品牌声量与前置基准期相比的变化："
-            f"{_format_report_number(baseline.get('volume_change'))}。"
-        )
+        days = baseline.get("days") or {}
+        if baseline.get("holiday_text"):
+            # 基准期落在节假日高峰月：用原版固定措辞，禁止直接写「下降 X%」。
+            lines.append(
+                "- " + str(baseline["holiday_text"]) + "：活动期日均 "
+                f"{_format_report_number((baseline.get('daily') or {}).get('period', {}).get('volume'))} 条 vs "
+                f"基准期日均 {_format_report_number((baseline.get('daily') or {}).get('base', {}).get('volume'))} 条"
+                f"（{_pct_text(baseline.get('daily_volume_change_pct'))}）。"
+            )
+        elif baseline.get("base_insufficient"):
+            lines.append("- 基准期声量不足 100 条，本节不输出变化率；建议延长基准期或跳过对比。")
+        else:
+            lines.append(
+                f"- 活动期 {days.get('period')} 天、基准期 {days.get('base')} 天，"
+                f"日均声量变化 {_pct_text(baseline.get('daily_volume_change_pct'))}，"
+                f"日均互动量变化 {_pct_text(baseline.get('daily_interaction_change_pct'))}。"
+            )
+            if baseline.get("nsr_insufficient"):
+                lines.append("- NSR 变化：样本不足（正面+负面合计 <30），不输出。")
+            elif baseline.get("nsr_change_pp") is not None:
+                lines.append(f"- NSR 变化：{baseline['nsr_change_pp']:+.1f}pp。")
     else:
         lines.append("- 基准期数据不可用，本节不输出确定性比较结论。")
     lines.append("")
@@ -1789,7 +2428,7 @@ def plan_compile(node, state, ctx):
         for item in campaigns
         if isinstance(item, dict) and item.get("id")
     ] or [activity_name]
-    platforms = [str(item) for item in (requirement.get("platforms") or [])]
+    plan_platforms = [str(item) for item in (requirement.get("platforms") or [])]
     content_scope = str(requirement.get("content_scope") or "all")
     source_file = requirement.get("source_file") or {}
     plan_revision = int(
@@ -2021,8 +2660,17 @@ def plan_compile(node, state, ctx):
             "activities": activity_names,
             "period_start": requirement.get("period_start"),
             "period_end": requirement.get("period_end"),
-            "platforms": platforms,
+            "platforms": plan_platforms,
             "content_scope": content_scope,
+            # FIX-10：业务属性字段。值为「待数据推断」时由 aggregate 按信号矩阵推断
+            # （KS_Classification_Rules.md:194-213），结果写 stats_bundle.inferred_campaign_type。
+            "product_category": requirement.get("product_category") or "待数据推断",
+            "campaign_type": requirement.get("campaign_type") or "待数据推断",
+            "campaign_goal": list(requirement.get("campaign_goal") or ["待数据推断"]),
+            "activity_boundary": requirement.get("activity_boundary") or "",
+            "actual_event_period": requirement.get("actual_event_period") or {},
+            "brand_supplement_activity_terms": (
+                requirement.get("brand_supplement_activity_terms") or "无"),
             "source_file_name": (
                 source_file.get("name") if isinstance(source_file, dict) else None
             ),
@@ -2033,14 +2681,20 @@ def plan_compile(node, state, ctx):
         "allowed_actions": requirement.get("allowed_actions"),
         "metrics": [
             {"name": "条均互动量", "definition": "活动相关内容互动量之和 / 活动相关内容数"},
+            {"name": "条均互动倍数",
+             "definition": "活动条均互动量 / 品牌条均互动量（活动内容单条互动相对品牌基线的倍数）"},
             {"name": "品牌提及率", "definition": "品牌提及内容数 / 活动相关内容数"},
+            {"name": "品牌主导讨论占比",
+             "definition": "品牌主导讨论帖数 / 活动相关帖数（以品牌为主要对象的内容比例）"},
             {"name": "产品提及占比", "definition": "产品提及内容数 / 品牌提及内容数"},
             {
+                "name": "声量贡献参考",
+                "definition": "活动相关声量 / 品牌同期总声量（分母<分子时不输出）",
+            },
+            {
                 "name": "NSR",
-                "definition": "(正面内容数 - 负面内容数) / 正中负内容总数",
-                "neutral_in_denominator": bool(
-                    state.params.get("nsr_denominator_includes_neutral", True)
-                ),
+                "definition": "(正面内容数 - 负面内容数) / (正面内容数 + 负面内容数)",
+                "denominator": "正面+负面（不含中性）",
             },
         ],
         "dimensions": ["平台", "发表日期", "内容类型", "KOL 层级", "UGC 类别", "观点标签"],
@@ -2166,6 +2820,61 @@ def plan_compile(node, state, ctx):
     }}
 
 
+def _check_activity_filterwords(plan: dict, rows: list, state) -> dict:
+    """FIX-11 活动过滤词核对。
+
+    原版口径：
+      - 取品牌数据之前，先在标题/正文/话题里按字面（不区分大小写）搜索活动过滤词。
+      - 有命中就告知用户并由用户决定；用户决定之前不取品牌数据。
+      - 多个活动需交叉核对（每个活动用自己的过滤词集，且汇总命中）。
+      - 决定写入 filterword_decision artifact，清洗环节据此剔除；重跑时读到已有决定即跳过。
+
+    返回检查结果，供 input_schema_validation 留痕。
+    """
+    decided = state.read_artifact("filterword_decision") or {}
+    campaigns = [c for c in (plan.get("campaigns") or []) if isinstance(c, dict)]
+    if not campaigns:
+        campaigns = [{"id": plan.get("activity_name"),
+                      "filter_words": plan.get("activity_filter") or []}]
+    aggregate = {"hits": [], "hit_rows": 0, "total_rows": len(rows or []),
+                 "ratio": 0.0, "per_campaign": {}}
+    for camp in campaigns:
+        words = camp.get("filter_words") or plan.get("activity_filter") or []
+        if not words:
+            continue
+        name = str(camp.get("id") or camp.get("name") or "")
+        scoped = [row for row in (rows or [])
+                  if not name or str(row.get("analysis_object") or name) == name]
+        result = excel_source.check_filterwords(scoped, words)
+        aggregate["per_campaign"][name] = {
+            "hit_rows": result["hit_rows"],
+            "total_rows": result["total_rows"],
+            "ratio": result["ratio"],
+            "words": result["words"],
+        }
+        aggregate["hits"].extend(
+            {**hit, "campaign": name} for hit in result["hits"])
+        aggregate["hit_rows"] = max(aggregate["hit_rows"], result["hit_rows"])
+        aggregate["ratio"] = max(aggregate["ratio"], result["ratio"])
+    if decided.get("decision"):
+        return {**aggregate, "decision": decided.get("decision"),
+                "source": "user_decision"}
+    if not aggregate["hits"]:
+        return {**aggregate, "decision": "no_hits", "source": "auto"}
+    sample = [
+        f"{hit['campaign']}／{hit['field']}／{hit['word']}：{hit['title'][:40]}"
+        for hit in aggregate["hits"][:10]
+    ]
+    raise HumanPause(
+        prompt=(
+            f"活动明细中有 {aggregate['hit_rows']} 条命中活动过滤词"
+            f"（占比 {aggregate['ratio']:.1%}），请确认是否剔除命中行：\n"
+            + "\n".join(sample)
+        ),
+        expect=["filterword_decision"],
+    )
+
+
 @handler("run_init")
 def run_init(node, state, ctx):
     plan = state.read_artifact("confirmed_plan") or {}
@@ -2194,10 +2903,17 @@ def run_init(node, state, ctx):
         activity_checksum = hashlib.sha256(source_path.read_bytes()).hexdigest()
     else:
         raise ValueError("run_init: 无法读取 G1 挂载的活动明细，不能冻结源数据哈希")
+    # FIX-11：过滤词核查结果；无 source_path 时保持空结构，避免下游 KeyError。
+    filterword_check: dict = {"hits": [], "hit_rows": 0, "total_rows": 0,
+                              "ratio": 0.0, "decision": "no_source",
+                              "source": "auto", "per_campaign": {}}
 
     if source_path:
         input_data = excel_source.load_activity_rows(plan)
         rows = (input_data or {}).get("rows") or []
+        # FIX-11：取品牌数据之前先确认活动明细已按过滤词清洗。用户决定之前不往下走，
+        # 决定写入 filterword_decision artifact，n07 据此剔除。
+        filterword_check = _check_activity_filterwords(plan, rows, state)
         input_schema_validation = {
             "status": "PASSED",
             "row_count": len(rows),
@@ -2343,6 +3059,8 @@ def run_init(node, state, ctx):
             "params": dict(state.params),
         },
         "input_schema_validation": input_schema_validation,
+        # FIX-11：活动过滤词核查结果（无命中时 decision=no_hits）。
+        "filterword_check": filterword_check,
     }}
 
 
@@ -2449,7 +3167,7 @@ def delivery_draft(node, state, ctx):
     )
     post_publish_validation = {
         "validator": "topic5-validator",
-        "rules_version": "topic5-validator-qc-v1.7",
+        "rules_version": RULES_VERSION,
         "scope": "post_publish",
         "issues": post_publish_issues,
         "p0_count": post_publish_p0_count,
@@ -2636,8 +3354,50 @@ def user_decision(node, state, ctx):
 
 
 # ── human 节点 ──────────────────────────────────────────────
+def _g2_auto_confirm_allowed(node, state, ctx) -> bool:
+    """G2 代用户确认的判定（FIX-09）。
+
+    默认关闭（`Y.params.g2_auto_confirm_when_no_cost=false`），由业务方决定是否打开。
+    打开后仍需同时满足：
+      - 当前节点是 G2（方案确认）；
+      - 本次运行不涉及计费（没有付费取数 / 预估费用为 0）；
+      - preflight 结果为 READY（无阻塞项）。
+    G2 本身不删除：冻结 plan_bundle_sha256 的机制必须保留，这里只是放行主体变化。
+    """
+    params = (ctx or {}).get("params") or {}
+    if not _truthy(params.get("g2_auto_confirm_when_no_cost")):
+        return False
+    if str(node.get("gate") or node.get("id")) not in ("G2", "n03_hc_plan"):
+        return False
+    preflight = state.read_artifact("preflight") or {}
+    if str(preflight.get("status") or "").upper() != "READY":
+        return False
+    cost = preflight.get("estimated_cost")
+    if isinstance(cost, (int, float)) and cost > 0:
+        return False
+    if preflight.get("billable") is True:
+        return False
+    if preflight.get("requires_payment") is True:
+        return False
+    return True
+
+
+def _truthy(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in ("1", "true", "yes", "y", "on", "是")
+
+
 @handler("human_gate")
 def human_gate(node, state, ctx):
+    if _g2_auto_confirm_allowed(node, state, ctx):
+        # n02_plan_compile 产出 analysis_plan；G2 冻结后即为 confirmed_plan
+        plan = state.read_artifact("analysis_plan") or {}
+        return {
+            "artifacts": {"confirmed_plan": plan},
+            "authority": "user-delegated",
+            "reason": "g2_auto_confirm_when_no_cost：不涉及计费且 preflight=READY，代用户确认",
+        }
     raise HumanPause(prompt=node.get("name", node["id"]), expect=node.get("outputs", []))
 
 
@@ -2648,3 +3408,176 @@ def validator_gate(node, state, ctx):
         prompt=node.get("name", node["id"]),
         expect=node.get("outputs", []),
     )
+
+
+# ── v0.2 新增：标注审核（FIX-30，独立 Validator 抽检）────────────────────
+# 口径依据：tools/plan_annotation_review.py（抽样）、KS_Annotation_Review（审核职责）、
+# QC §5/§7（正确率阈值 90%/目标 95%、额度用完置 blocked_quality 并停下下游）。
+ANNOTATION_REVIEW_DEFAULT_ACCURACY = 0.90
+ANNOTATION_REVIEW_DEFAULT_ROUNDS = 2
+# 重标范围判定：错误类型属于这些「系统性」类别时重标全部受影响行
+SYSTEMATIC_ERROR_TYPES = ("relevance", "sentiment", "global")
+
+
+def _review_rows(node, state) -> tuple[list[dict], str]:
+    """取待审行与产物键：轮次一读 annotated_round1，轮次二读 annotated_data。"""
+    key = "annotated_round1" if "r1_review" in (node.get("outputs") or []) else "annotated_data"
+    art = state.read_artifact(key) or {}
+    rows = art.get("rows") if isinstance(art, dict) else None
+    return [dict(r) for r in (rows or [])], key
+
+
+@handler("annotation_review")
+def annotation_review(node, state, ctx):
+    """标注抽检（FIX-30）：生成确定性分层抽样计划，交独立 Validator 逐帖判定。
+
+    - 关闭开关（annotation_review_enabled=false）时直接放行并留痕 P1，不暂停。
+    - 开启时先写抽样计划再 HumanPause，等 Validator 提交本节点产物；
+      已审 ID 跨轮次累计在 annotation_review_history，额度按剩余额度收敛。
+    - 只读：不改标注字段、不改数据。
+    """
+    stage = "round1" if "r1_review" in (node.get("outputs") or []) else "round2"
+    enabled = state.params.get("annotation_review_enabled", True)
+    enabled = (str(enabled).strip().lower() not in ("false", "0", "no", "off")
+               if not isinstance(enabled, bool) else enabled)
+    if not enabled:
+        return {"artifacts": {f"{stage[0]}{'1' if stage == 'round1' else '2'}_review": {
+            "enabled": False, "stage": stage, "decision": "skipped",
+            "p1_notes": ["未执行标注审核（annotation_review_enabled=false）"],
+        }}}
+
+    rows, _key = _review_rows(node, state)
+    plan = state.read_artifact("confirmed_plan") or {}
+    labels = state.read_artifact("confirmed_opinion_labels") or {}
+    ugc_list = state.read_artifact("ugc_category_list") or {}
+    config = _structure_config(
+        opinion_labels=(labels.get("labels") or labels.get("candidates")
+                        if isinstance(labels, dict) else None) or [],
+        ugc_categories=(ugc_list.get("categories")
+                        if isinstance(ugc_list, dict) else None) or [],
+        ugc_not_applicable=bool(
+            isinstance(ugc_list, dict) and ugc_list.get("not_applicable")))
+
+    history = state.read_artifact("annotation_review_history") or {}
+    reviewed = list(history.get("reviewed_ids") or []) if isinstance(history, dict) else []
+    sample_plan = review_plan_mod.plan_review(
+        rows, stage="round1" if stage == "round1" else "round2",
+        reviewed_ids=reviewed, config=config)
+    sample_plan["campaign"] = str(plan.get("activity_name") or "")
+    raise HumanPause(
+        prompt=f"{node.get('name', node['id'])}：{sample_plan['sample_size']} 帖待抽检",
+        expect=node.get("outputs", []),
+    )
+
+
+@handler("annotation_review_decision")
+def annotation_review_decision(node, state, ctx):
+    """审核路由（FIX-30）：正确率达标放行；未达标且额度有余回重标；额度耗尽升级。
+
+    正确率按字段分别算（sentiment/relevance 或 opinion/ugc_category/discussion_dimension），
+    任一字段低于 annotation_accuracy_min（默认 0.90）即视为未达标。
+    字段无判定结果按「未达标」处理：没有证据不能当作通过。
+    """
+    stage = "round1" if "n09r" in node.get("id", "") else "round2"
+    key = "r1_review" if stage == "round1" else "r2_review"
+    review = state.read_artifact(key) or {}
+    if not isinstance(review, dict) or not review.get("enabled", True):
+        return {"route": "pass"}
+
+    accuracy_min = float(state.params.get(
+        "annotation_accuracy_min", ANNOTATION_REVIEW_DEFAULT_ACCURACY))
+    accuracy = review.get("accuracy") or {}
+    verdicts = {k: v for k, v in accuracy.items() if isinstance(v, (int, float))}
+    under = (
+        [field for field, value in verdicts.items() if value < accuracy_min]
+        if verdicts else ["no_verdict"]
+    )
+    if not under:
+        return {"route": "pass"}
+
+    rounds = state.counters.get(f"annotation_review_rounds_{stage}", 0)
+    max_rounds = int(state.params.get(
+        "annotation_review_max_rounds", ANNOTATION_REVIEW_DEFAULT_ROUNDS))
+    quota_plan = review.get("plan") or {}
+    remaining = quota_plan.get("remaining_after_plan")
+    quota_left = (remaining is None) or int(remaining) > 0
+    if rounds >= max_rounds or not quota_left:
+        review["blocked_quality"] = True
+        review["blocked_reason"] = (
+            "rounds_exhausted" if rounds >= max_rounds else "quota_exhausted")
+        return {"route": "maxed"}
+    return {"route": "retry"}
+
+
+def _is_systematic_error(affected_fields: list[str], error_types) -> bool:
+    """错误是否属系统性（需重标全部行）。
+
+    判为系统性的情形：没有任何可定位的错误字段（无从增量重标），
+    或受影响字段/错误类型命中 SYSTEMATIC_ERROR_TYPES。
+    依据 FIX-30「系统性错误需要修正边界后，重处理受影响的全部数据」。
+    """
+    if not affected_fields:
+        return True
+    if any(field in SYSTEMATIC_ERROR_TYPES for field in affected_fields):
+        return True
+    if isinstance(error_types, dict):
+        return any(str(value) in SYSTEMATIC_ERROR_TYPES
+                   for value in error_types.values())
+    if isinstance(error_types, (list, tuple)):
+        return any(str(value) in SYSTEMATIC_ERROR_TYPES for value in error_types)
+    return False
+
+
+@handler("annotation_rework")
+def annotation_rework(node, state, ctx):
+    """重标准备（FIX-30）：判定重标范围、invalidate 该轮产物、rerun_epoch 递增。
+
+    - 系统性错误（relevance/sentiment/global 或错误类型缺失）→ 重标全部行；
+      局部错误 → 只重标 wrong_ids。
+    - invalidate 范围为该轮标注产物及其下游全部 artifact；gate 是 decision 节点
+      不能执行 invalidate，故由本 code 节点执行后 next 指回 n09/n11。
+    """
+    stage = "round1" if "n09r" in node.get("id", "") else "round2"
+    key = "r1_review" if stage == "round1" else "r2_review"
+    review = state.read_artifact(key) or {}
+    wrong_ids = review.get("wrong_ids") or {}
+    error_types = review.get("error_types") or {}
+
+    affected_fields = sorted(field for field, ids in wrong_ids.items() if ids)
+    systematic = _is_systematic_error(affected_fields, error_types)
+    rerun_ids = [] if systematic else sorted(
+        {str(i) for ids in wrong_ids.values() for i in (ids or [])})
+
+    epoch_key = f"annotation_rerun_epoch_{stage}"
+    state.counters[epoch_key] = state.counters.get(epoch_key, 0) + 1
+    state.counters[f"annotation_review_rounds_{stage}"] = (
+        state.counters.get(f"annotation_review_rounds_{stage}", 0) + 1)
+
+    # 轮次一重标 → 轮次二及其下游全部失效；轮次二重标 → 只失效轮次二及下游。
+    downstream = (["annotated_round1", "opinion_candidates", "confirmed_opinion_labels",
+                   "ugc_category_list", "annotated_data", "stats_bundle",
+                   "chart_urls", "wordcloud_data", "wordcloud_insight",
+                   "report_md", "qc_report", "delivery_draft"]
+                  if stage == "round1" else
+                  ["annotated_data", "stats_bundle", "chart_urls", "wordcloud_data",
+                   "wordcloud_insight", "report_md", "qc_report", "delivery_draft"])
+    state.invalidate_artifacts(downstream)
+
+    history = state.read_artifact("annotation_review_history") or {}
+    reviewed = list(history.get("reviewed_ids") or []) if isinstance(history, dict) else []
+    plan = review.get("plan") or {}
+    reviewed += [str(s.get("id")) for s in (plan.get("samples") or []) if s.get("id")]
+
+    payload = {
+        "stage": stage,
+        "rerun_epoch": state.counters[epoch_key],
+        "scope": "all" if systematic else "wrong_ids",
+        "rerun_ids": rerun_ids,
+        "affected_fields": affected_fields,
+        "error_types": error_types,
+        "review_rounds": state.counters[f"annotation_review_rounds_{stage}"],
+        "invalidated": downstream,
+        "history": {"reviewed_ids": sorted(set(reviewed))},
+    }
+    return {"artifacts": {"annotation_rework_plan": payload,
+                          "annotation_review_history": payload["history"]}}

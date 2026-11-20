@@ -219,15 +219,19 @@ def _analysis_specs(cid: str, stats: dict) -> list[dict]:
         })
     kol = (stats or {}).get("kol_effectiveness") or {}
     levels = [level for level in ("head", "waist", "tail") if level in kol]
-    if levels:
+    # 粉丝数据全部缺失时不出图（FIX-16：改灰色斜体固定说明）。
+    if levels and not (stats or {}).get("kol_notes", {}).get("all_unknown"):
+        labels = (stats or {}).get("kol_level_labels") or {}
         specs.append({
             "chart_id": f"{cid}_kol_effectiveness",
             "title": f"活动 {cid}·达人层级效能",
-            "chart_type": "bar",
-            "categories": levels,
+            "chart_type": "bar",          # 双轴柱图：左轴声量占比，右轴条均互动量
+            "categories": [labels.get(level, level) for level in levels],
             "series": [
                 _series("声量占比", [kol[level]["volume_share"] for level in levels]),
-                _series("条均互动量", [kol[level]["avg_interaction"] for level in levels]),
+                # 轴标题按客户要求：条均互动量（次/条）
+                _series("条均互动量（次/条）",
+                        [kol[level]["avg_interaction"] for level in levels]),
             ],
             "source_mode": "native",
         })
@@ -311,19 +315,33 @@ def build_chart_specs(stats_bundle: dict, wordcloud_data: dict, plan: Optional[d
             if spec:
                 specs.append(spec)
         specs.extend(_analysis_specs(cid, stats))
-    lift = (stats_bundle or {}).get("baseline_lift") or {}
-    if lift.get("status") == "available":
-        specs.append({
-            "chart_id": "baseline_lift",
-            "title": "活动期与基准期声量对比",
-            "chart_type": "bar",
-            "categories": ["活动期", "基准期"],
-            "series": [_series("声量", [
-                lift.get("period_volume") or 0,
-                lift.get("baseline_volume") or 0,
-            ])],
-            "source_mode": "native",
-        })
+    stats_lift = (stats_bundle or {}).get("baseline_lift") or {}
+    if stats_lift.get("status") == "available":
+        daily = stats_lift.get("daily") or {}
+        days = stats_lift.get("days") or {}
+        categories, volume_series, interaction_series = [], [], []
+        for label, key in (("活动期", "period"), ("基准期", "base")):
+            point = daily.get(key) or {}
+            if point.get("volume") is None:
+                continue
+            categories.append(f"{label}（{days.get(key)}天）")
+            volume_series.append(point.get("volume"))
+            interaction_series.append(point.get("interaction"))
+        if categories:
+            # 主指标用日均（FIX-15），总量只在数据表里作辅助，不画柱。
+            specs.append({
+                "chart_id": "baseline_lift",
+                "title": "活动期与基准期日均声量对比",
+                "chart_type": "bar",
+                "categories": categories,
+                "series": [
+                    _series("日均声量", volume_series),
+                    _series("日均互动量", interaction_series),
+                ],
+                # 图注按原版：基准期含节假日时须标明声量基数偏高。
+                "note": stats_lift.get("holiday_text") or "",
+                "source_mode": "native",
+            })
     specs.extend(_wordcloud_specs(wordcloud_data, plan))
     if brand.get("wordcloud"):
         specs.extend(_wordcloud_specs({"campaigns": {"brand": {"overall": {

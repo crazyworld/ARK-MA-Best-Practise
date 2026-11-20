@@ -18,18 +18,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+import platforms
+
 _CST = timezone(timedelta(hours=8))
-_PLATFORM_MAP = {
-    "小红书": "xiaohongshu",
-    "抖音": "douyin",
-    "微博": "weibo",
-    "哔哩哔哩": "bilibili",
-    "B站": "bilibili",
-    "微信": "weixin",
-    "微信公众号": "weixin",
-}
+# 平台映射唯一事实源见 platforms.py（FIX-17）；此处不再维护局部映射表。
 _CONTENT_MODE = {"UGC": "UGC", "PGC": "PGC", "未知": "UKN", "UKN": "UKN"}
 _MAX_FILE_BYTES = 50 * 1024 * 1024
+# FIX-11：活动过滤词并入品牌过滤词的误伤阈值（原版 KS_Data_Processing：5%）。
+MERGE_HIT_THRESHOLD = 0.05
 
 
 def normalize_source_file(source: dict) -> dict:
@@ -101,6 +97,19 @@ def _text(value: Any) -> str:
     return str(value).strip()
 
 
+def _integer_or_none(value: Any) -> int | None:
+    """粉丝数/互动分项：缺失返回 None，不补 0（FIX-16 / FIX-59）。
+
+    补 0 会让缺失粉丝数的内容被判成「素人」，达人层级随之失真。
+    """
+    if value in (None, "", "-", "--"):
+        return None
+    try:
+        return int(float(str(value).replace(",", "").strip()))
+    except (TypeError, ValueError):
+        return None
+
+
 def _integer(value: Any) -> int:
     if value in (None, "", "-", "--"):
         return 0
@@ -168,7 +177,8 @@ def normalize_excel_row(row: dict[str, Any]) -> dict:
         "data_type": _text(row.get("数据类型")),
         "analysis_object": _text(row.get("分析对象")),
         "site_name": site_name,
-        "_platform": _PLATFORM_MAP.get(site_name, site_name or "unknown"),
+        "_platform": platforms.normalize_slug(site_name)[0],
+        "_platform_matched": platforms.normalize_slug(site_name)[1],
         "title": _text(row.get("标题")),
         "content": _text(row.get("内容")),
         "video_cover_text": _text(row.get("视频封面内容识别")),
@@ -187,7 +197,7 @@ def normalize_excel_row(row: dict[str, Any]) -> dict:
         "like_count": _integer(row.get("点赞数")),
         "read_count": _integer(row.get("阅读数")),
         "collect_count": _integer(row.get("收藏数")),
-        "fans": _integer(row.get("粉丝数")),
+        "fans": _integer_or_none(row.get("粉丝数")),
         "_source": "user_uploaded_excel",
     }
 
@@ -211,6 +221,70 @@ def resolve_activity_xlsx(plan: dict) -> Optional[Path]:
     return uploads_dir / mount_path
 
 
+def check_filterwords(rows: list[dict], filter_expr: Any) -> dict:
+    """按活动过滤词在标题/正文/话题里做字面检索，不区分大小写（FIX-11）。
+
+    原版 stats-aggregation/check_filterwords.py：取品牌数据之前先确认活动 Excel
+    是否已按过滤词清洗。命中不等于脏数据，只把决定权交给用户。
+
+    返回 {"hits": [{row_index, title, field, word}], "hit_rows": n,
+          "total_rows": n, "ratio": float, "words": [...]}
+    """
+    if isinstance(filter_expr, (list, tuple)):
+        words = [str(w).strip() for w in filter_expr if str(w).strip()]
+    else:
+        words = _keywords(filter_expr)
+    total = len(rows or [])
+    if not words or not total:
+        return {"hits": [], "hit_rows": 0, "total_rows": total,
+                "ratio": 0.0, "words": words}
+    lowered = [(word, word.lower()) for word in words]
+    hits = []
+    hit_rows = set()
+    for index, row in enumerate(rows or []):
+        if not isinstance(row, dict):
+            continue
+        fields = {
+            "标题": str(row.get("title") or ""),
+            "正文": str(row.get("content") or ""),
+            "话题": " ".join(str(item) for item in (row.get("topics") or [])),
+        }
+        for name, text in fields.items():
+            haystack = text.lower()
+            for word, needle in lowered:
+                if needle and needle in haystack:
+                    hits.append({"row_index": index, "title": fields["标题"],
+                                 "field": name, "word": word})
+                    hit_rows.add(index)
+    return {
+        "hits": hits,
+        "hit_rows": len(hit_rows),
+        "total_rows": total,
+        "ratio": round(len(hit_rows) / total, 4) if total else 0.0,
+        "words": words,
+    }
+
+
+def merge_filterword_impact(brand_total: int, filtered_total: int) -> dict:
+    """A−B 误伤评估：活动过滤词并入品牌过滤词前后声量差（FIX-11）。
+
+    原版口径：差值不超过 5% 可以并入；超过 5% 需逐词定位误伤词，交用户决定。
+    """
+    a = int(brand_total or 0)
+    b = int(filtered_total or 0)
+    if a <= 0:
+        return {"brand_total": a, "filtered_total": b, "delta_ratio": 0.0,
+                "within_threshold": True, "threshold": MERGE_HIT_THRESHOLD}
+    delta = round((a - b) / a, 4)
+    return {
+        "brand_total": a,
+        "filtered_total": b,
+        "delta_ratio": delta,
+        "within_threshold": delta <= MERGE_HIT_THRESHOLD,
+        "threshold": MERGE_HIT_THRESHOLD,
+    }
+
+
 def load_activity_rows(plan: dict) -> Optional[dict]:
     """读取活动明细；无 source_file 返回 None，声明后缺文件/坏文件则报错。"""
     path = resolve_activity_xlsx(plan)
@@ -232,10 +306,18 @@ def load_activity_rows(plan: dict) -> Optional[dict]:
         if not header_values:
             raise ValueError("excel_source: Excel 没有表头")
         headers = [_text(value) for value in header_values]
+        has_analysis_object_column = "分析对象" in headers
         required = {
-            "站点名称", "标题", "内容", "发表时间", "内容类型",
-            "分析对象", "url",
+            "站点名称", "标题", "内容", "发表时间", "内容类型", "url",
         }
+        # FIX-12：单一确认活动时「分析对象」列可缺（自动用活动名填充）；
+        # 多活动时必须有，否则无法按活动拆分。
+        single_confirmed = len({
+            str(item.get("id")) for item in (plan.get("campaigns") or [])
+            if isinstance(item, dict) and item.get("id")
+        }) == 1
+        if not has_analysis_object_column and not single_confirmed:
+            required.add("分析对象")
         missing = sorted(required - set(headers))
         if missing:
             raise ValueError("excel_source: 缺少必要列: " + "、".join(missing))
@@ -248,31 +330,54 @@ def load_activity_rows(plan: dict) -> Optional[dict]:
         content_scope = str(plan.get("content_scope") or "all").lower()
         expected_mode = {"ugc": "UGC", "pgc": "PGC"}.get(content_scope)
         expected_platforms = {
-            _PLATFORM_MAP.get(str(value), str(value))
-            for value in (plan.get("platforms") or [])
+            platforms.to_slug(value) for value in (plan.get("platforms") or [])
         }
         expected_campaigns = {
             str(item.get("id"))
             for item in (plan.get("campaigns") or [])
             if isinstance(item, dict) and item.get("id")
         }
+        # FIX-12：Excel 无「分析对象」列且只有一个确认活动时，自动用活动名填充并记日志。
+        auto_filled_object = None
+        if (not has_analysis_object_column) and len(expected_campaigns) == 1:
+            auto_filled_object = next(iter(expected_campaigns))
         period_start = str(plan.get("period_start") or "").replace("-", "")
         period_end = str(plan.get("period_end") or "").replace("-", "")
+        # FIX-12：每行按所属活动自身的周期过滤（Excel 有「分析对象」列时按活动查表，
+        # 无该列时不启用活动窗口，回落到合并窗口）。
+        campaign_windows = {}
+        for item in plan.get("campaigns") or []:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("id") or item.get("name") or "").strip()
+            if not key:
+                continue
+            campaign_windows[key] = (
+                str(item.get("period_start") or "").replace("-", "") or period_start,
+                str(item.get("period_end") or "").replace("-", "") or period_end,
+            )
         normalized: list[dict] = []
+        # FIX-12：集合核对用周期过滤前的分析对象；按活动周期剔除的行单独计数。
+        seen_campaigns: set[str] = set()
+        period_dropped: dict[str, int] = {}
         source_row_count = 0
+        unknown_sites: dict[str, int] = {}
+        unknown_samples: list[str] = []
         for row_number, values in enumerate(rows, 2):
             source_row_count += 1
             raw = dict(zip(headers, values))
             row = normalize_excel_row(raw)
             if not any((row["id"], row["title"], row["content"], row["url"])):
                 continue
+            site_matched = bool(row.pop("_platform_matched", True))
+            raw_site_name = row.get("site_name")
             missing_values = [
                 key for key, value in (
-                    ("站点名称", row["_platform"]),
+                    ("站点名称", raw_site_name),
                     ("标题/正文", row["title"] or row["content"]),
                     ("发表时间", row["publish_time"]),
                     ("内容类型", row["_source_content_mode"]),
-                    ("分析对象", row["analysis_object"]),
+                    ("分析对象", row["analysis_object"] or auto_filled_object),
                     ("URL", row["url"]),
                 )
                 if not value or value == "unknown"
@@ -282,7 +387,19 @@ def load_activity_rows(plan: dict) -> Optional[dict]:
                     f"excel_source: 第 {row_number} 行缺少或无法解析: "
                     + "、".join(missing_values)
                 )
-            if expected_platforms and row["_platform"] not in expected_platforms:
+            # FIX-12：无「分析对象」列且单一确认活动 → 用活动名填充。
+            if auto_filled_object and not row["analysis_object"]:
+                row["analysis_object"] = auto_filled_object
+            # FIX-17：映射表外的站点归「其他」，计入声量、不单独出饼图，
+            # 不再整单 raise（原版 KS_Exception_Handling D：打印样本→归其他→超10%告知）。
+            if not site_matched:
+                unknown_sites[str(raw_site_name or "")] = (
+                    unknown_sites.get(str(raw_site_name or ""), 0) + 1
+                )
+                if len(unknown_samples) < 5 and str(raw_site_name or "") not in unknown_samples:
+                    unknown_samples.append(str(raw_site_name or ""))
+            elif expected_platforms and row["_platform"] not in expected_platforms:
+                # 已映射的标准平台若不在确认范围内，仍报错（口径冲突，不能静默吞掉）。
                 raise ValueError(
                     f"excel_source: 第 {row_number} 行平台 {row['_platform']} "
                     "不在确认范围"
@@ -290,10 +407,17 @@ def load_activity_rows(plan: dict) -> Optional[dict]:
             publish_ymd = datetime.fromtimestamp(
                 row["publish_time"] / 1000, tz=_CST
             ).strftime("%Y%m%d")
-            if (
-                period_start and period_end
-                and not (period_start <= publish_ymd <= period_end)
-            ):
+            # FIX-12：多活动时按该行所属活动的周期判断；跨活动期的行直接剔除
+            # （方案要求「某行日期在本活动周期之外、但在另一活动周期之内时被剔除」）。
+            object_key = str(row.get("analysis_object") or "").strip()
+            if object_key:
+                seen_campaigns.add(object_key)
+            window = campaign_windows.get(object_key)
+            row_start, row_end = window if window else (period_start, period_end)
+            if row_start and row_end and not (row_start <= publish_ymd <= row_end):
+                if window:
+                    period_dropped[object_key] = period_dropped.get(object_key, 0) + 1
+                    continue
                 raise ValueError(
                     f"excel_source: 第 {row_number} 行发表时间 {publish_ymd} "
                     "超出确认周期"
@@ -329,7 +453,8 @@ def load_activity_rows(plan: dict) -> Optional[dict]:
         if str(row.get("analysis_object") or "").strip()
     }
     campaign_mapping = {value: value for value in source_campaigns}
-    if expected_campaigns and source_campaigns != expected_campaigns:
+    # 核对用过滤前集合：某活动的行全部因周期被剔除时不应误报「分组不一致」。
+    if expected_campaigns and seen_campaigns and seen_campaigns != expected_campaigns:
         if len(expected_campaigns) == 1 and len(source_campaigns) == 1:
             source_id = next(iter(source_campaigns))
             confirmed_id = next(iter(expected_campaigns))
@@ -350,11 +475,23 @@ def load_activity_rows(plan: dict) -> Optional[dict]:
             "path": str(path),
             "content_scope": str(plan.get("content_scope") or "all").lower(),
             "platforms": sorted({row["_platform"] for row in normalized}),
+            "unknown_sites": dict(unknown_sites),
+            "unknown_site_samples": list(unknown_samples),
+            "unknown_site_ratio": round(
+                sum(unknown_sites.values()) / len(normalized), 4
+            ) if normalized else 0.0,
             "source_row_count": source_row_count,
             "accepted_row_count": len(normalized),
             "invalid_content_modes_mapped_to_unknown": invalid_content_modes,
             "campaigns": sorted({row["analysis_object"] for row in normalized}),
             "source_campaigns": sorted(source_campaigns),
+            # FIX-12：无「分析对象」列时自动填充的记录（方案要求写日志）。
+            "auto_filled_analysis_object": auto_filled_object,
+            "period_dropped_by_campaign": dict(period_dropped),
+            "campaign_windows": {
+                key: {"start": value[0], "end": value[1]}
+                for key, value in campaign_windows.items()
+            },
             "campaign_mapping": campaign_mapping,
             "period_start": period_start,
             "period_end": period_end,

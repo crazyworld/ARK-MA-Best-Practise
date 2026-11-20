@@ -11,6 +11,35 @@
 
 ---
 
+## 2026-11-20
+
+### 客户标注 Prompt 原样替换：C0 v17 / R1 v7 / R2 v6 / R3 v5 / R4 v7 / R5 v8
+
+- **触发**：客户下发 `T6-标注prompt更新`（C0_基础标注_V17、R1_V7、R2_V6 15:56 版、R3_V5、R4_V7、R5_V8），
+  要求 Prompt 一字不改、直接替换。文件用 `cp -p` 落库，与客户原件 SHA-256 一致（保留 CRLF）；C0 目录只留 v17，
+  R1~R5 旧版保留可回退。
+- **对流程的影响与适配**（Prompt 未改，只改脚本）：
+  - **R5 v8 输出结构变更**：主字段 `是否消费者行为`→`是否消费洞察`，`判断说明` 拆为适用消费人群/观点情绪/
+    消费场景/消费需求/洞察线索。不适配时 DataHub 后处理全行主字段为空 → 3 轮重提后有效率 0 → `quality_fail`；
+    demo 校验 `判断说明` 必失败。`datahub_annotate.TASK_SCHEMAS` 与 `run_demo_routes.ROUTES` 改为六字段，
+    `merge_annotations` 把 `是否消费洞察/洞察线索` 映射回宽表 `是否消费者行为/消费者行为说明`，宽表 28 列与
+    E4 统计、pipeline_e、E4 Prompt 均不变；其余四个洞察字段只保留在 `r5_postprocess`。
+  - **demo 批量包装**：去掉写死的「40 字说明限制」（R4 v7、R5 v8 为 60 字，以 Prompt 为准）；要求输出字段按路由
+    schema 生成；单条输入段切分兼容新版 `【待标注数据】`；R5 每行 token 预算 160→480。
+  - **C0 v17 行业白名单 26→37 项**（食品零食→食品、餐饮连锁→餐饮，新增电子竞技等 11 类）：
+    `e1_industry.parse_top10_from_e1_data` 对上期旧名做映射，避免切换当周环比误报「跌出+新进」。
+  - R1/R2/R3/R4 输出键、占位符不变，脚本无需改；口径变化只影响各版块候选数量与构成。
+  - C0 v17 放宽可用口径，`USABLE_BASELINE` 暂沿用 v13 的 37%~41%（偏离只告警不熔断），实跑后回填。
+  - `merge_annotations` 读 R5 时兼容 v3 旧列名（历史项目重跑合并不缺列）。
+  - **打包残留旧文件**（顺带发现）：`pack_skills.sh` 用 `zip -qr` 写入已存在的 zip 是增量更新，源目录已删除的
+    文件不会从包里移除——此前 `topic6-annotation.zip` 仍带着已移除的 C0 v1~v5/v13。改为打包前先删旧 zip。
+- **影响文件**：`topic6-annotation/prompts/{C0_基础事实/v17,R1_平台借势/v7,R2_商业合作/v6,R3_风险预警/v5,
+  R4_创意借鉴/v7,R5_消费者行为/v8}.md`、`scripts/{datahub_annotate,run_demo_routes,merge_annotations}.py`、
+  `topic6-insight/01_统计/e1_industry.py`、`SKILL.md`、`ks/{02,03,_字段速查}.md`、`_版本状态.md`、
+  `version_mapping.md`、`annotator.system.md`、`CUSTOMER_TO_MA_FILE_MAPPING.md`、openspec skill-annotation、
+  `tests/test_topic6_prompt_v20261120.py`。上线需重新打包上传 topic6-annotation / topic6-insight 并
+  `create_all.sh --update-memory` 同步版本镜像。
+
 ## 2026-11-17
 
 ### 「💡 行业洞察：」缺失、营销发现小标题变普通文字（W45 / W46）

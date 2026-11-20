@@ -173,7 +173,11 @@ def chat(system: str, user: str, *, max_tokens: int = 4096,
     return ""
 
 
-def chat_json(system: str, user: str, *, attempts: int = 4, **kw) -> Any:
+# 解析重试次数：对齐原版各 discovery/annot 脚本的 call_with_retry(tries=3) / range(3)（FIX-31）
+CHAT_JSON_ATTEMPTS = 3
+
+
+def chat_json(system: str, user: str, *, attempts: int = CHAT_JSON_ATTEMPTS, **kw) -> Any:
     """调模型并解析 JSON；空返回/解析失败重试。截断类错误不在此重试，直接抛。"""
     last: Exception | None = None
     for i in range(attempts):

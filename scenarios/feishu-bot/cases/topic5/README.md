@@ -163,7 +163,7 @@ Validator 自动门，不是用户人工门。
 
 ## 口径红线（不可违反）
 
-- **NSR 分母默认含中性**（`nsr_denominator_includes_neutral=true`，参数化读 `state.params`，勿硬编码）。
+- **NSR 分母恒为「正面+负面」**，不含中性；分维门槛按「正面+负面合计 < 30」。无参数开关，与客户脚本一致。
 - 指标白名单：**条均互动量 / 品牌提及率 / 产品提及占比 / NSR**；禁用措辞：人均 / 转化率 / 转化 / 性价比。
 - 提及漏斗嵌套：产品提及是品牌提及子集，占比 ≤ 1。
 - 日期取发表时间 `publish_time`（epoch ms，CST）；去重键 `fingerprint → id → item_id → url`。

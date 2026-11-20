@@ -60,7 +60,7 @@ Subagent（Discovery/Opinion/Insight/Narrative）**合并**为确定性编排器
 | ------------------ | -------------------------------------------------------------------------------- | -------- |
 | `engine.py`        | DAG 执行引擎：拓扑调度、幂等 ledger 重放/对账、checkpoint、HC pause/resume        | MA 新增  |
 | `run_pipeline.py`  | CLI 入口：`start` / `resume --hc {kind} --decision {pass\|reject\|remark}` / `status` | MA 新增  |
-| `state.py`         | 运行态读写、params（含 `nsr_denominator_includes_neutral` 等口径参数）            | MA 新增  |
+| `state.py`         | 运行态读写、params（缓存/阈值类运行参数；NSR 等口径常量不在此，见 validator/scripts/policy.py） | MA 新增  |
 | `handlers.py`      | 各节点 handler 分发；本地确定性逻辑（n07 清洗 / n12 聚合等）                      | 合并重写 |
 | `semantic.py`      | Ark Chat API 客户端（OpenAI 兼容）；n08/n09b/n15/n16/n19 语义 handler，含降级     | 合并重写 |
 | `ssjh.py`          | SSJH 适配层：`api_available` / `pull` / `fallback`（n05/n06/n13）                 | 适配迁入 |

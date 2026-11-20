@@ -18,10 +18,42 @@ import re
 from pathlib import Path
 from typing import Any, Optional
 
-# 兜底红线（与 skill scan_report.py 对齐；仅在脚本不可定位时使用）。
-_FORBIDDEN = ("人均", "转化率", "转化", "性价比")
-_AGG_SUM = ("合计声量", "总声量", "声量总和", "累计声量", "声量合计")
-_AGG_DISCLAIMER = ("不相加", "不合计", "逐个", "分别统计", "不得相加", "勿")
+# 兜底红线：优先取自口径唯一事实源 policy.py（FIX-57）。定位失败时用下面的兼容常量，
+# 由 test_policy_single_source 断言两侧一致，避免 skill 未挂载时导入期崩溃。
+_POLICY = None
+
+
+def load_policy():
+    """加载 topic5-validator/scripts/policy.py。返回模块或 None（不抛错）。"""
+    global _POLICY
+    if _POLICY is not None:
+        return _POLICY or None
+    path = _policy_path()
+    if not path:
+        _POLICY = False
+        return None
+    spec = importlib.util.spec_from_file_location("topic5_validator_policy", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    _POLICY = mod
+    return mod
+
+
+def _policy_path() -> Optional[Path]:
+    """定位 topic5-validator/scripts/policy.py（允许环境变量覆盖）。"""
+    env = os.environ.get("TOPIC5_VALIDATOR_POLICY")
+    if env and Path(env).exists():
+        return Path(env)
+    scan = _skill_scan_path()
+    if scan and (scan.parent / "policy.py").exists():
+        return scan.parent / "policy.py"
+    for root in (Path(__file__).resolve().parent.parent, Path("/mnt/skills")):
+        cand = root / "topic5-validator" / "scripts" / "policy.py"
+        if cand.exists():
+            return cand
+    return None
+
+
 _INTERNAL_FIELDS = (
     "_annot_id", "_dedup_key", "_source_analysis_object",
     "ai_sentiment", "interaction_cnt", "discussion_dimension",
@@ -69,6 +101,16 @@ def _load_scan():
 
 def available() -> bool:
     return bool(_skill_scan_path())
+
+
+# 口径常量在 _skill_scan_path 可用后加载（policy.py 与 scan_report.py 同目录）。
+_POL = load_policy()
+# 仅在 policy.py 完全不可定位时使用的极简兜底；正常路径永远是 policy 的值。
+_FORBIDDEN = tuple(getattr(_POL, "FORBIDDEN_METRIC_TERMS", None) or ("人均", "转化", "性价比"))
+_AGG_SUM = tuple(getattr(_POL, "AGGREGATE_SUM_PATTERNS", None)
+                 or ("合计声量", "总声量", "声量总和", "累计声量", "声量合计"))
+_AGG_DISCLAIMER = tuple(getattr(_POL, "AGGREGATE_DISCLAIMER_MARKERS", None)
+                        or ("不相加", "不合计", "逐个", "分别统计", "不得相加", "勿"))
 
 
 def _markdown_and_degraded(report_md: Any) -> tuple[str, bool]:

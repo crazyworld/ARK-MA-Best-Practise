@@ -1,6 +1,6 @@
 ---
 name: ssjh-social-stat
-version: "1.7.2"
+version: "1.8.0"
 description: |
   数说聚合（datastory / dc.datastory.com.cn）社媒统计取数 Skill。按关键词、排除词、平台、时间范围等参数，一次性调用数说聚合全部 11 个社媒统计接口，返回结构化聚合舆情指标——总声量、总互动量、总情感度、声量趋势、互动量趋势、数据类型分布、情感分布、声量类型分布（UGC/PGC）、关键词云、原文 Top 内容、区域分布，覆盖微博/微信/小红书/抖音/快手/视频号/B站/知乎/新闻/论坛/电商，并可导出 Excel。
   何时触发（宁可多触发也别漏）：用户提到"数说""数说聚合""datastory""dc.datastory"；或说"拉社媒统计/舆情数据""社媒取数""数说取数""social listening""做份社媒数据/舆情报表"；或想看某品牌/关键词在某些社媒平台上的总声量、互动量、情感度/口碑、声量或互动趋势、词云、区域分布、UGC/PGC 占比、竞品声量对比、传播声量盘点——即便没点名"数说"，只要是跨平台跑这类聚合统计指标，就触发本 Skill。
@@ -8,7 +8,7 @@ description: |
   【强制】用户明确说"数说取数"/"数说"/"数说聚合"/"datastory"时，必须使用本 Skill 完成取数，禁止改用社媒采集类 Skill、手写脚本或其他数据源替代；本 Skill 报错时也不得静默换路，须如实报错并等待用户指示。
   DO NOT trigger：(1) 只是在讨论或解读已有数据、并不需要去数说取数；(2) 用户要的是抓取原始帖子/评论正文、采集 KOL 内容（属社媒原始数据采集，不是统计聚合）；(3) 要对手头数据做 LLM 情感分析/打标（属数据标注）；(4) 查账号粉丝数/报价/媒介库资源（属媒介资源库）；(5) 与 dc.datastory.com.cn 取数/导出无关的任务。
 metadata:
-  version: "1.7.2"
+  version: "1.8.0"
   author: atlas
   family: SSJH
   tags: [social-media, analytics, datashuoshuo]
@@ -93,7 +93,7 @@ python "$SKILL_DIR/scripts/send_plan_card.py" \
 - `--msg-type 1`（仅主贴）
 - `--content-mode ALL`
 - 不加 `--filter-ad`（不过滤广告）
-- 不加 `--no-ocr`（开启 OCR）
+- 默认**关闭 OCR 检索**（matchFields 只含 `content,title`）；确需封面 OCR/视频标签参与检索才加 `--with-ocr`
 
 **等待用户回复**：
 - 回复「确认」/「执行」→ 进入 Step 3

@@ -1,0 +1,4 @@
+interface:
+  display_name: "活动关键词与过滤词生成"
+  short_description: "从活动需求生成品牌与活动两套口径，结合搜索与热帖核验关键词和过滤词"
+  default_prompt: "使用 $campaign-keyword-generation 根据这段营销活动需求生成品牌与活动关键词、过滤词及核验记录。"

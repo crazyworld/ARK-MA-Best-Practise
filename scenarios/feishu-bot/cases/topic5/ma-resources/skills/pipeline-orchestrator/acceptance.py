@@ -110,7 +110,6 @@ def test_clean_run():
               "G1 ugc_category_mode=fixed_four → 固定四类")
         rep = st.read_artifact("report_md") or {}
         check(rep.get("chapters") == "five", "G2 report_chapters=five")
-        check(dag.params.get("nsr_denominator_includes_neutral") is True, "G3 nsr 含中性")
         oc = st.read_artifact("opinion_candidates") or {}
         check(len(oc.get("candidates", [])) >= 1, "G4 n09b 观点候选已生成供 HC 确认")
     finally:
