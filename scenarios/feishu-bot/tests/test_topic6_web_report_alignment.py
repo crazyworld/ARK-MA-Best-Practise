@@ -540,6 +540,48 @@ def test_case_original_hotspot_link_falls_back_to_url_line_without_block_links(t
     assert "链接：https://example.com/x" not in html
 
 
+def _build_case(tmp_path, text, links):
+    blocks = json.loads(EXAMPLE.read_text(encoding="utf-8"))
+    case = next(b for b in blocks if "docx-grid-block" in b["className"])
+    case["text"], case["links"] = text, links
+    source = tmp_path / "source.json"
+    source.write_text(json.dumps(blocks, ensure_ascii=False), encoding="utf-8")
+    html_path = tmp_path / "index.html"
+    build = subprocess.run(["node", str(BUILDER), str(source), str(html_path)], capture_output=True, text=True, check=False)
+    assert build.returncode == 0, build.stderr
+    html = html_path.read_text(encoding="utf-8")
+    return re.search(r'<li><strong class="key-emphasis">原始热点：</strong>(.*?)</li>', html).group(1)
+
+
+_ZH1, _ZH2, _WB3 = "https://www.zhihu.com/question/1", "https://www.zhihu.com/question/2", "https://s.weibo.com/weibo?q=c"
+
+
+def test_case_multi_topic_original_hotspot_platform_tags_outside_links(tmp_path):
+    """W47 案例 1 真实形态:md2source 额外给出整段「A（知乎）+ B（知乎）+ C」长锚文本。
+    每个子话题都有自己的链接时,逐个话题挂链接,所有（平台）与「+」都在链接外。"""
+    composite = "话题A？（知乎）+ 话题B，售价 5699 元起？（知乎）+ 话题C"
+    li = _build_case(tmp_path, f"案例 1：测试（知乎 · 93.4 分）\n原始热点：{composite}（微博）\n营销发现：说明。", [
+        {"text": "话题A？", "href": _ZH1},
+        {"text": "话题B，售价 5699 元起？", "href": _ZH2},
+        {"text": "话题C", "href": _WB3},
+        {"text": composite, "href": _ZH1},
+    ])
+    anchors = re.findall(r'<a class="source-link" href="([^"]+)"[^>]*>(.*?)</a>', li)
+    assert [(h, t) for h, t in anchors] == [(_ZH1, "话题A？"), (_ZH2, "话题B，售价 5699 元起？"), (_WB3, "话题C")]
+    plain = re.sub(r"<a [^>]*>.*?</a>", "", li)
+    assert plain.count("（知乎）") == 2 and plain.count("（微博）") == 1 and plain.count("+") == 2
+
+
+def test_case_composite_link_kept_when_a_sub_topic_has_no_own_link(tmp_path):
+    """干净性:子话题缺独立链接时保留整段长链接,不让任何话题变成不可点的纯文本。"""
+    composite = "话题A？（知乎）+ 话题B"
+    li = _build_case(tmp_path, f"案例 1：测试\n原始热点：{composite}（微博）\n营销发现：说明。", [
+        {"text": "话题A？", "href": _ZH1},
+        {"text": composite, "href": _ZH1},
+    ])
+    assert re.search(r'<a class="source-link" href="%s"[^>]*>%s</a>（微博）' % (re.escape(_ZH1), re.escape(composite)), li)
+
+
 def test_case_link_line_kept_when_no_original_hotspot_line(tmp_path):
     """干净性:没有「原始热点」行的案例,「链接：」行不被吞掉(避免 URL 从页面消失)。"""
     blocks = json.loads(EXAMPLE.read_text(encoding="utf-8"))

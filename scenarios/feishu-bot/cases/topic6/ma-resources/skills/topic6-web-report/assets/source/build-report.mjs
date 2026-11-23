@@ -661,6 +661,18 @@ function isMinorHeading(text) {
   return /^(行业洞察：|(?:热点事件|热门事件)\s*TOP\s*\d+|(?:热门玩法|平台热点词)\s*TOP\s*\d+|新代言官宣|游戏\s*IP\s*联名|合作争议|政策性风险|食品安全类|高管言论类|品牌危机公关案例|跨平台扩散信号|洞察\s*\d+[：:])/u.test(text);
 }
 
+// 多话题「原始热点」:md2source 会把整段「A（知乎）+ B（知乎）+ C」作为一条长锚文本链接(飞书文档里整段
+// 挂了链接),renderLinkedLine 按最长匹配优先命中它,导致中间的（平台）标注被包进蓝链。
+// 复合锚文本能按「（平台）+」拆成的子话题全部已有各自链接时才丢弃它;有任一子话题缺链接则保留原样(不丢链接)。
+const COMPOSITE_TOPIC_SPLIT_RE = /\s*[（(](?:微博|抖音|B站|知乎|快手|头条|百度|多平台)[^）)]*[）)]\s*[+＋]\s*/u;
+function splitCompositeCaseLinks(links) {
+  const own = new Set(links.map((link) => normalizeSourceLinkText(link.text)));
+  return links.filter((link) => {
+    const parts = normalizeSourceLinkText(link.text).split(COMPOSITE_TOPIC_SPLIT_RE).map((p) => p.trim()).filter(Boolean);
+    return parts.length < 2 || !parts.every((part) => own.has(part));
+  });
+}
+
 function renderGridCase(block) {
   const lines = textLines(block.text).filter((line) => line !== "•");
   const [title = "", ...details] = lines;
@@ -682,7 +694,7 @@ function renderGridCase(block) {
   if (topicOnly && explicitUrl && !caseLinks.some((link) => normalizeSourceLinkText(link.text) === topicOnly)) {
     caseLinks.push({ text: topicOnly, href: explicitUrl });
   }
-  const sourceLinks = new SourceLinkIndex(caseLinks);
+  const sourceLinks = new SourceLinkIndex(splitCompositeCaseLinks(caseLinks));
   const fields = details.filter((line) => !(hasOriginalLine && /^链接\s*[：:]/u.test(line)));
   const fieldList = fields.length
     ? `<ul class="insight-list case-field-list">${fields.map((line) => `<li>${renderListItem(line, sourceLinks)}</li>`).join("")}</ul>`
