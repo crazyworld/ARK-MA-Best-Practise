@@ -11,6 +11,42 @@
 
 ---
 
+## 2026-11-23
+
+### 网页报告：营销观察「原始热点」与消费洞察「触发事件」统一呈现
+
+- **触发**：营销观察案例卡中「原始热点」整段（含平台标注）包成蓝色链接，与「营销发现」两段紧贴、无分隔，
+  长标题时「（微博）」孤行，观感堆叠；消费洞察「触发事件」已是「话题蓝链 + 灰色平台标注 + 字段细分隔线」。
+- **根因**：`build-report.mjs` `renderGridCase` 对「原始热点」单独拼一个整段 `<a>`，字段用裸 `<p>` 输出，
+  没有复用洞察卡的 `insight-list` + `renderListItem` 链路。
+- **修复**：案例字段改走 `insight-list`（新增 `.case-field-list` 样式，与洞察卡同款）+ `renderListItem`，链接只包话题；
+  「链接：URL」行仍隐藏并作为链接目标。只改 Phase G 模板，数据/Prompt 不动。
+- **影响文件**：`skills/topic6-web-report/assets/source/{build-report.mjs,styles.css,DESIGN_SPEC.md}`、
+  `skills/topic6-web-report/{SKILL.md,CHANGELOG.md}`、`tests/test_topic6_web_report_alignment.py`（旧「整段链接」断言改为新口径，
+  另补无 block.links 时「链接：」兜底用例）。上线需 `update_ma.sh` 同步 topic6-web-report skill。
+
+### 妙搭发布：凭据原地更新、网络故障不判授权失效、/republish 增加 Gateway 兜底
+
+- **触发**：job_980f1999c493（W47 full）Phase A~G 全部完成，Phase H 所有 `lark-cli apps --as user` 返回
+  `HTTP 502: credential resolve returned no substitution`；`/continue`、`/republish` 均无法恢复，最终人工在
+  Gateway 侧补发。
+- **根因链**：212 出口 SSL hostname mismatch 约 1h → `refresh_if_needed` 把网络错误当授权失效 → 常驻刷新 3 次后
+  清空有效的 refresh_token → `/continue` 触发重新扫码 → `_ensure_credential` 删旧凭据建新凭据 → 运行中
+  Session 绑定的旧凭据不存在，出站替换失败（新凭据 15:46 刷新成功后 16:02 仍 502，佐证 Session 按凭据 ID 绑定）。
+- **修复**（只改 Gateway，Agent prompt/skill/environment 零改动，无需 update_ma.sh）：
+  - A `topic6_user_oauth._ensure_credential`：同类型凭据原地更新（ID 不变），只有历史 env_oauth/不存在才删旧建新。
+  - B `FeishuOAuth._request` 区分 `OAuthTransientError`（网络/SSL/5xx/429/非 JSON）：不计入重新授权次数、
+    不清空 refresh_token；任务触发时遇到临时故障不发起扫码。
+  - 兜底 `miaoda_publisher.py` + `topic6_runner._after_phase_h_failure`：仅当配置 `TOPIC6_MIAODA_CLI_BIN`、
+    Phase H 因环境故障失败且 Agent 未做任何妙搭写操作时生效。首轮失败只提示 /republish；/republish 轮次
+    Agent 原流程照跑，仍因环境故障失败才由 Gateway 用本轮网页（manifest sha256 + 发布时间校验）以发起人身份
+    发布；Session 已终止时直接兜底。目标应用：历史 online_url 精确匹配则更新，同名但无法确认则停止，否则新建。
+  - C 回归测试：`tests/test_topic6_user_oauth.py` 新增 12 例，`tests/test_topic6_miaoda_fallback.py` 17 例。
+- **上线**：212 准备 lark-cli 与 glibc-217 版 node，config.env 配 `TOPIC6_MIAODA_CLI_BIN`/`TOPIC6_MIAODA_NODE_BIN_DIR`，
+  重启 Gateway。未配置时与原行为一致。
+
+---
+
 ## 2026-11-20
 
 ### 客户标注 Prompt 原样替换：C0 v17 / R1 v7 / R2 v6 / R3 v5 / R4 v7 / R5 v8

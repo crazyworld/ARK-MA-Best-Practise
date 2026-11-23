@@ -1,5 +1,16 @@
 # 变更记录
 
+## 2026-11-23（营销观察案例字段与消费洞察卡同一呈现）
+
+- 现象：营销观察「原始热点：」整段（含「（平台）」）包成一个蓝色链接，与「营销发现」用两个 `<p>` 紧贴排列，
+  长标题时平台标注孤行、字段之间没有分隔，视觉上堆在一起；消费洞察「触发事件」则是链接只包话题、平台标注灰字、字段间细分隔线。
+- 处理：`build-report.mjs` `renderGridCase` 改为与洞察卡同一渲染路径——字段输出为 `ul.insight-list.case-field-list`，
+  每行走 `renderListItem`（`renderLinkedLine` + `SourceLinkIndex`），链接只覆盖话题原文；source.json 未把「链接：」并入
+  `block.links` 时，用独立 URL 以话题原文补一条链接，保持原有兜底。`styles.css` 新增 `.case-field-list` 样式（与
+  `.behavior-insight-card .insight-list` 同款），删除不再使用的 `.case-source-link`。
+- 验证：W41/W44/W45 真实报告与 source.example.json 改动前后各 build 一次，全页 href 序列逐条一致；
+  `validate-rendered-content.mjs` 全部通过；无 block.links 仅有「链接：」行的构造用例链接正常；桌面 1280 与移动 390 截图核对。
+
 ## 2026-11-14（合入客户模板 2026-11-12 版的修复，版本号不变）
 
 三方合并：基线=客户 V2 vendor 版（`ada_topic6_v2_261110/agent/skill/_vendor/...`，11-10），

@@ -75,13 +75,26 @@ FORBIDDEN_METRIC_PATTERNS = (
     re.compile(r"渗透率[^。！？\n]{0,6}(?:声量|活动|品牌)"),
 )
 
-# ── 类别命名（FIX-32）────────────────────────────────────────────────
+# ── 类别命名（FIX-32，检查清单 3.9 P0）──────────────────────────────
 # 观点类别=讨论话题、参与方式=动作/形式，均不得带情感或评价倾向。
+# 逐字照抄原版 blueai-opinion-discovery-skill / phase-ugc-discovery-skill run.py 的
+# SENTIMENT_WORDS / EVAL_SUFFIX / CATCHALL_NAMES；编排器 label_review 引用这里。
 TENDENCY_TERMS = (
-    "好评", "差评", "吐槽", "避雷", "种草", "安利",
-    "喜欢", "失望", "满意", "推荐", "点赞", "真香",
+    "好评", "差评", "吐槽", "避雷", "失望", "满意", "不满", "喜欢", "种草",
+    "安利", "夸赞", "点赞", "批评", "抱怨", "推荐", "踩雷", "惊艳", "翻车",
+    "正面", "负面", "积极", "消极",
 )
-TENDENCY_NAME_PATTERN = re.compile(r".+[好差]$")
+TENDENCY_NAME_PATTERN = re.compile(r"(好|差|棒|赞|烂|高|低|贵|便宜)$")
+CATCHALL_CATEGORY_NAMES = ("其他", "其它", "未分类", "杂项", "无法归类", "其余")
+
+
+def tendency_hits(name: str) -> list[str]:
+    """类别名命中的倾向词；以评价词结尾记为「评价后缀」。只判断类别名，不判原文。"""
+    text = str(name or "").strip()
+    hits = [word for word in TENDENCY_TERMS if word in text]
+    if TENDENCY_NAME_PATTERN.search(text):
+        hits.append("评价后缀")
+    return hits
 
 # ── 达人层级阈值（FIX-16）────────────────────────────────────────────
 # 平台 → (头部下限, 腰部下限, 尾部下限)，单位：粉丝数。None 表示该平台不参与层级统计。

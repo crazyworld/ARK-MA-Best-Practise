@@ -289,5 +289,94 @@ class PolicyGateTest(unittest.TestCase):
         self.assertTrue(out["artifacts"]["confirmed_opinion_labels"]["confirmed"])
 
 
+class Round2DirectionTest(unittest.TestCase):
+    """正负两套候选分别注入轮次二两个观点任务，互不串用。"""
+
+    def test_positive_and_negative_labels_isolated(self):
+        import annotate as A
+        rows = [{"_annot_id": "p", "title": "t", "content": "c", "ai_sentiment": 1,
+                 "relevance": True, "content_mode": "UGC"},
+                {"_annot_id": "n", "title": "t", "content": "c2", "ai_sentiment": -1,
+                 "relevance": True, "content_mode": "UGC"}]
+        prompts = {}
+
+        def fake(system, user, **_kw):
+            ids = [item["id"] for item in json.loads(user)]
+            if "正面内容" in system:
+                prompts["pos"] = system
+                return [{"id": i, "opinion": "口感风味"} for i in ids]
+            if "负面内容" in system:
+                prompts["neg"] = system
+                return [{"id": i, "opinion": "排队时长"} for i in ids]
+            return [{"id": i, "ugc_category": "晒单分享", "discussion_dimension": "产品"}
+                    for i in ids]
+
+        with patch("semantic.llm_available", return_value=True), \
+             patch("semantic.chat_json", side_effect=fake):
+            result = A.annotate_round2(rows, opinion_labels=["口感风味"],
+                                       negative_labels=["排队时长"],
+                                       ugc_categories=["晒单分享"])
+        self.assertIn("口感风味", prompts["pos"])
+        self.assertNotIn("排队时长", prompts["pos"])
+        self.assertIn("排队时长", prompts["neg"])
+        self.assertNotIn("口感风味", prompts["neg"])
+        self.assertEqual({r["_annot_id"]: r["opinion"] for r in result["rows"]},
+                         {"p": "口感风味", "n": "排队时长"})
+
+    def test_negative_label_rejected_for_positive_row(self):
+        """正面行返回负面候选 → 视为越界值丢弃（结构上不允许串用）。"""
+        import annotate as A
+        row = {"_annot_id": "p"}
+        A._apply_opinion(row, {"opinion": "排队时长"}, ["口感风味"])
+        self.assertNotIn("opinion", row)
+
+
+class ValidatorCategoryNameTest(unittest.TestCase):
+    """检查清单 3.9（P0）：类别名带倾向；只判类别名，不判代表原文。"""
+
+    def _scan(self, bundle):
+        import validator
+        scan = validator._load_scan()
+        result = scan.scan_markdown("# 报告", stats={"campaigns": {"A": bundle}})
+        return [i for i in result["issues"] if "category-tendency" in i["id"]]
+
+    def test_tendency_opinion_label_is_p0(self):
+        issues = self._scan({"opinion_analysis": {"positive": {"top5": [
+            {"label": "包装好评", "representatives": [{"content": "真心好评"}]}]}}})
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(issues[0]["severity"], "P0")
+
+    def test_ugc_tendency_label_is_p0(self):
+        issues = self._scan({"ugc_category_dist": {"吐槽避雷": 3, "晒单分享": 2}})
+        self.assertEqual([i["id"] for i in issues],
+                         ["P0-category-tendency-UGC 参与方式-吐槽避雷"])
+
+    def test_multi_label_split_and_other_skipped(self):
+        issues = self._scan({"opinion_analysis": {"negative": {"top5": [
+            {"label": "排队时长,价格贵"}, {"label": "其他"}]}}})
+        self.assertEqual(len(issues), 1)
+        self.assertIn("价格贵", issues[0]["evidence"])
+
+    def test_neutral_labels_pass(self):
+        self.assertEqual(self._scan({
+            "opinion_analysis": {"positive": {"top5": [{"label": "口感风味"}]}},
+            "ugc_category_dist": {"晒单分享": 1}}), [])
+
+    def test_representative_text_not_scanned(self):
+        """代表原文里的用户措辞（如「好评」）不在 3.9 判定范围内。"""
+        self.assertEqual(self._scan({"opinion_analysis": {"positive": {"top5": [
+            {"label": "口感风味",
+             "representatives": [{"content": "五星好评，强烈推荐"}]}]}}}), [])
+
+
+class EvidenceBoundaryTest(unittest.TestCase):
+    def test_opinion_prompts_carry_evidence_boundary(self):
+        import annotate as A
+        prompts = A._r2_task_prompts("A", ["口感风味"], ["晒单分享"], False, None, None)
+        for key in ("opinion", "opinion_negative"):
+            self.assertIn("价格列表", prompts[key])
+            self.assertIn("抱怨第三方的情绪不转成品牌负评", prompts[key])
+
+
 if __name__ == "__main__":
     unittest.main()

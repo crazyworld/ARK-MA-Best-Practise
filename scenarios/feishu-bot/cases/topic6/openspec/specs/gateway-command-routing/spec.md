@@ -76,6 +76,15 @@
 - **WHEN** 任务已发布完成（done），用户在飞书文档补图后发送 `/republish`
 - **THEN** 在原 Session 注入只重跑 Phase G+H 的指令，更新同一个妙搭应用，回复 `[/republish] 已开始重新发布网页 job_id=…`
 
+#### Scenario: /republish 遇到 Phase H 环境故障（Gateway 兜底）
+- **WHEN** 已配置 `TOPIC6_MIAODA_CLI_BIN`，/republish 本轮 Agent 的 Phase H 因环境故障失败（沙箱用户凭据 `credential resolve returned no substitution`、身份鉴权失败、沙箱不可用），且 Agent 本轮未执行任何妙搭写操作
+- **THEN** 原有失败收口与提示照旧，随后 Gateway 用本轮 Phase G 同步回来的 index.html（manifest sha256 一致、发布时间不早于本轮开始）以发起人身份发布，成功后任务 done 并回复链接；业务停止（预检失败、同名冲突、Agent 已建应用/已 push）不兜底
+- **AND** Session 已 failed/terminated 时不注入消息，直接用最近一次同步的网页兜底并注明未重新读取飞书文档
+
+#### Scenario: 首轮 Phase H 环境故障
+- **WHEN** 已配置兜底，非 /republish 轮次的 Phase H 因环境故障失败
+- **THEN** 不自动发布，只追加提示「发送 /republish 由 Gateway 补发」
+
 #### Scenario: 备注优先于触发词
 - **WHEN** 用户刚点了"备注"按钮，随后发送含"热点周报"的文字
 - **THEN** 该文字作为 HC 备注处理，不启动新任务

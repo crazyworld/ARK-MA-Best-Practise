@@ -47,7 +47,7 @@ class TestReportContract(unittest.TestCase):
         self.assertIn("|", tables[1]["_table_rows"][1][1])
 
     def test_opinion_denominator_and_representatives(self):
-        rows = [{"content_mode": "UGC", "opinion": "口味好", "ugc_category": "测评",
+        rows = [{"content_mode": "UGC", "opinion": "口味风味", "ugc_category": "测评",
                  "ai_sentiment": 1, "content": str(i), "interaction_cnt": i}
                 for i in range(12)]
         rows[0]["opinion"] = "N/A"
@@ -67,7 +67,7 @@ class TestReportContract(unittest.TestCase):
                  "site_name": "小红书", "_platform": "xiaohongshu",
                  "_publish_ymd": f"202610{1+i%2:02d}", "interaction_cnt": i,
                  "ai_sentiment": 1 if i < 12 else -1 if i < 23 else 0,
-                 "opinion": "口味好" if i < 12 else "体验差", "ugc_category": "测评",
+                 "opinion": "口味风味" if i < 12 else "门店体验", "ugc_category": "测评",
                  "discussion_dimension": "品牌"} for i in range(30)]
         bundle = handlers._campaign_stats(rows, ["口味"], [])
         stats = {"brand": {"trend": {"xiaohongshu": {"20261001": 5, "20261002": 7}},

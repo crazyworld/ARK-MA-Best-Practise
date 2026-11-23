@@ -43,6 +43,13 @@ _DISCUSSION_DIM_DEF = (
     "产品=功能/使用体验/成分材质/外观/性价比；"
     "活动=活动机制/参与体验/获取方式"
 )
+# 各轮共同的证据边界（FIX-32）：annotation_prompt.md:218-220 原文照抄。
+_EVIDENCE_BOUNDARY = (
+    "每个观点标签须指向原帖中针对该对象的实际评价；仅IP/品牌/商品名称、价格列表、"
+    "赠送规则、CTA或OCR识别不新增观点。相同评价不能机械同时归入形象、包装及赠品多个类别。"
+    "抱怨第三方的情绪不转成品牌负评，商品自带褒义名称不等于作者正面态度。"
+    "未能辨认评价对象时记录证据歧义，使用现有兜底规则，不强配标签。"
+)
 # prompt 用的三类定义（原版 annot_r2.py 的 discussion_dimension 段落，逐条对应）。
 _DISCUSSION_DIM_PROMPT = (
     "- 品牌：主要讨论品牌形象、价值观、合作背景、联名意义\n"
@@ -328,6 +335,7 @@ def annotate_round1(
     rerun_ids: list[str] | None = None,
     calibration: list[dict] | None = None,
     cache_dir=None,
+    route_decision: str | None = None,
 ) -> dict:
     """轮次一标注。返回 {rows, round:1, routed_via, coverage, degraded?, skipped_empty}。
 
@@ -354,7 +362,8 @@ def annotate_round1(
         dh_prompt=_r1_dh_prompt(ctx), dh_apply=_apply_r1,
         small_engine=lambda batch: _small_engine_r1(
             batch, ctx, calibration, cache=cache),
-        degrade=_degrade_r1, dh_columns=_R1_DH_COLUMNS)
+        degrade=_degrade_r1, dh_columns=_R1_DH_COLUMNS,
+        route_decision=route_decision)
     cov = _coverage_r1(to_annotate)
     cov["skipped_empty"] = len(skipped)
     out = {
@@ -471,6 +480,7 @@ def _r2_task_prompts(
             "## 规则\n"
             "从候选标签中选 1 个最匹配的；仅当内容兼有两个不同话题时选 2 个"
             "（用英文逗号分隔）。优先篇幅最重的部分；都不匹配输出「其他」。\n"
+            f"## 证据边界\n{_EVIDENCE_BOUNDARY}\n"
             + output_opinion + calib
         )
 
@@ -822,22 +832,48 @@ def check_coverage(
 
 
 # ── 路由 + 执行（真路径 DataHub / 小引擎；无凭据降级）────────────
+class DataHubRouteRequired(Exception):
+    """数据量达到 DataHub 阈值但 DataHub 不可用：须先问用户，禁止自行降级（FIX-33）。
+
+    原版依据：LM/错误案例与修正.md:302-306——DATAHUB_API_KEY 未设置时
+    「禁止自行降级，必须向用户确认 Key 来源或是否接受降级」。
+    由 handler 转换为 HumanPause；annotate 本身不依赖编排器。
+    """
+
+    def __init__(self, rows: int, threshold: int, reason: str):
+        super().__init__(
+            f"数据量 {rows} 条 ≥ {threshold}，应走 DataHub；{reason}。"
+            "请提供 DATAHUB_API_KEY，或确认改用直接 API 逐批标注"
+            f"（约 {max(1, -(-rows // R1_BATCH))} 次调用）。")
+        self.rows = rows
+        self.threshold = threshold
+        self.reason = reason
+
+
+# 用户确认后的路由决策值（annotation_route_decision.route）
+ROUTE_SMALL_ENGINE = "small_engine"
+
+
 def _route_and_run(rows, *, threshold, dh_prompt, dh_apply, small_engine, degrade,
-                   dh_columns=None) -> tuple[str, bool]:
+                   dh_columns=None, route_decision: str | None = None) -> tuple[str, bool]:
     """按阈值与可用凭据选择执行路径。返回 (routed_via, degraded)。
 
-    - 行数 ≥ threshold 且 DataHub 可用 → datahub 批量；
-    - 否则小引擎（semantic）可用 → 小引擎；
-    - 都不可用 / 真路径异常 → 确定性降级。
+    - 行数 ≥ threshold：必须走 DataHub；DataHub 不可用或运行异常时抛
+      DataHubRouteRequired 交用户决定（FIX-33），用户确认 small_engine 后才改走小引擎；
+    - 行数 < threshold：直接走小引擎（原版只在需要 DataHub 的场景询问）；
+    - 语义能力都不可用 → 确定性降级（显式 degraded，由 handler 拒收）。
     """
     n = len(rows)
-    use_datahub = n >= threshold and datahub.api_available()
-    if use_datahub:
+    needs_datahub = n >= threshold and route_decision != ROUTE_SMALL_ENGINE
+    if needs_datahub:
+        if not datahub.api_available():
+            raise DataHubRouteRequired(n, threshold, "DataHub 不可用（DATAHUB_API_KEY 未配置或 SDK 缺失）")
         try:
             _run_datahub(rows, dh_prompt, dh_apply, dh_columns)
             return "datahub", False
-        except Exception:
-            pass  # 批量任务级失败 → 落小引擎/降级
+        except Exception as error:  # 批量任务级失败：同样先问用户，不静默切换
+            raise DataHubRouteRequired(
+                n, threshold, f"DataHub 运行异常：{type(error).__name__}") from error
     if semantic.llm_available() and n:
         try:
             small_engine(rows)

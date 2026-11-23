@@ -279,7 +279,8 @@ class TestRouting(unittest.TestCase):
             datahub.api_available = orig_avail
             datahub.batch_annotate = orig_batch
 
-    def test_datahub_failure_falls_back(self):
+    def test_datahub_failure_asks_user_instead_of_falling_back(self):
+        """FIX-33：DataHub 运行异常不再静默转直连，先问用户（LM 错误案例:302-306）。"""
         orig_avail = datahub.api_available
         orig_batch = datahub.batch_annotate
         datahub.api_available = lambda: True
@@ -289,9 +290,9 @@ class TestRouting(unittest.TestCase):
 
         datahub.batch_annotate = boom
         try:
-            res = annotate_mod.annotate_round1(_rows(3), context=_ctx(), threshold=2)
-            # DataHub 抛错 → 无 Ark 凭据则降级（本地无凭据场景）。
-            self.assertIn(res["routed_via"], ("fallback", "small_engine"))
+            with self.assertRaises(annotate_mod.DataHubRouteRequired) as raised:
+                annotate_mod.annotate_round1(_rows(3), context=_ctx(), threshold=2)
+            self.assertIn("DataHub 运行异常", str(raised.exception))
         finally:
             datahub.api_available = orig_avail
             datahub.batch_annotate = orig_batch

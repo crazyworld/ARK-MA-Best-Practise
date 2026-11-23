@@ -7,6 +7,14 @@ import random
 import re
 from typing import Any
 
+import validator as _validator
+
+# 口径唯一事实源 topic5-validator/scripts/policy.py（与 handlers 同一加载器）。
+# 本模块的倾向词校验离不开它，定位失败直接报错，不维护第二份词表。
+_policy = _validator.load_policy()
+if _policy is None or not hasattr(_policy, "tendency_hits"):
+    raise ImportError("label_review: 无法加载 topic5-validator/scripts/policy.py")
+
 REVIEW_SCHEMA_VERSION = 1
 
 
@@ -67,7 +75,7 @@ def _quote_spans(field: str, text: str) -> list[tuple[int, str]]:
 
 def source_catalog(
     rows: list[dict], size: int = 200, *, seed: int = DISCOVERY_SEED,
-) -> tuple[list[dict], dict]:
+) -> tuple[list[dict], dict, dict]:
     """Mixed sample with field-bound contiguous excerpts and unambiguous quote IDs.
 
     抽样：互动 Top 50% + 随机 50%（seed=42），池不足 size 取全部。
@@ -120,24 +128,19 @@ def source_catalog(
     return samples, catalog, sampling
 
 
-# 类别命名口径（FIX-31/32）：原版 opinion/ugc-discovery run.py 的同名常量，逐字照抄。
-SENTIMENT_WORDS = ("好评", "差评", "吐槽", "避雷", "失望", "满意", "不满", "喜欢", "种草",
-                   "安利", "夸赞", "点赞", "批评", "抱怨", "推荐", "踩雷", "惊艳", "翻车",
-                   "正面", "负面", "积极", "消极")
-CATCHALL_NAMES = ("其他", "其它", "未分类", "杂项", "无法归类", "其余")
-EVAL_SUFFIX = re.compile(r"(好|差|棒|赞|烂|高|低|贵|便宜)$")
+# 类别命名口径（FIX-31/32）：唯一事实源在 topic5-validator/scripts/policy.py
+# （原版 discovery run.py 的 SENTIMENT_WORDS / EVAL_SUFFIX / CATCHALL_NAMES）。
+SENTIMENT_WORDS = _policy.TENDENCY_TERMS
+EVAL_SUFFIX = _policy.TENDENCY_NAME_PATTERN
+CATCHALL_NAMES = _policy.CATCHALL_CATEGORY_NAMES
 # 类别数量区间（pipeline_config.phase_discovery.num_categories / ugc 3-6）
 CATEGORY_COUNT = {"positive": (5, 8), "negative": (3, 5), "ugc": (3, 6)}
 POLARITY_LABEL = {"positive": "正面", "negative": "负面"}
 
 
 def tendency_hits(name: str) -> list[str]:
-    """类别名命中的倾向词；以评价词结尾记为「评价后缀」（原版 lint_names）。"""
-    text = str(name or "").strip()
-    hits = [word for word in SENTIMENT_WORDS if word in text]
-    if EVAL_SUFFIX.search(text):
-        hits.append("评价后缀")
-    return hits
+    """类别名命中的倾向词（委托 policy，避免两处词表漂移）。"""
+    return _policy.tendency_hits(name)
 
 
 def lint_categories(names: list[str], kind: str) -> list[str]:

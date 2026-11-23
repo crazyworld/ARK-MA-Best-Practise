@@ -44,6 +44,14 @@ class UserAuthorizationRequired(RuntimeError):
     """当前消息发送者尚无可用的妙搭用户授权。"""
 
 
+class OAuthTransientError(RuntimeError):
+    """飞书 OAuth 请求的临时故障（网络/SSL/超时/5xx/429/非 JSON 响应）。
+
+    与 refresh_token 失效（飞书明确返回 4xx 业务错误）区分：临时故障不消耗授权链，
+    不计入重新授权次数、不清空 refresh_token，下一轮继续重试。
+    """
+
+
 @dataclass(frozen=True)
 class OAuthTokens:
     access_token: str
@@ -165,12 +173,23 @@ class FeishuOAuth:
             return await client.post(url, json=body)
 
     async def _request(self, method: str, url: str, **kwargs) -> dict:
-        if self._client is not None:
-            response = await self._client.request(method, url, **kwargs)
-        else:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.request(method, url, **kwargs)
-        payload = _json(response)
+        try:
+            if self._client is not None:
+                response = await self._client.request(method, url, **kwargs)
+            else:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    response = await client.request(method, url, **kwargs)
+        except httpx.TransportError as error:
+            raise OAuthTransientError(
+                f"飞书 OAuth 网络异常：{type(error).__name__}"
+            ) from error
+        if response.status_code >= 500 or response.status_code == 429:
+            raise OAuthTransientError(f"飞书 OAuth 服务暂不可用 HTTP {response.status_code}")
+        try:
+            payload = _json(response)
+        except RuntimeError as error:
+            # 非 JSON 响应（代理/网关错误页）不是飞书的业务判定
+            raise OAuthTransientError(str(error)) from error
         if (
             not response.is_success
             or payload.get("error")
@@ -284,57 +303,88 @@ class Topic6UserAuthorization:
             current = self._store.get_user_oauth(open_id)
             if _is_fresh(current, margin_ms):
                 return current["vault_id"]
-            # 历史 env_oauth 或上次写 Ark 失败：删旧建新，保证凭据类型正确
-            legacy = current["expires_at"] in (PLATFORM_MANAGED_EXPIRES_AT, EXPIRED_RETRY_AT)
-            try:
-                tokens = await self._oauth.refresh(current["refresh_token"])
-                _validate_access_token_size(tokens.access_token)
-            except Exception as error:
-                raise UserAuthorizationRequired(
-                    "当前飞书账号的妙搭授权已失效，需要重新扫码授权。"
-                    "请重新发送 `/start`（或刚才的命令），按提示完成授权。"
-                ) from error
-            scopes = tuple(current["scopes"])
-            # 先落库新 refresh_token（旧的已失效），expires_at 暂记为待重试。
-            self._store.save_user_oauth(
-                open_id, current["vault_id"], current["credential_id"],
-                tokens.refresh_token, EXPIRED_RETRY_AT, scopes,
-            )
-            if legacy:
-                credential = await self._ensure_credential(open_id, tokens.access_token)
-                credential_id = credential["credential_id"]
-                log.info(
-                    "topic6 user credential migrated env_oauth -> environment_variable "
-                    "user=%s vault=%s credential=%s",
-                    open_id, current["vault_id"], credential_id,
-                )
-            else:
-                await self._ark.update_environment_credential(
-                    current["vault_id"], current["credential_id"], tokens.access_token,
-                )
-                credential_id = current["credential_id"]
-            self._store.save_user_oauth(
-                open_id, current["vault_id"], credential_id,
-                tokens.refresh_token, tokens.expires_at, scopes,
-            )
-            if tokens.refresh_expires_at and (
-                tokens.refresh_expires_at - _now_ms() < REFRESH_TOKEN_WARN_MS
-            ):
-                log.warning(
-                    "topic6 user refresh_token 即将过期 user=%s expires_at=%s，届时需要重新扫码",
-                    open_id, tokens.refresh_expires_at,
-                )
-            log.info(
-                "topic6 user token refreshed user=%s vault=%s credential=%s expires_at=%s",
-                open_id, current["vault_id"], credential_id, tokens.expires_at,
-            )
+            await self._refresh_locked(open_id, current)
             return current["vault_id"]
 
-    async def _ensure_credential(self, open_id: str, access_token: str) -> dict[str, str]:
-        """确保用户 Vault 中有 environment_variable 凭据（删旧建新，兼容历史 env_oauth）。
+    async def refresh_and_get_access_token(self, open_id: str) -> str:
+        """强制刷新一次并返回新的 access_token（仅供 Gateway 侧妙搭兜底发布在内存中使用）。
 
-        凭据类型/secret_name 是结构性字段，不可原地改，所以统一删掉同名旧凭据后重建；
-        Vault ID 保持不变（Session 只能在创建时挂 Vault）。
+        与任务触发时的 force_refresh 等价：轮换 refresh_token 并原地更新同一条 Vault 凭据，
+        不改变 Session 侧任何行为。access_token 不落库、不记日志。
+        """
+        current = self._store.get_user_oauth(open_id)
+        if not current or not current.get("refresh_token"):
+            raise UserAuthorizationRequired(
+                "发起人的妙搭授权已失效，需要重新扫码授权后再试。"
+            )
+        lock = self._refresh_locks.setdefault(open_id, asyncio.Lock())
+        async with lock:
+            current = self._store.get_user_oauth(open_id)
+            tokens = await self._refresh_locked(open_id, current)
+            return tokens.access_token
+
+    async def _refresh_locked(self, open_id: str, current: dict) -> OAuthTokens:
+        """持锁调用：刷新 token → 先落库 refresh_token → 写 Ark 凭据 → 落库过期时间。"""
+        if not current or not current.get("refresh_token"):
+            raise UserAuthorizationRequired(
+                "当前飞书账号的妙搭授权已失效，需要重新扫码授权。"
+                "请重新发送 `/start`（或刚才的命令），按提示完成授权。"
+            )
+        # 历史 env_oauth 或上次写 Ark 失败：走 _ensure_credential（同类型原地更新，类型不对才删旧建新）
+        legacy = current["expires_at"] in (PLATFORM_MANAGED_EXPIRES_AT, EXPIRED_RETRY_AT)
+        try:
+            tokens = await self._oauth.refresh(current["refresh_token"])
+            _validate_access_token_size(tokens.access_token)
+        except OAuthTransientError:
+            # 网络/SSL/5xx：refresh_token 未被飞书判定失效，不触发重新授权
+            raise
+        except Exception as error:
+            raise UserAuthorizationRequired(
+                "当前飞书账号的妙搭授权已失效，需要重新扫码授权。"
+                "请重新发送 `/start`（或刚才的命令），按提示完成授权。"
+            ) from error
+        scopes = tuple(current["scopes"])
+        # 先落库新 refresh_token（旧的已失效），expires_at 暂记为待重试。
+        self._store.save_user_oauth(
+            open_id, current["vault_id"], current["credential_id"],
+            tokens.refresh_token, EXPIRED_RETRY_AT, scopes,
+        )
+        if legacy:
+            credential = await self._ensure_credential(open_id, tokens.access_token)
+            credential_id = credential["credential_id"]
+            log.info(
+                "topic6 user credential ensured (legacy/retry path) "
+                "user=%s vault=%s credential=%s",
+                open_id, current["vault_id"], credential_id,
+            )
+        else:
+            await self._ark.update_environment_credential(
+                current["vault_id"], current["credential_id"], tokens.access_token,
+            )
+            credential_id = current["credential_id"]
+        self._store.save_user_oauth(
+            open_id, current["vault_id"], credential_id,
+            tokens.refresh_token, tokens.expires_at, scopes,
+        )
+        if tokens.refresh_expires_at and (
+            tokens.refresh_expires_at - _now_ms() < REFRESH_TOKEN_WARN_MS
+        ):
+            log.warning(
+                "topic6 user refresh_token 即将过期 user=%s expires_at=%s，届时需要重新扫码",
+                open_id, tokens.refresh_expires_at,
+            )
+        log.info(
+            "topic6 user token refreshed user=%s vault=%s credential=%s expires_at=%s",
+            open_id, current["vault_id"], credential_id, tokens.expires_at,
+        )
+        return tokens
+
+    async def _ensure_credential(self, open_id: str, access_token: str) -> dict[str, str]:
+        """确保用户 Vault 中有且仅有一条 environment_variable 凭据，并写入最新 access_token。
+
+        已有同名 environment_variable 凭据 → 原地更新（凭据 ID 不变）。运行中的 Session 绑定的是
+        创建时的凭据，删旧建新会让它解析不到（`credential resolve returned no substitution`），
+        所以只有类型不对（历史 env_oauth）或凭据不存在时才删旧建新。Vault ID 始终不变。
         """
         current = self._store.get_user_oauth(open_id)
         vault_id = current["vault_id"] if current else ""
@@ -350,9 +400,29 @@ class Topic6UserAuthorization:
                 "",
             ) or await self._ark.create_vault(vault_name)
 
-        for credential in await self._ark.list_credentials(vault_id):
-            if credential.get("secret_name") != USER_ACCESS_TOKEN_ENV:
-                continue
+        same_name = [
+            c for c in await self._ark.list_credentials(vault_id)
+            if c.get("secret_name") == USER_ACCESS_TOKEN_ENV
+        ]
+        reusable = [
+            c for c in same_name
+            if _credential_type(c) == "environment_variable"
+        ]
+        if reusable:
+            keep = reusable[0]
+            # 优先保留本地记录的那条（Session 挂的就是它）
+            recorded = str((current or {}).get("credential_id") or "")
+            for candidate in reusable:
+                if str(candidate.get("id")) == recorded:
+                    keep = candidate
+                    break
+            keep_id = str(keep["id"])
+            await self._ark.update_environment_credential(vault_id, keep_id, access_token)
+            stale = [c for c in same_name if str(c.get("id")) != keep_id]
+        else:
+            keep_id = ""
+            stale = same_name
+        for credential in stale:
             try:
                 await self._ark.delete_credential(vault_id, str(credential["id"]))
             except Exception:  # noqa: BLE001 - 旧凭据可能已不存在
@@ -360,10 +430,17 @@ class Topic6UserAuthorization:
                     "topic6 delete stale credential failed vault=%s cred=%s",
                     vault_id, credential.get("id"),
                 )
+        if keep_id:
+            return {"vault_id": vault_id, "credential_id": keep_id}
         credential_id = await self._ark.create_environment_variable_credential(
             vault_id, USER_CREDENTIAL_NAME, USER_ACCESS_TOKEN_ENV, access_token,
         )
         return {"vault_id": vault_id, "credential_id": credential_id}
+
+
+def _credential_type(credential: dict) -> str:
+    """list_credentials 返回 auth_type；兼容测试桩的 type 字段。缺省视为 environment_variable 以外。"""
+    return str(credential.get("auth_type") or credential.get("type") or "")
 
 
 def _is_fresh(current: Optional[dict], margin_ms: int) -> bool:

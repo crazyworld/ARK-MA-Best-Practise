@@ -213,6 +213,8 @@ nodes:
     outputs: [annotated_round1]
     success: 全量两基础标签；按 annotation_routing_threshold 路由小引擎/DataHub
     # 口径修订 2026-10-21:情感以 AI 标注为准,缺 AI 情感直接报错,不再兜底
+    # FIX-33：≥阈值且 DataHub 不可用/异常时暂停问用户，禁止自行降级
+    pause_capable: true
     side_effect: annotation-batch
     idempotency: "annot:r1:{task_id}:{resource_lock}"
     retry: {max: 2, on_fail: pause}

@@ -55,6 +55,8 @@ class FakeArk:
             "vault_id": vault_id,
             "display_name": display_name,
             "secret_name": secret_name,
+            # 与真实 ArkClient.list_credentials 一致（212 实测 auth_type=environment_variable）
+            "auth_type": "environment_variable",
         }
         self.credentials.append(item)
         self.created_credentials.append(
@@ -163,10 +165,11 @@ async def test_authorize_auto_detects_open_id_and_is_idempotent(tmp_path):
     # 存真实过期时间（不再是平台托管的 0）
     assert saved["expires_at"] > int(time.time() * 1000)
     assert len(ark.created_vaults) == 1
-    # 两次授权都建 environment_variable 凭据；第二次先删掉同名旧凭据
-    assert [c[3] for c in ark.created_credentials] == ["access-1", "access-2"]
-    assert len(ark.deleted_credentials) == 1
-    assert ark.updated == []
+    # 首次授权新建凭据；重复授权原地更新同一条（凭据 ID 不变，运行中的 Session 不失联）
+    assert [c[3] for c in ark.created_credentials] == ["access-1"]
+    assert ark.deleted_credentials == []
+    assert ark.updated == [("vlt-1", "cred-1", "access-2")]
+    assert saved["credential_id"] == "cred-1"
     store.close()
 
 
@@ -666,3 +669,198 @@ def _message() -> IncomingMessage:
         text="/start demo",
         mentioned_bot=False,
     )
+
+
+# ---------------------------------------------------------------------------
+# 2026-11-23 job_980f1999c493：运行中重新授权删旧建新 → Session `credential resolve returned
+# no substitution`；网络抖动被误判为授权失效 → refresh_token 被清空。
+# ---------------------------------------------------------------------------
+
+
+def _ark_with_env_credential(credential_id="cred-existing"):
+    ark = FakeArk()
+    ark.credentials.append({
+        "id": credential_id, "vault_id": "vlt-existing",
+        "display_name": oauth_module.USER_CREDENTIAL_NAME,
+        "secret_name": oauth_module.USER_ACCESS_TOKEN_ENV,
+        "auth_type": "environment_variable",
+    })
+    return ark
+
+
+async def test_reauthorize_while_running_keeps_credential_id(tmp_path):
+    """重新扫码授权：同类型凭据原地更新，绝不 DELETE（运行中 Session 绑定的是这条凭据）。"""
+    store = PipelineStore(str(tmp_path / "topic6.db"))
+    _seed(store, int(time.time() * 1000) + 3_600_000)
+    ark = _ark_with_env_credential()
+    authorization = Topic6UserAuthorization(store, ark, FakeOAuth("ou-scanned"))
+
+    await authorization.authorize(expected_open_id="ou-scanned")
+
+    assert ark.deleted_credentials == []
+    assert ark.created_credentials == []
+    assert ark.updated == [("vlt-existing", "cred-existing", "access-1")]
+    saved = store.get_user_oauth("ou-scanned")
+    assert saved["vault_id"] == "vlt-existing" and saved["credential_id"] == "cred-existing"
+    store.close()
+
+
+async def test_retry_after_ark_write_failure_updates_in_place(tmp_path):
+    """上次写 Ark 失败（EXPIRED_RETRY_AT）后的重试：原地更新，不删旧建新。"""
+    store = PipelineStore(str(tmp_path / "topic6.db"))
+    _seed(store, oauth_module.EXPIRED_RETRY_AT)
+    ark = _ark_with_env_credential()
+    authorization = Topic6UserAuthorization(store, ark, FakeOAuth())
+
+    await authorization.refresh_if_needed("ou-scanned")
+
+    assert ark.deleted_credentials == [] and ark.created_credentials == []
+    assert ark.updated == [("vlt-existing", "cred-existing", "access-refreshed")]
+    assert store.get_user_oauth("ou-scanned")["credential_id"] == "cred-existing"
+    store.close()
+
+
+async def test_duplicate_env_credentials_keep_recorded_one(tmp_path):
+    """同名凭据多于一条（历史残留）：保留本地记录的那条并更新，其余删除。"""
+    store = PipelineStore(str(tmp_path / "topic6.db"))
+    _seed(store, oauth_module.EXPIRED_RETRY_AT)
+    ark = _ark_with_env_credential("cred-other")
+    ark.credentials.append({
+        "id": "cred-existing", "vault_id": "vlt-existing",
+        "display_name": oauth_module.USER_CREDENTIAL_NAME,
+        "secret_name": oauth_module.USER_ACCESS_TOKEN_ENV,
+        "auth_type": "environment_variable",
+    })
+    authorization = Topic6UserAuthorization(store, ark, FakeOAuth())
+
+    await authorization.refresh_if_needed("ou-scanned")
+
+    assert ark.updated == [("vlt-existing", "cred-existing", "access-refreshed")]
+    assert ark.deleted_credentials == [("vlt-existing", "cred-other")]
+    assert store.get_user_oauth("ou-scanned")["credential_id"] == "cred-existing"
+    store.close()
+
+
+async def test_network_failures_do_not_invalidate_authorization(tmp_path):
+    """SSL/连接错误连续超过 MAX_REFRESH_FAILURES 次：不标记重新授权、refresh_token 保留。"""
+    store = PipelineStore(str(tmp_path / "topic6.db"))
+    _seed(store, int(time.time() * 1000) + 60_000)
+
+    class FlakyOAuth(FakeOAuth):
+        async def refresh(self, _refresh_token):
+            self.refresh_count += 1
+            raise oauth_module.OAuthTransientError("飞书 OAuth 网络异常：ConnectError")
+
+    ark = FakeArk()
+    oauth = FlakyOAuth()
+    authorization = Topic6UserAuthorization(store, ark, oauth)
+    for _ in range(oauth_module.MAX_REFRESH_FAILURES + 2):
+        with pytest.raises(oauth_module.OAuthTransientError):
+            await authorization.refresh_in_background("ou-scanned")
+
+    saved = store.get_user_oauth("ou-scanned")
+    assert saved["refresh_token"] == "refresh-old"
+    assert oauth.refresh_count == oauth_module.MAX_REFRESH_FAILURES + 2
+    assert ark.updated == [] and ark.deleted_credentials == []
+    store.close()
+
+
+async def test_invalid_refresh_token_still_requires_rescan(tmp_path):
+    """飞书明确拒绝 refresh_token（4xx）：行为不变，仍走重新授权并在 3 次后清空。"""
+    store = PipelineStore(str(tmp_path / "topic6.db"))
+    _seed(store, int(time.time() * 1000) + 60_000)
+
+    class DeadOAuth(FakeOAuth):
+        async def refresh(self, _refresh_token):
+            raise RuntimeError("飞书 OAuth 请求失败 400: invalid_grant")
+
+    authorization = Topic6UserAuthorization(store, FakeArk(), DeadOAuth())
+    for _ in range(oauth_module.MAX_REFRESH_FAILURES):
+        with pytest.raises(UserAuthorizationRequired):
+            await authorization.refresh_in_background("ou-scanned")
+    assert store.get_user_oauth("ou-scanned")["refresh_token"] == ""
+    store.close()
+
+
+class _Resp:
+    def __init__(self, status, payload=None, text=None):
+        self.status_code = status
+        self._payload = payload
+        self.is_success = 200 <= status < 300
+        self._text = text
+
+    def json(self):
+        if self._payload is None:
+            raise ValueError("not json")
+        return self._payload
+
+
+class _Client:
+    def __init__(self, outcome):
+        self.outcome = outcome
+
+    async def request(self, *_a, **_k):
+        if isinstance(self.outcome, Exception):
+            raise self.outcome
+        return self.outcome
+
+    async def post(self, *_a, **_k):
+        return await self.request()
+
+
+@pytest.mark.parametrize("outcome", [
+    oauth_module.httpx.ConnectError("ssl hostname mismatch"),
+    oauth_module.httpx.ReadTimeout("timeout"),
+    _Resp(502, {"msg": "bad gateway"}),
+    _Resp(429, {"msg": "rate limited"}),
+    _Resp(200, None),  # 代理返回 HTML 错误页
+])
+async def test_feishu_oauth_classifies_transient_errors(outcome):
+    client = oauth_module.FeishuOAuth("app", "secret", client=_Client(outcome))
+    with pytest.raises(oauth_module.OAuthTransientError):
+        await client.refresh("refresh-x")
+
+
+async def test_feishu_oauth_business_error_is_not_transient():
+    client = oauth_module.FeishuOAuth(
+        "app", "secret", client=_Client(_Resp(400, {"error": "invalid_grant", "code": 20037}))
+    )
+    with pytest.raises(RuntimeError) as info:
+        await client.refresh("refresh-x")
+    assert not isinstance(info.value, oauth_module.OAuthTransientError)
+
+
+async def test_refresh_and_get_access_token_rotates_in_place(tmp_path):
+    store = PipelineStore(str(tmp_path / "topic6.db"))
+    _seed(store, int(time.time() * 1000) + 3_600_000)  # 仍新鲜也强制刷新
+    ark = FakeArk()
+    authorization = Topic6UserAuthorization(store, ark, FakeOAuth())
+
+    token = await authorization.refresh_and_get_access_token("ou-scanned")
+
+    assert token == "access-refreshed"
+    assert ark.updated == [("vlt-existing", "cred-existing", "access-refreshed")]
+    assert store.get_user_oauth("ou-scanned")["refresh_token"] == "refresh-rotated"
+    store.close()
+
+
+async def test_gateway_transient_refresh_failure_does_not_start_device_flow():
+    class UserAuth:
+        async def vault_id(self, _open_id, *, force_refresh=False):
+            raise oauth_module.OAuthTransientError("飞书 OAuth 网络异常：ConnectError")
+
+        async def authorize(self, **_kwargs):  # pragma: no cover - 不应被调用
+            raise AssertionError("device flow must not start on transient failure")
+
+    replies = []
+
+    async def reply(chat_id, text):
+        replies.append(text)
+
+    gateway = Topic6Gateway(
+        SimpleNamespace(authorized_open_ids=(), skip_miaoda_oauth=False),
+        SimpleNamespace(), SimpleNamespace(), SimpleNamespace(), UserAuth(), reply, None,
+    )
+    with pytest.raises(UserAuthorizationRequired, match="无需重新扫码"):
+        await gateway._ensure_user_authorized("c1", "ou-1")
+    assert replies == []

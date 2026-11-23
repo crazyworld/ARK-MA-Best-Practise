@@ -57,6 +57,9 @@ class Topic6Config:
     admin_open_ids: tuple[str, ...] = ()
     share_emails: tuple[str, ...] = DEFAULT_SHARE_EMAILS
     auto_pass_hc: tuple[str, ...] = DEFAULT_AUTO_PASS_HC
+    # Gateway 侧妙搭兜底发布（Phase H 遇不可抗力时的 backup）。cli 为空 = 不启用兜底，行为与原来一致。
+    miaoda_cli_bin: str = ""
+    miaoda_node_bin_dir: str = ""
 
 def _auto_pass_hc(environ: Mapping[str, str]) -> tuple[str, ...]:
     raw = environ.get("TOPIC6_AUTO_PASS_HC")
@@ -120,4 +123,6 @@ def load_case_config(env: Optional[Mapping[str, str]] = None) -> Topic6Config:
             )
         ),
         auto_pass_hc=_auto_pass_hc(environ),
+        miaoda_cli_bin=(environ.get("TOPIC6_MIAODA_CLI_BIN") or "").strip(),
+        miaoda_node_bin_dir=(environ.get("TOPIC6_MIAODA_NODE_BIN_DIR") or "").strip(),
     )

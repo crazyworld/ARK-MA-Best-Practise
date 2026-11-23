@@ -425,9 +425,19 @@ class TestSchemaCoverageAllNodes(unittest.TestCase):
                 mode = node.get("mode")
                 fn = handlers.get(node["handler"])
                 with self.subTest(node=node["id"], mode=mode):
-                    if mode == "human" or node.get("pause_capable"):
+                    if mode == "human":
                         with self.assertRaises(HumanPause):
                             fn(node, self.st, {})
+                    elif node.get("pause_capable"):
+                        # 条件暂停节点（如 n09 仅在需 DataHub 且不可用时询问）：
+                        # 要么暂停，要么产出全部 outputs，不允许第三种结果。
+                        try:
+                            res = fn(node, self.st, {})
+                        except HumanPause:
+                            continue
+                        for key in node.get("outputs", []):
+                            self.assertIn(key, res["artifacts"],
+                                          f"{node['id']} missing output {key}")
                     elif mode == "decision":
                         res = fn(node, self.st, {})
                         self.assertIn("route", res)

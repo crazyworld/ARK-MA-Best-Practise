@@ -218,6 +218,46 @@ def _module_checks(md, requirement, stats, charts):
     return issues
 
 
+def _category_labels(bundle: dict) -> list[tuple[str, str]]:
+    """(类别种类, 类别名)：观点 TOP5 与 UGC 参与方式。
+
+    观点一帖多标签时 label 可能是「A,B」，按英文逗号拆开逐个判断。
+    兜底类「其他」由标注环节统一填写，不属于发现出的类别名，跳过。
+    """
+    found: list[tuple[str, str]] = []
+    for direction in ("positive", "negative"):
+        analysis = ((bundle or {}).get("opinion_analysis") or {}).get(direction) or {}
+        for topic in analysis.get("top5") or []:
+            for name in str(topic.get("label") or "").split(","):
+                found.append(("观点", name.strip()))
+    for category in ((bundle or {}).get("ugc_analysis") or {}).get("categories") or []:
+        found.append(("UGC 参与方式", str(category.get("label") or "").strip()))
+    for name in ((bundle or {}).get("ugc_category_dist") or {}):
+        found.append(("UGC 参与方式", str(name).strip()))
+    return [(kind, name) for kind, name in found
+            if name and name not in ("N/A", "其他")]
+
+
+def _category_name_issues(campaigns: dict) -> list[dict]:
+    """检查清单 3.9：类别名称带情感/观点倾向 → P0。"""
+    issues: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for cid, bundle in (campaigns or {}).items():
+        for kind, name in _category_labels(bundle):
+            hits = policy.tendency_hits(name)
+            if not hits or (kind, name) in seen:
+                continue
+            seen.add((kind, name))
+            issues.append(_issue(
+                f"P0-category-tendency-{kind}-{name}", "P0",
+                "类别名称带情感/观点倾向（3.9）",
+                f"{cid}: {kind}类别「{name}」命中 {hits}；观点应为讨论话题，"
+                "参与方式应为动作或内容形式，情感由独立字段承载",
+                locus="stats_bundle",
+            ))
+    return issues
+
+
 def scan_markdown(
     markdown: str, *, degraded: bool = False,
     expected_campaigns: Optional[list[str]] = None,
@@ -438,6 +478,10 @@ def scan_markdown(
 
     # 7) 统计产物可确定验证的口径。
     campaigns = stats.get("campaigns") if isinstance(stats, dict) else {}
+
+    # 7a) 检查清单 3.9（P0）：观点 / UGC 参与方式的类别名带情感或评价倾向。
+    #     只判断类别名本身；代表原文里的用户措辞不在此列（清单原文）。
+    issues.extend(_category_name_issues(campaigns))
     for cid, bundle in (campaigns or {}).items():
         metrics = (bundle or {}).get("metrics") or {}
         product_share = metrics.get("产品提及占比")

@@ -24,6 +24,7 @@ from arkagent.store import GatewayStore
 
 try:
     from .artifact_sync import Topic6ArtifactSync
+    from .miaoda_publisher import MiaodaPublisher, locate_web_artifact
     from .feishu_doc_publisher import FeishuDocPublisher
     from .process_files import ProcessFileDelivery
     from .job_notifier import JobNotifier
@@ -47,12 +48,14 @@ try:
     )
     from .topic6_user_oauth import (
         FeishuOAuth,
+        OAuthTransientError,
         Topic6UserAuthorization,
         UserAuthorizationRequired,
     )
     from .config import Topic6Config
 except ImportError:  # pragma: no cover - standalone compatibility
     from artifact_sync import Topic6ArtifactSync
+    from miaoda_publisher import MiaodaPublisher, locate_web_artifact
     from feishu_doc_publisher import FeishuDocPublisher
     from process_files import ProcessFileDelivery
     from job_notifier import JobNotifier
@@ -76,6 +79,7 @@ except ImportError:  # pragma: no cover - standalone compatibility
     )
     from topic6_user_oauth import (
         FeishuOAuth,
+        OAuthTransientError,
         Topic6UserAuthorization,
         UserAuthorizationRequired,
     )
@@ -747,6 +751,12 @@ class Topic6Gateway:
             )
         except UserAuthorizationRequired:
             pass
+        except OAuthTransientError as error:
+            # 网络/SSL/5xx：授权链本身没失效，扫码也完成不了，不发起 Device Flow
+            log.warning("topic6 user token refresh transient failure user=%s: %s", user_open_id, error)
+            raise UserAuthorizationRequired(
+                "飞书网络暂时异常，未能刷新妙搭授权（授权本身仍有效，无需重新扫码），请稍后重发刚才的命令。"
+            ) from error
 
         # ---- 并发去重：复用已有的授权任务 ----
         existing = self._pending_authorizations.get(user_open_id)
@@ -926,6 +936,41 @@ def _byok_model_headers(config: Topic6Config, agent_json: Path = _COORDINATOR_AG
     return {f"X-User-Model-Header-{config.model_auth_header_name}": config.model_auth_header_value}
 
 
+def _build_miaoda_fallback(config, pipeline_store, user_authorization, artifact_sync, loop):
+    """Phase H 不可抗力兜底：用 artifact_sync 已同步的本轮网页 + 发起人身份，在 Gateway 侧发布。
+
+    未配置 TOPIC6_MIAODA_CLI_BIN 时返回 None（不启用，行为与原来一致）。
+    """
+    cli_bin = getattr(config, "miaoda_cli_bin", "")
+    if not cli_bin:
+        return None
+    publisher = MiaodaPublisher(
+        cli_bin=cli_bin,
+        app_id=config.feishu_app_id,
+        node_bin_dir=getattr(config, "miaoda_node_bin_dir", ""),
+    )
+    sync_root = Path(config.artifact_sync_dir)
+
+    async def fallback(job: PipelineJob, min_published_at: str):
+        if job.ma_session_id:
+            try:  # 补一次同步，拿到 Phase G 刚发布的网页
+                await artifact_sync.sync_once(job.job_id, job.ma_session_id)
+            except Exception as error:  # noqa: BLE001 - 同步失败时用已落盘的产物，由 sha256 把关
+                log.warning("topic6 miaoda fallback pre-sync failed job=%s: %s", job.job_id, error)
+        artifact = locate_web_artifact(sync_root / job.job_id, min_published_at)
+        access_token = await user_authorization.refresh_and_get_access_token(job.user_open_id)
+        known = [j.online_url for j in pipeline_store.list_jobs(limit=200)
+                 if j.online_url and j.user_open_id == job.user_open_id
+                 and j.project_dir == job.project_dir]
+        if job.online_url:
+            known.insert(0, job.online_url)
+        return await loop.run_in_executor(
+            None, lambda: publisher.publish(artifact, access_token, known_online_urls=known)
+        )
+
+    return fallback
+
+
 def build_gateway(config: Topic6Config, ark, sender, loop: asyncio.AbstractEventLoop):
     """Case 入口:装配 PipelineStore + Runner + HITL,返回 Topic6Gateway。"""
     from arkagent.paths import get_case_paths
@@ -982,6 +1027,9 @@ def build_gateway(config: Topic6Config, ark, sender, loop: asyncio.AbstractEvent
     ))
     runner.bind_card_sender(hitl)
     runner.bind_process_files(process_files, artifact_sync)
+    runner.bind_miaoda_fallback(_build_miaoda_fallback(
+        config, pipeline_store, user_authorization, artifact_sync, loop,
+    ))
 
     async def reply(chat_id: str, text: str) -> None:
         await loop.run_in_executor(None, sender.send_to_chat, chat_id, text)

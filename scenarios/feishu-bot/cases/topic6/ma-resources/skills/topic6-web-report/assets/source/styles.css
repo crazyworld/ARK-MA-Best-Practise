@@ -2178,8 +2178,26 @@ tbody tr:hover td { background: #f4f5ff; }
 
 .case-card h3 span { flex: 0 0 auto; }
 .case-card p { margin: 8px 0 0; color: var(--ink-soft); font-size: 14px; }
-.case-source-link,
-.case-source-link .key-emphasis { color: var(--accent-deep); }
+
+/* 营销观察案例字段与消费洞察卡同一呈现:无底色行 + 细分隔线,链接只包话题原文 */
+.case-card .case-field-list {
+  margin: 0;
+  gap: 0;
+}
+
+.case-card .case-field-list li {
+  padding: 9px 0;
+  border: 0;
+  border-bottom: 1px solid rgba(50, 63, 88, 0.08);
+  border-radius: 0;
+  background: transparent;
+  font-size: 13px;
+  line-height: 1.68;
+}
+
+.case-card .case-field-list li:first-child { padding-top: 0; }
+.case-card .case-field-list li:last-child { border-bottom: 0; padding-bottom: 0; }
+.case-card .case-field-list li::before { display: none; }
 
 .behavior-insight-grid {
   display: grid;

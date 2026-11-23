@@ -261,6 +261,28 @@ _UNRESUMABLE_CARD_HINTS = {
 }
 
 
+# Phase H 环境故障（不可抗力）的工具结果特征：沙箱用户凭据解析失败 / lark-cli 鉴权失败。
+# 只用于决定 Gateway 是否可以兜底发布，不影响 Agent 的 Phase H 行为。
+_PHASE_H_ENV_MARKERS = (
+    ("credential resolve returned no substitution", "沙箱用户凭据失效（credential resolve returned no substitution）"),
+    ('"type": "authentication"', "沙箱内妙搭用户身份鉴权失败"),
+)
+# Agent 在 Phase H 已执行过的妙搭写操作（见 _PHASE_H_WRITE_RE）：出现任一即不兜底（避免重复建应用/覆盖）。
+# /republish 轮次的网页产物必须是本轮之后发布的；容忍沙箱与 Gateway 主机的时钟偏差。
+FALLBACK_ARTIFACT_CLOCK_SKEW_SEC = 120
+# /republish 时 Session 处于这些状态 → Agent 无法执行，直接走 Gateway 兜底（若已配置）。
+SESSION_UNUSABLE_STATUSES = frozenset({"failed", "error", "terminated"})
+_PHASE_H_WRITE_RE = re.compile(
+    r"\bapps\s+\+(?:create|init|release-create|html-publish|access-scope-set)\b|\bgit\s+push\b"
+)
+
+
+def _utc_iso(ts: float) -> str:
+    """与 manifest.published_at 同格式（UTC ISO，带 Z），可直接字符串比较。"""
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
 def _is_sandbox_tool_error(event: dict) -> bool:
     if event.get("type") != "agent.tool_result" or event.get("is_error") is not True:
         return False
@@ -336,6 +358,10 @@ class _ProgressState:
     history_floor: int = 0
     # 终态已调度过程关键文件归档（同一终态多次 patch 只归档一次；/continue 新一轮重建 state）
     process_files_scheduled: bool = False
+    # 本轮由 /republish 发起：Phase H 因环境故障失败时允许 Gateway 兜底发布。
+    republish: bool = False
+    # 本轮开始时间（UTC ISO），兜底只接受此后（减时钟偏差）发布的网页产物。
+    round_started_at: str = ""
 
     def push_tool_line(self, line: str) -> None:
         if len(self.tool_lines) == self.tool_lines.maxlen:
@@ -382,6 +408,12 @@ class Topic6Runner:
         self._card_locks: dict[str, asyncio.Lock] = {}
         # ma_session_id → 该 Session 的 Agent 是否走 BYOK(创建时的 agent 快照决定,之后不变)。
         self._session_byok: dict[str, bool] = {}
+        # Gateway 侧妙搭兜底发布(不可抗力 backup)；由 gateway 装配时注入，未注入则不兜底。
+        self._miaoda_fallback: Optional[Callable] = None
+
+    def bind_miaoda_fallback(self, fallback: Optional[Callable]) -> None:
+        """注入 async fallback(job, min_published_at) -> PublishResult(app_id/online_url/operation)。"""
+        self._miaoda_fallback = fallback
 
     def add_vault_id(self, vault_id: str) -> None:
         """追加一个每个新 Session 都要挂的 Vault（如 Gateway 异步置备的 bot token Vault）。"""
@@ -787,6 +819,109 @@ class Topic6Runner:
                 return url
         return ""
 
+    # ---- Phase H 环境故障兜底（Gateway backup，不改变 Agent 行为） ----
+
+    async def _diagnose_phase_h_env_failure(self, job: PipelineJob) -> str:
+        """本轮 Phase H 是否因环境故障失败且 Agent 未做任何写操作；是则返回原因，否则空串。
+
+        只看本轮第一个 `[phase] H` 之后的事件：
+        - 出现 Agent 的妙搭写操作（apps +create/+init/+release-create/…、git push）→ 不兜底（防重复建应用）。
+        - 出现 [need_decision] 以外的业务停止不在此判定；只认工具结果里的环境故障特征。
+        """
+        try:
+            events = await self._ark.list_session_events(job.ma_session_id)
+        except Exception as error:  # noqa: BLE001
+            log.warning("topic6 phase_h diagnose list events failed job=%s: %s", job.job_id, error)
+            return ""
+        events = list(events or [])[self._history_floor(job.job_id):]
+        start = next(
+            (
+                i for i, e in enumerate(events)
+                if e.get("type") == "agent.message"
+                and re.match(r"^\s*\[phase\]\s*H\b", event_text(e) or "")
+            ),
+            None,
+        )
+        if start is None:
+            return ""
+        reason = ""
+        for event in events[start:]:
+            etype = event.get("type")
+            if etype == "agent.tool_use":
+                command = str((event.get("input") or {}).get("command") or "")
+                if _PHASE_H_WRITE_RE.search(command):
+                    log.info(
+                        "topic6 phase_h fallback skipped job=%s: agent already ran a write op",
+                        job.job_id,
+                    )
+                    return ""
+            elif etype == "agent.tool_result" and not reason:
+                text = event_text(event) or str(event.get("content") or "")
+                for marker, label in _PHASE_H_ENV_MARKERS:
+                    if marker in text:
+                        reason = label
+                        break
+                if not reason and _is_sandbox_tool_error(event):
+                    reason = "方舟沙箱不可用"
+        return reason
+
+    async def _after_phase_h_failure(self, job_id: str) -> None:
+        """Phase H 失败收口之后调用；未注入兜底能力时什么也不做（与原行为完全一致）。"""
+        if self._miaoda_fallback is None:
+            return
+        job = self._store.get_job(job_id)
+        if job is None or not job.ma_session_id:
+            return
+        reason = await self._diagnose_phase_h_env_failure(job)
+        if not reason:
+            return
+        state = self._progress.get(job_id)
+        if state is None or not state.republish:
+            # 首轮失败：只提示，不自动兜底（由用户发 /republish 触发）
+            log.warning("topic6 phase_h env failure job=%s reason=%s (hint /republish)", job_id, reason)
+            await self._reply_async_by_job(
+                job_id,
+                f"ℹ️ 本次妙搭发布失败的原因是环境问题（{reason}），网页已生成，不需要重跑任务。\n"
+                "发送 /republish：Agent 会先按原流程重新生成并发布网页；若仍因环境问题发布失败，"
+                "由 Gateway 用本轮生成的网页补发。",
+            )
+            return
+        # 发布需数分钟：脱离当前 SSE 消费任务执行，避免被后续 /continue 等取消流任务时连带中断
+        loop = self._loop or asyncio.get_event_loop()
+        loop.create_task(self._gateway_fallback_publish(job, reason, state.round_started_at))
+
+    async def _gateway_fallback_publish(
+        self, job: PipelineJob, reason: str, min_published_at: str, note: str = ""
+    ) -> None:
+        job_id = job.job_id
+        if self._miaoda_fallback is None:
+            return
+        log.warning("topic6 phase_h env failure job=%s reason=%s -> gateway fallback", job_id, reason)
+        await self._reply_async_by_job(
+            job_id, f"⚙️ 妙搭发布因环境问题失败（{reason}），Gateway 正在补发网页…"
+        )
+        try:
+            result = await self._miaoda_fallback(job, min_published_at)
+        except Exception as error:  # noqa: BLE001 - 兜底失败只汇报，任务保持 failed
+            log.error("topic6 miaoda fallback failed job=%s: %s", job_id, error)
+            await self._reply_async_by_job(job_id, f"❌ Gateway 补发失败：{str(error)[:400]}")
+            return
+        self._store.mark_done(job_id, online_url=result.online_url)
+        await self._render_and_patch(
+            job_id, status=STATUS_DONE, online_url=result.online_url, force=True
+        )
+        self._progress.pop(job_id, None)
+        action = "更新已有应用" if result.operation == "update" else "新建应用"
+        log.info(
+            "topic6 miaoda fallback published job=%s app=%s release=%s op=%s",
+            job_id, result.app_id, result.release_id, result.operation,
+        )
+        await self._reply_async_by_job(
+            job_id,
+            f"✅ 已由 Gateway 兜底发布到妙搭（{action}，app_id={result.app_id}）：{result.online_url}\n"
+            + (note or "说明：网页内容即本轮 Agent 生成的版本（已校验 sha256）。"),
+        )
+
     def _history_floor(self, job_id: str) -> int:
         state = self._progress.get(job_id)
         return state.history_floor if state is not None else 0
@@ -830,6 +965,15 @@ class Topic6Runner:
             except Exception as error:  # noqa: BLE001
                 raise Topic6RunnerError(f"读取 Session {job.ma_session_id} 失败：{error!s}"[:300]) from error
             status = str(session.get("status") or "")
+            if status in SESSION_UNUSABLE_STATUSES and self._miaoda_fallback is not None:
+                # Session 已终止，Agent 无法重建网页：直接用最近一次同步的网页兜底发布
+                self._progress[job.job_id] = _ProgressState(history_floor=len(events or []))
+                loop = self._loop or asyncio.get_event_loop()
+                loop.create_task(self._gateway_fallback_publish(
+                    job, f"Session 已{status}", "",
+                    note="说明：Session 已不可用，本次未重新读取飞书文档，发布的是最近一次生成的网页（已校验 sha256）。",
+                ))
+                return job
             if status != "idle":
                 raise Topic6RunnerError(
                     f"Session {job.ma_session_id} 当前状态为 {status or '未知'},只有空闲的 Session 才能重新发布。"
@@ -839,7 +983,11 @@ class Topic6Runner:
 
             self._store.resume_running(job.job_id, next_phase="G")
             job = self._store.get_job(job.job_id) or job
-            state = _ProgressState(history_floor=len(events or []))
+            state = _ProgressState(
+                history_floor=len(events or []),
+                republish=True,
+                round_started_at=_utc_iso(time.time() - FALLBACK_ARTIFACT_CLOCK_SKEW_SEC),
+            )
             self._progress[job.job_id] = state
             self._card_locks.setdefault(job.job_id, asyncio.Lock())
             # 原进度卡在聊天记录里很靠上:重发一张新卡,后续进度与结果都 patch 到这张卡
@@ -1435,6 +1583,8 @@ class Topic6Runner:
                 f"❌ 妙搭发布失败，Agent 未输出有效的发布链接。\n"
                 f"可发送 /continue 重试，或联系管理员检查 skill 配置。",
             )
+            # 以上为原有行为，保持不变。以下仅在环境故障（不可抗力）时追加 Gateway 兜底/提示。
+            await self._after_phase_h_failure(job_id)
             return None
 
         # Agent 主动请求用户裁决（[need_decision]）：不是中断，不催促。

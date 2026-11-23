@@ -259,6 +259,25 @@ def _parse_source_file(note: str) -> dict:
     return normalize_source_file(source)
 
 
+# FIX-33：轮次一 DataHub 路由确认
+ANNOTATION_ROUTE_NODE = "n09_annotate_r1"
+
+
+def _resume_annotation_route(decision: str, note: str) -> dict:
+    """把用户的路由决定写入 annotation_route_decision，并让 n09 重跑。
+
+    pass/confirmed → 用户接受改用直接 API（small_engine）；
+    其他 → 用户选择补 DATAHUB_API_KEY 后重试，决策记为 datahub（仍要求 DataHub）。
+    """
+    route = "small_engine" if decision in ("pass", "confirmed") else "datahub"
+    return {
+        "annotation_route_decision": {
+            "route": route, "decision": decision, "note": str(note or "").strip(),
+        },
+        "_control": {"next": ANNOTATION_ROUTE_NODE},
+    }
+
+
 # FIX-30：标注审核节点（与 G3 同构）
 ANNOTATION_REVIEW_NODES = frozenset({"n09r_review_r1", "n11r_review_r2"})
 
@@ -324,6 +343,11 @@ def build_human_outputs(
     # remark 无内容：只记录，不触发续跑（project_memory 硬约束）。
     if decision == "remark" and not note.strip():
         return None
+
+    # n09：DataHub 路由确认（FIX-33）。用户确认改用直接 API 后重跑本节点；
+    # 拒绝（或未给出明确确认）时不写决策，保持暂停语义由调用方补 Key 后重试。
+    if node_id == ANNOTATION_ROUTE_NODE:
+        return _resume_annotation_route(decision, note)
 
     # n09r / n11r 标注审核：与 G3 同构——只接受独立 Validator 持久化的审核结果。
     if node_id in ANNOTATION_REVIEW_NODES:

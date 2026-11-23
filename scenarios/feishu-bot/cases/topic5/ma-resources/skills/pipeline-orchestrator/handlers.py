@@ -691,17 +691,20 @@ def _structure_config(
     opinion_labels: list[str] | None = None,
     ugc_categories: list[str] | None = None,
     ugc_not_applicable: bool = False,
+    negative_labels: list[str] | None = None,
 ) -> dict:
     """构造结构预检的已批准类别配置（FIX-29，对齐原版 config 契约）。
 
-    观点候选正负两套在本系统共用一份已确认清单（原版按正负分别确认），
-    因此两边填同一份；UGC 仅 PGC 项目显式声明不适用。
+    正负两套候选分别传入（FIX-31，原版按正负分别确认）；negative_labels 为 None
+    时视为旧产物，两边共用 opinion_labels。UGC 仅 PGC 项目显式声明不适用。
     """
     labels = [str(x) for x in (opinion_labels or []) if str(x).strip()]
+    negatives = ([str(x) for x in negative_labels if str(x).strip()]
+                 if negative_labels is not None else labels)
     ugc = [str(x) for x in (ugc_categories or []) if str(x).strip()]
     return {
         "positive_labels": labels,
-        "negative_labels": labels,
+        "negative_labels": negatives,
         # 仅 PGC 项目：ugc_applicable=False，预检要求相关行一律 N/A。
         "ugc_labels": ugc,
         "ugc_applicable": not ugc_not_applicable,
@@ -1252,10 +1255,19 @@ def annotate(node, state, ctx):
         context = _r1_context_from_plan(plan)
         rerun_ids, calibration = _rerun_scope(state, "round1", "r1_review", rows)
         # FIX-30 标注缓存放在 run_dir 下；键含 prompt 指纹，上下文/校准一变即失效。
-        result = annotate_mod.annotate_round1(
-            rows, context=context, threshold=threshold,
-            rerun_ids=rerun_ids, calibration=calibration,
-            cache_dir=state.run_dir)
+        # FIX-33：≥阈值且 DataHub 不可用时先问用户；用户确认 small_engine 后才改走直连。
+        decision = state.read_artifact("annotation_route_decision") or {}
+        route = decision.get("route") if isinstance(decision, dict) else None
+        try:
+            result = annotate_mod.annotate_round1(
+                rows, context=context, threshold=threshold,
+                rerun_ids=rerun_ids, calibration=calibration,
+                cache_dir=state.run_dir, route_decision=route)
+        except annotate_mod.DataHubRouteRequired as required:
+            raise HumanPause(prompt=str(required),
+                             expect=["annotation_route_decision"]) from required
+        if route:
+            result["route_decision"] = route
         if result.get("degraded"):
             raise RuntimeError("annotate r1: 标注能力不可用，禁止确定性伪标注")
         coverage = result.get("coverage") or {}
@@ -1297,9 +1309,13 @@ def annotate(node, state, ctx):
         ) or []
 
         r2_rerun, r2_calib = _rerun_scope(state, "round2", "r2_review", rows)
+        # FIX-31：正面任务用 positive_labels，负面任务用 negative_labels；旧产物两者共用 labels
+        positive_labels = confirmed.get("positive_labels") if isinstance(confirmed, dict) else None
+        negative_labels = confirmed.get("negative_labels") if isinstance(confirmed, dict) else None
         result = annotate_mod.annotate_round2(
             rows, rerun_ids=r2_rerun, calibration=r2_calib,
-            opinion_labels=list(opinion_labels),
+            negative_labels=list(negative_labels) if negative_labels is not None else None,
+            opinion_labels=list(positive_labels or opinion_labels),
             ugc_categories=list(ugc_categories), threshold=threshold,
             ugc_not_applicable=ugc_not_applicable,
             opinion_review_items=confirmed.get("opinion_review_items") or [],
@@ -1317,7 +1333,8 @@ def annotate(node, state, ctx):
             raise ValueError(f"annotate r2: 覆盖检查存在缺口（missing），按口径报错：{miss}")
         sc_mode = str(state.params.get("annotation_structure_check", "block")).lower()
         sc_config = _structure_config(
-            opinion_labels=list(opinion_labels),
+            opinion_labels=list(positive_labels or opinion_labels),
+            negative_labels=list(negative_labels) if negative_labels is not None else None,
             ugc_categories=list(ugc_categories),
             ugc_not_applicable=ugc_not_applicable)
         _apply_structure_gate(result, stage="full", config=sc_config,
@@ -1744,6 +1761,10 @@ def opinion_policy_gate(node, state, ctx):
     return {"artifacts": {"confirmed_opinion_labels": {
         "validator_review": validator_review,
         "labels": labels,
+        # FIX-31：正负两套候选分开冻结，供轮次二两个观点任务各自注入
+        "positive_labels": list(opinion.get("positive_candidates") or labels),
+        "negative_labels": list(opinion.get("negative_candidates") or labels)
+        if "negative_candidates" in opinion else list(labels),
         "ugc_categories": ugc_categories,
         "ugc_not_applicable": bool(ugc.get("not_applicable")),
         **label_review.confirmed_review(opinion, ugc),

@@ -509,16 +509,35 @@ def test_upstream_paragraph_links_render(tmp_path):
     assert f'<a class="source-link" href="{WB}"' in nodes
 
 
-def test_upstream_case_original_hotspot_whole_text_link_and_hidden_url_line(tmp_path):
-    """上游修复:「原始热点：」整段原文(含平台括注)为蓝色链接,「链接：URL」行不单独显示;MA 缺图占位保留。"""
+def test_case_original_hotspot_renders_like_insight_trigger_and_hides_url_line(tmp_path):
+    """「原始热点」与消费洞察「触发事件」同一呈现:话题蓝链、（平台）在链接外、字段走 insight-list;
+    「链接：URL」行不单独显示;MA 缺图占位保留。"""
     html = _render_md(tmp_path, (
         "### 营销观察\n\n#### 案例 1：成都蓉城致歉（微博 · 87.2分）\n"
         "- 原始热点：成都蓉城致歉（微博）\n- 营销发现：说明文字。\n"
         f"- 链接：{WB}\n- [配图：待补充]\n"))
     case = re.search(r'<article class="case-card case-card--visual">.*?</article>', html, re.S).group(0)
-    assert re.search(r'原始热点：(?:</strong>)?<a class="source-link" href="%s"[^>]*><span class="case-source-link">成都蓉城致歉（微博）</span></a>' % re.escape(WB), case)
+    assert '<ul class="insight-list case-field-list">' in case
+    assert re.search(r'<li><strong class="key-emphasis">原始热点：</strong><a class="source-link" href="%s"[^>]*>成都蓉城致歉</a>（微博）</li>' % re.escape(WB), case)
+    assert "<p>" not in case.split("case-visual")[0]
     assert "链接：" not in re.sub(r"<[^>]+>", "", case)
     assert "case-visual--placeholder" in case
+
+
+def test_case_original_hotspot_link_falls_back_to_url_line_without_block_links(tmp_path):
+    """source.json 未把「链接：」并入 block.links 时,独立 URL 仍作为「原始热点」话题的链接目标。"""
+    blocks = json.loads(EXAMPLE.read_text(encoding="utf-8"))
+    case = next(b for b in blocks if "docx-grid-block" in b["className"])
+    case["text"] = "案例 9：测试案例\n原始热点：测试话题（抖音）\n营销发现：说明。\n链接：https://example.com/x"
+    case["links"] = []
+    source = tmp_path / "source.json"
+    source.write_text(json.dumps(blocks, ensure_ascii=False), encoding="utf-8")
+    html_path = tmp_path / "index.html"
+    build = subprocess.run(["node", str(BUILDER), str(source), str(html_path)], capture_output=True, text=True, check=False)
+    assert build.returncode == 0, build.stderr
+    html = html_path.read_text(encoding="utf-8")
+    assert '<a class="source-link" href="https://example.com/x" target="_blank" rel="noopener noreferrer">测试话题</a>（抖音）' in html
+    assert "链接：https://example.com/x" not in html
 
 
 def test_case_link_line_kept_when_no_original_hotspot_line(tmp_path):

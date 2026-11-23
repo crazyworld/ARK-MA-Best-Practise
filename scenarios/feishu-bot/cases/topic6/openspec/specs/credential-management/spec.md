@@ -49,7 +49,11 @@ Gateway SHALL 在启动恢复时开启唯一的常驻协程（幂等），每 `T
 - **THEN** 回复"授权链接已超时（5 分钟），请重新发送触发词获取新的授权链接。"
 
 ### Requirement: 用户 Vault 与凭据结构
-每个用户 SHALL 拥有独立 Vault，名称 `ark-topic6-miaoda-user-<规范化open_id>`（截断 100 字符），优先复用已有同名 Vault。凭据类型 MUST 为 `environment_variable`，`secret_name=LARKSUITE_CLI_USER_ACCESS_TOKEN`，显示名 `topic6-miaoda-user-access-token`。凭据类型/secret_name 不可原地修改，重建时 MUST 先删除同 secret_name 的旧凭据再新建，Vault ID 保持不变。access_token MUST NOT 落本地 SQLite。
+每个用户 SHALL 拥有独立 Vault，名称 `ark-topic6-miaoda-user-<规范化open_id>`（截断 100 字符），优先复用已有同名 Vault。凭据类型 MUST 为 `environment_variable`，`secret_name=LARKSUITE_CLI_USER_ACCESS_TOKEN`，显示名 `topic6-miaoda-user-access-token`。已有同 secret_name 的 `environment_variable` 凭据时（含重新扫码授权、写方舟失败后的重试）MUST **原地更新**其值、凭据 ID 不变——运行中的 Session 绑定创建时那条凭据，删旧建新会让 Session 出站请求报 `credential resolve returned no substitution`（2026-11-23 job_980f1999c493）。只有类型不对（历史 env_oauth）或不存在时才删旧建新；同名多条时保留本地记录的那条、删除其余。Vault ID 保持不变。access_token MUST NOT 落本地 SQLite。
+
+#### Scenario: 任务运行中重新扫码授权
+- **WHEN** 用户 Vault 已有 environment_variable 凭据，用户再次完成扫码
+- **THEN** 原地更新该凭据，凭据 ID 不变，运行中的 Session 下一次请求即用到新 token
 
 #### Scenario: 历史 env_oauth 凭据迁移
 - **WHEN** 本地记录 `expires_at == 0`（历史平台托管凭据）
@@ -64,6 +68,10 @@ Gateway SHALL 在启动恢复时开启唯一的常驻协程（幂等），每 `T
 
 `vault_id(open_id, force_refresh=True)`（任务触发时使用）SHALL 无视本地过期时间真实刷新一次，失败抛 `UserAuthorizationRequired` 以当场触发聊天内授权，避免拖到 Phase H 才暴露。常驻协程使用 `REFRESH_EARLY_MS=15min` 窗口。
 
+失败分类：飞书 OAuth 请求的网络/SSL/超时、HTTP 5xx/429、非 JSON 响应 MUST 抛 `OAuthTransientError`（refresh_token 未被飞书判定失效）；只有飞书返回的 4xx 业务错误（如 invalid_grant）才转为 `UserAuthorizationRequired`。任务触发时遇到临时故障 MUST NOT 发起扫码，回复「飞书网络暂时异常…无需重新扫码，请稍后重发」。
+
+`refresh_and_get_access_token(open_id)`（仅 Gateway 妙搭兜底发布使用）SHALL 与强制刷新同路径轮换 token 并原地更新凭据，返回的 access_token 只在内存中使用。
+
 #### Scenario: 写方舟失败
 - **WHEN** 飞书刷新成功但 `update_environment_credential` 抛异常
 - **THEN** 本地已保存新 refresh_token 且 `expires_at=1`，下一轮立即重试
@@ -73,7 +81,11 @@ Gateway SHALL 在启动恢复时开启唯一的常驻协程（幂等），每 `T
 - **THEN** Gateway 发起聊天内扫码，不启动 Session
 
 ### Requirement: 连续失败标记重新授权
-`refresh_in_background` SHALL 统计每个用户连续失败次数，达到 `MAX_REFRESH_FAILURES=3` 时 `mark_reauthorization_required`：清空本地 refresh_token、保留 Vault/Credential ID，常驻协程不再重试。任一次成功清零计数。
+`refresh_in_background` SHALL 统计每个用户连续 `UserAuthorizationRequired` 失败次数，达到 `MAX_REFRESH_FAILURES=3` 时 `mark_reauthorization_required`：清空本地 refresh_token、保留 Vault/Credential ID，常驻协程不再重试。任一次成功清零计数。`OAuthTransientError` MUST NOT 计入次数、MUST NOT 清空 refresh_token，下一轮继续重试。
+
+#### Scenario: 网络抖动
+- **WHEN** 后台刷新连续多次遇到 SSL/连接错误
+- **THEN** refresh_token 保留，不标记重新授权，网络恢复后自动续上
 
 #### Scenario: 连续 3 次失败
 - **WHEN** 同一用户后台刷新连续失败 3 次

@@ -147,9 +147,11 @@ B 方案    n02_plan → [G2] n03_hc_plan
 C 初始化  n04_run_init
 D 取数    n05_brand_pull · n06_brand_baseline
 E 清洗    n07_clean
-F 发现    n08_ugc_discovery
-G 标注一  n09_annotate_r1 → n09b_opinion_candidates → n10 策略自动确认（歧义才触发 N10）
-H 标注二  n11_annotate_r2
+F 标注一  n09_annotate_r1（≥阈值且 DataHub 不可用时暂停问用户）
+          → n09r_review_r1 → n09r_gate →（不达标）n09r_rework → n09_annotate_r1
+G 发现    n09r_gate 通过 → n09b_opinion_candidates（逐活动×正/负）∥ n08_ugc_discovery（相关UGC）
+          → n10 策略 + Validator 来源审核（有 P0 或歧义才触发 N10）
+H 标注二  n11_annotate_r2 → n11r_review_r2 → n11r_gate →（不达标）n11r_rework → n11_annotate_r2
 I 聚合    n12_aggregate · n13_wordcloud_pull · n14_charts · n15_wordcloud_insight
 J 撰写    n16_report
 K 质检    n17_validate → n18_qc_gate →（不过）n19_fix / [HC7] n_hc7_escalate

@@ -670,25 +670,24 @@ function renderGridCase(block) {
   const media = image
     ? `<figure class="case-visual"><img src="${image.src}" alt="${escapeHTML(image.alt)}" loading="lazy" decoding="async"></figure>`
     : `<figure class="case-visual case-visual--placeholder" aria-label="配图待补充"><span class="case-visual-placeholder-icon" aria-hidden="true">🖼️</span><span>配图待补充</span></figure>`;
-  const sourceLinks = blockSourceLinks(block);
-  // 上游 2026-11-12:「原始热点：」后的整段原文渲染为蓝色外链;独立「链接：URL」行作为链接目标、不单独显示。
-  // 仅在本案例存在「原始热点」行时才隐藏「链接：」行,否则保留原样,避免 URL 从页面丢失。
+  // 「原始热点」与消费洞察「触发事件」同一渲染口径:只把话题原文渲染为蓝色外链,「（平台）」标注留在链接外;
+  // 字段走 insight-list(与洞察卡同款分隔线),不再整段包链接。独立「链接：URL」行作为链接目标、不单独显示——
+  // 仅在本案例存在「原始热点」行时才隐藏,否则保留原样,避免 URL 从页面丢失。
   const hasOriginalLine = details.some((line) => /^原始热点\s*[：:]/u.test(line));
   const explicitUrl = details.find((line) => /^链接\s*[：:]/u.test(line))?.match(/https?:\/\/\S+/u)?.[0] ?? "";
-  const renderCaseDetail = (line) => {
-    if (hasOriginalLine && /^链接\s*[：:]/u.test(line)) return "";
-    const originalMatch = line.match(/^(原始热点\s*[：:]\s*)([\s\S]+)$/u);
-    if (!originalMatch) return `<p>${renderListItem(line, sourceLinks)}</p>`;
-    const originalText = originalMatch[2].trim();
-    const topicOnly = originalText.replace(/\s*[（(](?:微博|抖音|B站|知乎|快手|头条|百度|多平台)[^）)]*[）)]\s*$/u, "");
-    const platform = originalText.slice(topicOnly.length).match(/(微博|抖音|B站|知乎|快手|头条|百度)/u)?.[1] ?? "";
-    const href = resolveSourceLink(sourceLinks, originalText, platform)
-      || resolveSourceLink(sourceLinks, topicOnly, platform)
-      || explicitUrl;
-    if (!href) return `<p>${renderListItem(line, sourceLinks)}</p>`;
-    return `<p>${renderEmphasizedLine(originalMatch[1])}<a class="source-link" href="${escapeHTML(href)}" target="_blank" rel="noopener noreferrer"><span class="case-source-link">${renderEmphasizedLine(originalText)}</span></a></p>`;
-  };
-  return `<article class="case-card case-card--visual"><div class="case-copy"><h3>${escapeHTML(title)}</h3>${details.map(renderCaseDetail).join("")}</div>${media}</article>`;
+  const caseLinks = [...(block.links ?? [])];
+  const originalText = details.find((line) => /^原始热点\s*[：:]/u.test(line))?.replace(/^原始热点\s*[：:]\s*/u, "").trim() ?? "";
+  const topicOnly = originalText.replace(/\s*[（(](?:微博|抖音|B站|知乎|快手|头条|百度|多平台)[^）)]*[）)]\s*$/u, "");
+  // md2source 已把「链接：」并入 block.links(text=话题);直接给的 source.json 可能没有,用独立 URL 补齐
+  if (topicOnly && explicitUrl && !caseLinks.some((link) => normalizeSourceLinkText(link.text) === topicOnly)) {
+    caseLinks.push({ text: topicOnly, href: explicitUrl });
+  }
+  const sourceLinks = new SourceLinkIndex(caseLinks);
+  const fields = details.filter((line) => !(hasOriginalLine && /^链接\s*[：:]/u.test(line)));
+  const fieldList = fields.length
+    ? `<ul class="insight-list case-field-list">${fields.map((line) => `<li>${renderListItem(line, sourceLinks)}</li>`).join("")}</ul>`
+    : "";
+  return `<article class="case-card case-card--visual"><div class="case-copy"><h3>${escapeHTML(title)}</h3>${fieldList}</div>${media}</article>`;
 }
 
 function renderFlow(items) {
