@@ -74,7 +74,9 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def locate_web_artifact(job_root: Path, min_published_at: str = "") -> WebArtifact:
+def locate_web_artifact(
+    job_root: Path, min_published_at: str = "", round_sha256s: frozenset = frozenset()
+) -> WebArtifact:
     """按 artifact_sync 落盘的 index.json + 最新 manifest 找本轮 Phase G 的 index.html，并核 sha256。
 
     manifest 是 Agent 自己声明的发布清单（publish_node_artifacts.py 写入），取 node=web 最近一次
@@ -109,7 +111,10 @@ def locate_web_artifact(job_root: Path, min_published_at: str = "") -> WebArtifa
                     best = (stamp, {**artifact, "published_at": stamp})
     if best is None:
         raise MiaodaFallbackError("产物清单里没有 Phase G 发布的网页（node=web 的 index.html），无法兜底发布。")
-    if min_published_at and best[0] < min_published_at:
+    # 本轮重建结果与上轮逐字节相同时 Agent 不会重新发布 manifest：发布时间早于本轮，
+    # 但 sha256 出现在本轮工具输出里（Agent 自己打印的 index.html 哈希）即视为本轮产物。
+    if (min_published_at and best[0] < min_published_at
+            and str(best[1].get("sha256") or "") not in round_sha256s):
         raise MiaodaFallbackError(
             "本轮 Phase G 还没有生成新网页（最近一次网页产物早于本次 /republish），未发布旧版本。"
         )

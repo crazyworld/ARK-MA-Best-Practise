@@ -272,6 +272,7 @@ _PHASE_H_ENV_MARKERS = (
 FALLBACK_ARTIFACT_CLOCK_SKEW_SEC = 120
 # /republish 时 Session 处于这些状态 → Agent 无法执行，直接走 Gateway 兜底（若已配置）。
 SESSION_UNUSABLE_STATUSES = frozenset({"failed", "error", "terminated"})
+_SHA256_RE = re.compile(r"\b[0-9a-f]{64}\b")
 _PHASE_H_WRITE_RE = re.compile(
     r"\bapps\s+\+(?:create|init|release-create|html-publish|access-scope-set)\b|\bgit\s+push\b"
 )
@@ -821,31 +822,24 @@ class Topic6Runner:
 
     # ---- Phase H 环境故障兜底（Gateway backup，不改变 Agent 行为） ----
 
-    async def _diagnose_phase_h_env_failure(self, job: PipelineJob) -> str:
-        """本轮 Phase H 是否因环境故障失败且 Agent 未做任何写操作；是则返回原因，否则空串。
+    async def _diagnose_phase_h_env_failure(self, job: PipelineJob) -> tuple[str, frozenset]:
+        """本轮是否因环境故障导致 Phase H 发布不了、且 Agent 未做任何妙搭写操作；是则返回原因。
 
-        只看本轮第一个 `[phase] H` 之后的事件：
-        - 出现 Agent 的妙搭写操作（apps +create/+init/+release-create/…、git push）→ 不兜底（防重复建应用）。
-        - 出现 [need_decision] 以外的业务停止不在此判定；只认工具结果里的环境故障特征。
+        扫描范围是**本轮全部事件**（history_floor 之后），不只 `[phase] H` 之后：Agent 常在 Phase G
+        收尾时就先探测妙搭身份（job_980f1999c493 第 3 轮：502 出现在 `[phase] H` 消息之前，
+        `[phase] H` 是最后一条消息、其后无工具调用）。
+        - 本轮出现妙搭写操作（apps +create/+init/+release-create/…、git push）→ 不兜底（防重复建应用）。
+        - 只认结构化工具结果里的环境故障特征，不看 Agent 自述文本。
         """
         try:
             events = await self._ark.list_session_events(job.ma_session_id)
         except Exception as error:  # noqa: BLE001
             log.warning("topic6 phase_h diagnose list events failed job=%s: %s", job.job_id, error)
-            return ""
+            return "", frozenset()
         events = list(events or [])[self._history_floor(job.job_id):]
-        start = next(
-            (
-                i for i, e in enumerate(events)
-                if e.get("type") == "agent.message"
-                and re.match(r"^\s*\[phase\]\s*H\b", event_text(e) or "")
-            ),
-            None,
-        )
-        if start is None:
-            return ""
         reason = ""
-        for event in events[start:]:
+        hashes: set[str] = set()
+        for event in events:
             etype = event.get("type")
             if etype == "agent.tool_use":
                 command = str((event.get("input") or {}).get("command") or "")
@@ -854,16 +848,24 @@ class Topic6Runner:
                         "topic6 phase_h fallback skipped job=%s: agent already ran a write op",
                         job.job_id,
                     )
-                    return ""
-            elif etype == "agent.tool_result" and not reason:
+                    return "", frozenset()
+            elif etype == "agent.tool_result":
                 text = event_text(event) or str(event.get("content") or "")
+                hashes.update(_SHA256_RE.findall(text))
+                if reason:
+                    continue
                 for marker, label in _PHASE_H_ENV_MARKERS:
                     if marker in text:
                         reason = label
                         break
                 if not reason and _is_sandbox_tool_error(event):
                     reason = "方舟沙箱不可用"
-        return reason
+        if not reason:
+            log.info(
+                "topic6 phase_h fallback not applicable job=%s: no environment failure in this round",
+                job.job_id,
+            )
+        return reason, frozenset(hashes)
 
     async def _after_phase_h_failure(self, job_id: str) -> None:
         """Phase H 失败收口之后调用；未注入兜底能力时什么也不做（与原行为完全一致）。"""
@@ -872,7 +874,7 @@ class Topic6Runner:
         job = self._store.get_job(job_id)
         if job is None or not job.ma_session_id:
             return
-        reason = await self._diagnose_phase_h_env_failure(job)
+        reason, round_hashes = await self._diagnose_phase_h_env_failure(job)
         if not reason:
             return
         state = self._progress.get(job_id)
@@ -888,10 +890,13 @@ class Topic6Runner:
             return
         # 发布需数分钟：脱离当前 SSE 消费任务执行，避免被后续 /continue 等取消流任务时连带中断
         loop = self._loop or asyncio.get_event_loop()
-        loop.create_task(self._gateway_fallback_publish(job, reason, state.round_started_at))
+        loop.create_task(self._gateway_fallback_publish(
+            job, reason, state.round_started_at, round_sha256s=round_hashes,
+        ))
 
     async def _gateway_fallback_publish(
-        self, job: PipelineJob, reason: str, min_published_at: str, note: str = ""
+        self, job: PipelineJob, reason: str, min_published_at: str, note: str = "",
+        round_sha256s: frozenset = frozenset(),
     ) -> None:
         job_id = job.job_id
         if self._miaoda_fallback is None:
@@ -901,7 +906,7 @@ class Topic6Runner:
             job_id, f"⚙️ 妙搭发布因环境问题失败（{reason}），Gateway 正在补发网页…"
         )
         try:
-            result = await self._miaoda_fallback(job, min_published_at)
+            result = await self._miaoda_fallback(job, min_published_at, round_sha256s)
         except Exception as error:  # noqa: BLE001 - 兜底失败只汇报，任务保持 failed
             log.error("topic6 miaoda fallback failed job=%s: %s", job_id, error)
             await self._reply_async_by_job(job_id, f"❌ Gateway 补发失败：{str(error)[:400]}")

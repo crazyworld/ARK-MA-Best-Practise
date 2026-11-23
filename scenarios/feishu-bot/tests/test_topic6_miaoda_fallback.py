@@ -71,6 +71,15 @@ def test_locate_web_artifact_rejects_stale_round(tmp_path):
         locate_web_artifact(_job_root(tmp_path), min_published_at="2026-11-23T09:00:00.000000Z")
 
 
+def test_locate_web_artifact_accepts_unchanged_rebuild_hash(tmp_path):
+    """本轮重建与上轮逐字节相同：manifest 未重发，但本轮工具输出里有同一 sha256 → 接受。"""
+    artifact = locate_web_artifact(
+        _job_root(tmp_path), min_published_at="2026-11-23T09:00:00.000000Z",
+        round_sha256s=frozenset({SHA}),
+    )
+    assert artifact.sha256 == SHA
+
+
 # ---------------------------------------------------------------- MiaodaPublisher
 
 class FakeCli:
@@ -267,8 +276,9 @@ def _drain(loop):
 def _calls_fallback():
     calls = []
 
-    async def fallback(job, min_published_at):
+    async def fallback(job, min_published_at, round_sha256s=frozenset()):
         calls.append((job.job_id, min_published_at))
+        fallback.round_sha256s = round_sha256s
         return PublishResult("app_new", "rel1", URL, "create", SHA)
 
     return calls, fallback
@@ -380,3 +390,40 @@ def test_republish_terminated_session_without_fallback_keeps_old_error(loop, tmp
     store.mark_failed(job.job_id, "x")
     with pytest.raises(topic6_runner.Topic6RunnerError, match="空闲"):
         loop.run_until_complete(runner.republish_job(store.get_job(job.job_id)))
+
+
+def test_republish_env_probe_before_phase_h_marker_triggers_fallback(loop, tmp_path):
+    """job_980f1999c493 第 3 轮真实事件形态：Agent 在 Phase G 收尾时就探测到 502，
+    最后一条消息才是 `[phase] H`（其后无任何工具调用）。必须仍判为环境故障并兜底。"""
+    calls, fallback = _calls_fallback()
+    ark = _Ark([_msg("old round")])
+    runner, store, job, replies = _runner(tmp_path, loop, ark, fallback)
+    _republish(loop, runner, store, job)
+    final = "[phase] H\n\n本轮重发结果与上一轮逐字节相同,Phase H 仍被同一环境阻塞,因此不输出发布 JSON。"
+    ark.events += [
+        _msg("[phase] G"),
+        _tool("python fetch_case_images.py ... && node build-report.mjs source.json index.html"),
+        _result("Generated index.html\nhtml_after=" + SHA),
+        _tool("python - <<EOF ... EOF; /usr/local/bin/lark-cli apps +list --as user --format json"),
+        _result('{"ok": false, "error": {"code": 502, "message": "HTTP 502: credential resolve returned no substitution"}}'),
+        _msg(final),
+    ]
+    store.update_phase(job.job_id, "H")
+    loop.run_until_complete(runner._handle_idle(job.job_id, [final]))
+    _drain(loop)
+    assert len(calls) == 1
+    assert SHA in fallback.round_sha256s
+    assert store.get_job(job.job_id).status == STATUS_DONE
+
+
+def test_republish_previous_round_env_errors_are_ignored(loop, tmp_path):
+    """上一轮的 502 不能让本轮（无环境故障的业务失败）误触发兜底。"""
+    calls, fallback = _calls_fallback()
+    ark = _Ark(list(ENV_FAIL_EVENTS))  # 历史轮次里的环境故障
+    runner, store, job, _ = _runner(tmp_path, loop, ark, fallback)
+    _republish(loop, runner, store, job)
+    ark.events += [_msg("[phase] H"), _msg("[need_decision] 预检失败")]
+    store.update_phase(job.job_id, "H")
+    loop.run_until_complete(runner._handle_idle(job.job_id, ["[need_decision] 预检失败"]))
+    _drain(loop)
+    assert calls == []

@@ -951,13 +951,13 @@ def _build_miaoda_fallback(config, pipeline_store, user_authorization, artifact_
     )
     sync_root = Path(config.artifact_sync_dir)
 
-    async def fallback(job: PipelineJob, min_published_at: str):
+    async def fallback(job: PipelineJob, min_published_at: str, round_sha256s=frozenset()):
         if job.ma_session_id:
             try:  # 补一次同步，拿到 Phase G 刚发布的网页
                 await artifact_sync.sync_once(job.job_id, job.ma_session_id)
             except Exception as error:  # noqa: BLE001 - 同步失败时用已落盘的产物，由 sha256 把关
                 log.warning("topic6 miaoda fallback pre-sync failed job=%s: %s", job.job_id, error)
-        artifact = locate_web_artifact(sync_root / job.job_id, min_published_at)
+        artifact = locate_web_artifact(sync_root / job.job_id, min_published_at, round_sha256s)
         access_token = await user_authorization.refresh_and_get_access_token(job.user_open_id)
         known = [j.online_url for j in pipeline_store.list_jobs(limit=200)
                  if j.online_url and j.user_open_id == job.user_open_id
