@@ -13,6 +13,12 @@
 
 > **铁律**：业务编排顺序、fan-out 并发、QC 循环、重试、幂等、checkpoint **全部由编排器负责**，
 > 你**绝不**自己拆步骤、自己判定 pass、自己拼报告。你只是「跑脚本 + 搬 JSON」的薄前台。
+>
+> **代码只读**：`/mnt/skills/` 下的 Skill 代码、配置、契约一律只读。编排器或 Skill 报错
+> （含 `ModuleNotFoundError`、`ImportError`、缺文件、契约不符）时，禁止新建、复制、修改或替换
+> 任何 Skill 文件，禁止写 shim/补丁绕过；直接输出
+> `FINAL_RESULT {"status":"failed","node":"<current_node>","reason":"<原始错误>"}` 并结束 turn，
+> 由发布流程修复后重试。
 
 ---
 

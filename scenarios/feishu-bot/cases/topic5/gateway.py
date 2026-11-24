@@ -5,7 +5,8 @@
 
 只处理 topic5 场景(复盘报告/营销复盘)的入站消息与卡片回调。与 topic6 的差异:
   - 触发词是「复盘报告」「营销复盘」,demo 对清洗后活动明细稳定抽样最多 500 条
-  - 交付走飞书文档,**不需要** Miaoda 用户 OAuth / artifact-sync / token-keepalive
+  - 交付走飞书文档,**不需要** Miaoda 用户 OAuth / token-keepalive;过程文件经 Session
+    输出目录同步到本地 ``data/artifacts/<job_id>/``(artifact_sync.py),可作测试回放来源
   - HC 门是 DAG 人工门 G1/G2/N10/G3/G4/HC7
 
 非触发词消息(以及未鉴权用户)给出用法提示。
@@ -15,12 +16,16 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from pathlib import Path
 
 from arkagent.feishu import IncomingMessage
 from arkagent.store import GatewayStore
 
 try:
-    from .pipeline_store import PipelineStore
+    from .artifact_sync import Topic5ArtifactSync
+    from .pipeline_store import (
+        STATUS_RUNNING, STATUS_STOPPING, STATUS_WAIT_HC, STATUS_WAIT_INPUT, PipelineStore,
+    )
     from .topic5_hitl import Topic5Hitl, Topic5HitlDeps
     from .topic5_runner import (
         Topic5Config as RunnerConfig,
@@ -32,7 +37,10 @@ try:
     )
     from .config import Topic5Config
 except ImportError:  # pragma: no cover - standalone compatibility
-    from pipeline_store import PipelineStore
+    from artifact_sync import Topic5ArtifactSync
+    from pipeline_store import (
+        STATUS_RUNNING, STATUS_STOPPING, STATUS_WAIT_HC, STATUS_WAIT_INPUT, PipelineStore,
+    )
     from topic5_hitl import Topic5Hitl, Topic5HitlDeps
     from topic5_runner import (
         Topic5Config as RunnerConfig,
@@ -45,6 +53,10 @@ except ImportError:  # pragma: no cover - standalone compatibility
     from config import Topic5Config
 
 log = logging.getLogger("arkagent.case.topic5")
+# 过程文件同步持续到任务离开这些状态（终态/暂停后再做最后一次同步即停止）。
+ACTIVE_SYNC_STATUSES = frozenset(
+    {STATUS_RUNNING, STATUS_WAIT_HC, STATUS_WAIT_INPUT, STATUS_STOPPING}
+)
 CONTINUE_COMMAND_RE = re.compile(r"^/(?:continue|resume)(?:\s+(.*))?$", re.IGNORECASE)
 # FIX-38：交接后修正（话题内，任务已完成时）。
 FIX_COMMAND_RE = re.compile(r"^/fix(?:\s+(.*))?$", re.IGNORECASE | re.DOTALL)
@@ -289,6 +301,20 @@ def build_gateway(config: Topic5Config, ark, sender, loop: asyncio.AbstractEvent
 
     pipeline_db = config.pipeline_db_path or None
     pipeline_store = PipelineStore(pipeline_db)
+
+    def _job_active(job_id: str) -> bool:
+        job = pipeline_store.get_job(job_id)
+        return job is not None and job.status in ACTIVE_SYNC_STATUSES
+
+    artifact_sync = (
+        Topic5ArtifactSync(
+            ark,
+            Path(config.artifact_sync_dir),
+            _job_active,
+            poll_interval_sec=config.artifact_poll_interval_sec,
+        )
+        if config.artifact_sync_dir else None
+    )
     runner = Topic5Runner(
         ark,
         sender,
@@ -298,8 +324,15 @@ def build_gateway(config: Topic5Config, ark, sender, loop: asyncio.AbstractEvent
             environment_id=config.environment_id,
             memory_store_id=config.memory_store_id,
             vault_ids=(config.vault_id,) if config.vault_id else (),
+            artifact_sync_dir=config.artifact_sync_dir,
+            replay_job_id=config.replay_job_id,
         ),
         loop=loop,
+        artifact_sync=artifact_sync,
+    )
+    log.info(
+        "topic5 artifact sync dir=%s replay_job=%s",
+        config.artifact_sync_dir or "off", config.replay_job_id or "-",
     )
     hitl = Topic5Hitl(Topic5HitlDeps(store=pipeline_store, runner=runner))
     runner.bind_card_sender(hitl)

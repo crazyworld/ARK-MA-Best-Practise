@@ -57,6 +57,7 @@ try:
         PipelineStore,
     )
     from .topic5_intake import IntakeValidationError, validate_xlsx_container
+    from .artifact_sync import ReplayBundleError, build_replay_bundle
     from .topic5_progress_card import (
         MAX_TOOL_LINES,
         build_progress_card,
@@ -80,6 +81,7 @@ except ImportError:  # pragma: no cover - standalone compatibility
         PipelineStore,
     )
     from topic5_intake import IntakeValidationError, validate_xlsx_container
+    from artifact_sync import ReplayBundleError, build_replay_bundle
     from topic5_progress_card import (
         MAX_TOOL_LINES,
         build_progress_card,
@@ -458,6 +460,9 @@ class Topic5Config:
     memory_store_id: str = ""  # 会被平台自动挂到沙箱 /mnt/memory/;为空则不挂
     vault_ids: tuple[str, ...] = ()
     session_timeout_sec: int = 6 * 3600
+    # 过程文件同步根目录（空=不同步）；回放来源 job（空=真实取数）。
+    artifact_sync_dir: str = ""
+    replay_job_id: str = ""
 
 
 @dataclass
@@ -487,6 +492,7 @@ class Topic5Runner:
         config: Topic5Config,
         loop: Optional[asyncio.AbstractEventLoop] = None,
         card_sender: Optional["Topic5CardSenderProtocol"] = None,
+        artifact_sync=None,
     ):
         self._ark = ark
         self._feishu = feishu
@@ -494,6 +500,7 @@ class Topic5Runner:
         self._config = config
         self._loop = loop
         self._card_sender = card_sender  # 由 topic5_hitl 注入
+        self._artifact_sync = artifact_sync
         self._start_lock = asyncio.Lock()
         self._active_streams: dict[str, asyncio.Task] = {}
         self._progress: dict[str, "_ProgressState"] = {}
@@ -614,6 +621,10 @@ class Topic5Runner:
             env_overrides["TOPICX_TASK_ID"] = task_id
         if self._config.memory_store_id:
             env_overrides["TOPIC5_MEMORY_STORE_ID"] = self._config.memory_store_id
+        if self._config.replay_job_id and not existing_session_id:
+            replay_resource, replay_path = await self._upload_replay_bundle()
+            resources.append(replay_resource)
+            env_overrides["TOPIC5_REPLAY_BUNDLE"] = replay_path
         vault_ids = list(
             dict.fromkeys(
                 vault_id
@@ -1214,7 +1225,38 @@ class Topic5Runner:
 
     def _spawn_stream(self, job: PipelineJob, first_user_message: Optional[str]) -> asyncio.Task:
         loop = self._loop or asyncio.get_event_loop()
+        if self._artifact_sync is not None:
+            self._artifact_sync.start(job.job_id, job.ma_session_id, loop)
         return loop.create_task(self._drive_session(job, first_user_message))
+
+    async def _upload_replay_bundle(self) -> tuple[dict, str]:
+        """把回放来源 job 的本地过程文件打包，作为 Session 文件资源挂载。"""
+        if self._artifact_sync is None:
+            raise Topic5RunnerError("已配置 TOPIC5_REPLAY_JOB_ID，但过程文件同步未启用")
+        source_job = self._config.replay_job_id
+        runs = self._artifact_sync.local_run_dirs(source_job)
+        if not runs:
+            raise Topic5RunnerError(
+                f"回放来源 {source_job} 在本地没有已同步的过程文件"
+                f"（{self._artifact_sync.job_root(source_job)}）"
+            )
+        run_dir = runs[0]
+        try:
+            data = await asyncio.to_thread(
+                build_replay_bundle, run_dir,
+                {"job_id": source_job, "task_id": run_dir.parent.name, "run_id": run_dir.name},
+            )
+        except ReplayBundleError as error:
+            raise Topic5RunnerError(f"回放包构建失败：{error}") from error
+        digest = hashlib.sha256(data).hexdigest()
+        mount_name = f"topic5_replay_{digest[:12]}.zip"
+        file_id = await self._ark.upload_file(mount_name, "application/zip", data)
+        log.info("topic5 replay bundle job=%s run=%s size=%s sha256=%s",
+                 source_job, run_dir, len(data), digest)
+        return (
+            {"type": "file", "file_id": file_id, "mount_path": mount_name},
+            f"/mnt/session/uploads/{mount_name}",
+        )
 
     async def _drive_session(self, job: PipelineJob, first_user_message: Optional[str]) -> None:
         """消费 MA 事件流;瞬时网络断线时重连但不重复发送 user.message。"""

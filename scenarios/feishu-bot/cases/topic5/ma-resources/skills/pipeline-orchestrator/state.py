@@ -14,6 +14,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any
 
+import session_outputs
 
 def _now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime())
@@ -53,6 +54,10 @@ class RunState:
     def save(self) -> None:
         p = self.run_dir / "run.json"
         p.write_text(json.dumps(asdict(self), ensure_ascii=False, indent=2), encoding="utf-8")
+        # 过程文件发布到 Session 输出目录（Gateway 经 Files API 同步到本地）。
+        # running 期间节流；暂停/失败/完成等状态变化强制发布，保证关键节点产物不滞后。
+        session_outputs.publish_safely(
+            self.run_dir, self.task_id, self.run_id, force=self.status != "running")
 
     @classmethod
     def load(cls, run_dir: Path) -> "RunState":

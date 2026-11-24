@@ -36,7 +36,12 @@ class Topic5Config:
     pipeline_db_path: str
     vault_id: str
     authorized_open_ids: tuple[str, ...]
+    artifact_sync_dir: str = ""
+    artifact_poll_interval_sec: float = 60.0
+    replay_job_id: str = ""
 
+
+DEFAULT_ARTIFACT_SYNC_DIR = Path(__file__).resolve().parent / "data" / "artifacts"
 
 def load_case_config(env: Optional[Mapping[str, str]] = None) -> Topic5Config:
     environ = os.environ if env is None else env
@@ -59,4 +64,16 @@ def load_case_config(env: Optional[Mapping[str, str]] = None) -> Topic5Config:
         pipeline_db_path=(environ.get("TOPIC5_PIPELINE_DB_PATH") or "").strip(),
         vault_id=(environ.get("ARK_VAULT_ID") or "").strip(),
         authorized_open_ids=open_ids,
+        # 过程文件同步：默认落 cases/topic5/data/artifacts/<job_id>/；设为 off 关闭。
+        artifact_sync_dir=(
+            ""
+            if (environ.get("TOPIC5_ARTIFACT_SYNC_DIR") or "").strip().lower() == "off"
+            else (environ.get("TOPIC5_ARTIFACT_SYNC_DIR") or "").strip()
+            or str(DEFAULT_ARTIFACT_SYNC_DIR)
+        ),
+        artifact_poll_interval_sec=float(
+            (environ.get("TOPIC5_ARTIFACT_POLL_INTERVAL_SEC") or "60").strip()
+        ),
+        # 测试回放：设为历史 job_id 时，新任务复用其外部数据与标注缓存。
+        replay_job_id=(environ.get("TOPIC5_REPLAY_JOB_ID") or "").strip(),
     )

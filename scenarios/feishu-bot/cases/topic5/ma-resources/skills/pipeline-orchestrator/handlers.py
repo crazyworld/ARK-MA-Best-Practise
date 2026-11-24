@@ -39,6 +39,7 @@ import hot_formula  # FIX-49 热帖成功配方
 import noise_review  # FIX-05 Step5.5 去噪
 import module_scope  # FIX-61 逐模块范围记录
 import social_task  # FIX-04 活动原帖自动采集
+import replay  # 测试回放：复用历史 Run 的外部数据与标注缓存
 
 # ── 业务口径常量（源：飞书 wiki 活动复盘口径 + knowledge/_字段速查.md）────────
 # 指标命名白名单：活动层只允许这些指标名；禁用“人均/转化率/性价比”等无数据支撑说法。
@@ -1443,6 +1444,11 @@ def ssjh_pull(node, state, ctx):
     """
     out = node.get("outputs", [])
     plan = state.read_artifact("confirmed_plan") or {}
+    if replay.enabled():
+        # 测试回放：复用录制 Run 的数说取数结果（已核对取数参数），不调用外部接口。
+        payloads = {key: replay.load(state.run_dir, key, plan) for key in out}
+        state.event(node["id"], "replayed", ",".join(out))
+        return {"artifacts": payloads}
     baseline = "brand_stats_baseline" in out
     wordcloud = "wordcloud_data" in out
     # FIX-03：content_scope 必须贯通到 SSJH 的 content_mode（ALL/UGC/PGC），
@@ -1614,6 +1620,8 @@ def annotate(node, state, ctx):
     """
     out = node.get("outputs", [])
     threshold = int(state.params.get("annotation_routing_threshold", 1000))
+    if replay.enabled():
+        replay.seed_annotation_cache(state.run_dir)
 
     if "annotated_round1" in out:
         cleaned = state.read_artifact("denoised_data") or {}
@@ -3438,6 +3446,8 @@ def activity_pull(node, state, ctx):
     if plan.get("source_file"):
         return {"artifacts": {"activity_detail": {"source": "user_uploaded_excel",
                                                   "source_file": plan["source_file"]}}}
+    if replay.enabled():
+        return _replay_activity_pull(state, plan)
     if not social_task.api_available():
         raise RuntimeError(f"activity_pull: 自动采集不可用（{social_task.unavailable_reason()}），"
                            "可在本话题上传活动明细 .xlsx 后重试")
@@ -3503,6 +3513,31 @@ def activity_pull(node, state, ctx):
     plan["source_file"] = source_file
     handoff = {"source": "ssjh_social_task", "skill_version": social_task.VERSION, "campaigns": handoffs,
                "workbook": str(workbook), "sha256": sha, "rows": len(all_rows), "status": "ready"}
+    return {"artifacts": {"activity_detail": handoff, "confirmed_plan": plan}}
+
+
+def _replay_activity_pull(state, plan: dict) -> dict:
+    """测试回放：复用录制 Run 的自动采集结果，不创建计费任务（见 replay.py）。"""
+    recorded = replay.load(state.run_dir, "activity_detail", plan)
+    if recorded.get("source") != "ssjh_social_task" or recorded.get("status") != "ready":
+        raise RuntimeError("activity_pull: 回放包中的活动原帖不是已完成的自动采集结果")
+    old_workbook = Path(str(recorded.get("workbook") or ""))
+    try:
+        relative = old_workbook.relative_to(old_workbook.parents[1]).as_posix()
+    except (IndexError, ValueError) as error:
+        raise RuntimeError("activity_pull: 回放包工作簿路径非法") from error
+    if not relative.startswith("activity_collection/"):
+        raise RuntimeError("activity_pull: 回放包工作簿不在 activity_collection 下")
+    workbook = replay.restore_file(state.run_dir, relative)
+    sha = replay.sha256_file(workbook)
+    if sha != recorded.get("sha256"):
+        raise RuntimeError("activity_pull: 回放工作簿 sha256 与录制记录不一致")
+    replay.seed_annotation_cache(state.run_dir)
+    plan["source_file"] = {"name": "活动原帖（自动采集）.xlsx", "mount_path": workbook.name,
+                           "transport": "social_task", "path": str(workbook), "sha256": sha}
+    handoff = {**recorded, "workbook": str(workbook), "sha256": sha,
+               "replayed_from": {"workbook": str(old_workbook)}}
+    state.event("n03b_activity_pull", "replayed", f"rows={recorded.get('rows')}")
     return {"artifacts": {"activity_detail": handoff, "confirmed_plan": plan}}
 
 
