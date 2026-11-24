@@ -11,9 +11,10 @@ import hashlib
 import json
 import os
 import sys
+import tempfile
+import unittest
 from pathlib import Path
-
-import pytest
+from unittest.mock import patch
 
 CASE = Path(__file__).resolve().parent.parent
 ORCH = CASE / "ma-resources" / "skills" / "pipeline-orchestrator"
@@ -44,14 +45,14 @@ class FakeFilesApi:
         return (self.root / url.removeprefix("https://x/")).read_bytes()
 
 
-def _record_run(tmp_path: Path, monkeypatch) -> Path:
+def _record_run(tmp_path: Path) -> Path:
     """在“沙箱”里跑出一份带外部数据的 run，并发布到 outputs。"""
     import session_outputs
     from state import RunState, register_run_dir
 
     outputs = tmp_path / "outputs"
     outputs.mkdir()
-    monkeypatch.setenv("TOPIC5_SESSION_OUTPUTS_ROOT", str(outputs))
+    os.environ["TOPIC5_SESSION_OUTPUTS_ROOT"] = str(outputs)  # setUp 的 patch.dict 负责还原
     session_outputs._last_publish.clear()
     run_dir = tmp_path / "sandbox" / "tasks" / "task-1" / "runs" / "run-1"
     run_dir.mkdir(parents=True)
@@ -76,44 +77,58 @@ def _record_run(tmp_path: Path, monkeypatch) -> Path:
     return outputs
 
 
-def test_sync_restores_run_tree_and_builds_replayable_bundle(tmp_path, monkeypatch):
-    outputs = _record_run(tmp_path, monkeypatch)
-    sync = Topic5ArtifactSync(FakeFilesApi(outputs), tmp_path / "local", lambda _: False)
-    assert asyncio.run(sync.sync_once("job_old", "sesn")) > 0
-    runs = sync.local_run_dirs("job_old")
-    assert [p.relative_to(tmp_path / "local").as_posix() for p in runs] == \
-        ["job_old/task-1/run-1"]
-    local_run = runs[0]
-    sandbox_run = tmp_path / "sandbox" / "tasks" / "task-1" / "runs" / "run-1"
-    for path in sandbox_run.rglob("*"):
-        if path.is_file() and not path.name.startswith("."):
-            rel = path.relative_to(sandbox_run)
-            assert (local_run / rel).read_bytes() == path.read_bytes(), rel
-    # 增量：再同步无新下载
-    assert asyncio.run(sync.sync_once("job_old", "sesn")) == 0
+class ArtifactSyncReplayTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp_path = Path(tmp.name)
+        env = patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
 
-    bundle = tmp_path / "bundle.zip"
-    bundle.write_bytes(build_replay_bundle(local_run, {"job_id": "job_old"}))
+    def test_sync_restores_run_tree_and_builds_replayable_bundle(self):
+        tmp_path = self.tmp_path
+        outputs = _record_run(tmp_path)
+        sync = Topic5ArtifactSync(FakeFilesApi(outputs), tmp_path / "local", lambda _: False)
+        assert asyncio.run(sync.sync_once("job_old", "sesn")) > 0
+        runs = sync.local_run_dirs("job_old")
+        assert [p.relative_to(tmp_path / "local").as_posix() for p in runs] == \
+            ["job_old/task-1/run-1"]
+        local_run = runs[0]
+        sandbox_run = tmp_path / "sandbox" / "tasks" / "task-1" / "runs" / "run-1"
+        for path in sandbox_run.rglob("*"):
+            if path.is_file() and not path.name.startswith("."):
+                rel = path.relative_to(sandbox_run)
+                assert (local_run / rel).read_bytes() == path.read_bytes(), rel
+        # 增量：再同步无新下载
+        assert asyncio.run(sync.sync_once("job_old", "sesn")) == 0
 
-    import replay
-    from state import RunState, register_run_dir
-    monkeypatch.setenv(replay.ENV_BUNDLE, str(bundle))
-    new_run = tmp_path / "new" / "run-2"
-    new_run.mkdir(parents=True)
-    register_run_dir("run-2", new_run)
-    assert replay.load(new_run, "brand_stats", dict(PLAN)) == {"volume": 1}
-    restored = replay.restore_file(new_run, "activity_collection/activity_adapted.xlsx")
-    assert restored.read_bytes() == b"xlsx"
-    assert replay.seed_annotation_cache(new_run) == 1
+        bundle = tmp_path / "bundle.zip"
+        bundle.write_bytes(build_replay_bundle(local_run, {"job_id": "job_old"}))
+
+        import replay
+        from state import RunState, register_run_dir
+        os.environ[replay.ENV_BUNDLE] = str(bundle)
+        new_run = tmp_path / "new" / "run-2"
+        new_run.mkdir(parents=True)
+        register_run_dir("run-2", new_run)
+        assert replay.load(new_run, "brand_stats", dict(PLAN)) == {"volume": 1}
+        restored = replay.restore_file(new_run, "activity_collection/activity_adapted.xlsx")
+        assert restored.read_bytes() == b"xlsx"
+        assert replay.seed_annotation_cache(new_run) == 1
+
+    def test_bundle_requires_all_external_artifacts(self):
+        tmp_path = self.tmp_path
+        outputs = _record_run(tmp_path)
+        sync = Topic5ArtifactSync(FakeFilesApi(outputs), tmp_path / "local", lambda _: False)
+        asyncio.run(sync.sync_once("job_old", "sesn"))
+        local_run = sync.local_run_dirs("job_old")[0]
+        state = json.loads((local_run / "run.json").read_text(encoding="utf-8"))
+        state["artifacts"].pop("wordcloud_data")
+        (local_run / "run.json").write_text(json.dumps(state), encoding="utf-8")
+        with self.assertRaisesRegex(ReplayBundleError, "wordcloud_data"):
+            build_replay_bundle(local_run, {"job_id": "job_old"})
 
 
-def test_bundle_requires_all_external_artifacts(tmp_path, monkeypatch):
-    outputs = _record_run(tmp_path, monkeypatch)
-    sync = Topic5ArtifactSync(FakeFilesApi(outputs), tmp_path / "local", lambda _: False)
-    asyncio.run(sync.sync_once("job_old", "sesn"))
-    local_run = sync.local_run_dirs("job_old")[0]
-    state = json.loads((local_run / "run.json").read_text(encoding="utf-8"))
-    state["artifacts"].pop("wordcloud_data")
-    (local_run / "run.json").write_text(json.dumps(state), encoding="utf-8")
-    with pytest.raises(ReplayBundleError, match="wordcloud_data"):
-        build_replay_bundle(local_run, {"job_id": "job_old"})
+if __name__ == "__main__":
+    unittest.main()
