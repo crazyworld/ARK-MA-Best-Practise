@@ -986,10 +986,7 @@ class Topic5Runner:
                 f"业务 Session 状态为 {session_status or 'unknown'}，不能继续当前任务"
             )
         if job.retry_strategy == RETRY_STRATEGY_NODE:
-            bundle = (
-                Path(__file__).resolve().parent
-                / "tools" / "out" / "pipeline-orchestrator.zip"
-            )
+            bundle = RECOVERY_BUNDLE_PATH
             if not bundle.is_file():
                 raise Topic5RunnerError(
                     "缺少已验证的 pipeline-orchestrator 恢复包，请先部署 Topic5 Skill"
@@ -1669,6 +1666,10 @@ class Topic5Runner:
                 )
         except Exception as error:  # noqa: BLE001
             log.warning("topic5 reply failed chat=%s: %s", chat_id, error)
+
+
+# 节点级重试挂载的编排器恢复包：由 update_ma.sh 第 2 步 pack_skills.sh 产出，与线上 Skill 同版本。
+RECOVERY_BUNDLE_PATH = Path(__file__).resolve().parent / "tools" / "out" / "pipeline-orchestrator.zip"
 
 
 class Topic5RunnerError(RuntimeError):

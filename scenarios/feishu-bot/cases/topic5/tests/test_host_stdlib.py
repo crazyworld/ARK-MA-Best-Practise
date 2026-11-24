@@ -1086,11 +1086,17 @@ class RunnerFinalResultParsingTest(unittest.TestCase):
 
             runner.resume_job = capture_resume
             old_resumable = self.runner.is_session_resumable
+            old_bundle = self.runner.RECOVERY_BUNDLE_PATH
+            # 恢复包在部署打包时产出；测试用临时包，不依赖本机 tools/out 残留。
+            bundle = Path(temp_dir) / "pipeline-orchestrator.zip"
+            bundle.write_bytes(b"PK\x05\x06" + b"\x00" * 18)
             self.runner.is_session_resumable = lambda _status: True
+            self.runner.RECOVERY_BUNDLE_PATH = bundle
             try:
                 asyncio.run(runner.continue_job("c", "thread", "u"))
             finally:
                 self.runner.is_session_resumable = old_resumable
+                self.runner.RECOVERY_BUNDLE_PATH = old_bundle
                 store.close()
 
             self.assertEqual(len(sent), 1)
