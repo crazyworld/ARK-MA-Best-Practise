@@ -107,6 +107,7 @@ def _header(status: str, phase: str, failure_scope: str = "") -> dict:
 def _meta_line(job: PipelineJob, elapsed_sec: int) -> str:
     parts = [
         f"job=`{job.job_id}`",
+        f"session=`{job.ma_session_id or '-'}`",
         f"mode=`{job.mode}`",
         f"phase=`{job.current_phase}`",
         f"已运行 {_format_elapsed(elapsed_sec)}",

@@ -853,7 +853,7 @@ def build_hc_card(
         {
             "tag": "markdown",
             "content": (
-                f"任务 ID:`{job.job_id}`  ·  运行模式:**{job.mode}**  ·  "
+                f"任务 ID:`{job.job_id}`  ·  Session:`{job.ma_session_id or '-'}`  ·  运行模式:**{job.mode}**  ·  "
                 f"当前关卡:**{hc_kind}**"
             ),
         },
@@ -1073,7 +1073,7 @@ def build_hc_resolved_card(
         {
             "tag": "markdown",
             "content": (
-                f"任务 ID:`{job.job_id}`  ·  运行模式:**{job.mode}**  ·  "
+                f"任务 ID:`{job.job_id}`  ·  Session:`{job.ma_session_id or '-'}`  ·  运行模式:**{job.mode}**  ·  "
                 f"当前关卡:**{hc_kind}**"
             ),
         },

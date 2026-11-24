@@ -90,7 +90,7 @@ class LabelReviewChainTest(unittest.TestCase):
                     self.state.write_artifact(key, value)
         self.state.human = {"node": "n10_hc_opinion", "expect": ["confirmed_opinion_labels"]}
         self.payload = hc_bridge.write_hc_pending(self.state, self.state.run_dir)
-        self.job = types.SimpleNamespace(job_id="job_test", mode="full", task_id="task_test")
+        self.job = types.SimpleNamespace(job_id="job_test", ma_session_id="sesn-test", mode="full", task_id="task_test")
 
     def tearDown(self):
         self.tmp.cleanup()
