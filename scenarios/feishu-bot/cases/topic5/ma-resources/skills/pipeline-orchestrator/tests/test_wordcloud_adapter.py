@@ -18,6 +18,10 @@ def topic(term="好用", ids=None):
             "rationale": "依据原词和已读原帖，不推算总体成效。", "post_ids": ids or []}
 
 
+
+# FIX-55：交付复核须回应 call-brief（answered_questions 或 unanswered_reason）。
+BRIEF_REVIEW = {"answered_questions": [], "unanswered_reason": "测试词表不足以回答 call-brief 问题"}
+
 class TestWordcloudAdapter(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -77,7 +81,7 @@ class TestWordcloudAdapter(unittest.TestCase):
         prompts = []
         def model(_sys, user, **_kwargs):
             prompts.append(user)
-            return {"topics": [topic("不用")]}
+            return {"topics": [topic("不用")], "brief_review": BRIEF_REVIEW}
         with patch("semantic.chat_json", side_effect=model):
             result = adapter.analyze(self.state, chart, self.script_dir, ("转化",))
         self.assertIn('"value": 10.5', prompts[0])
@@ -111,7 +115,7 @@ class TestWordcloudAdapter(unittest.TestCase):
                                            "claim": "样本出现分歧", "relation": "contradicts"}]}]},
             {"topics": [topic(ids=["p1", "p2"])], "supplemental_post_ids": [],
              "stopping_reason": "全部两条已读，关键愿望与事实歧义已消除"},
-            {"topics": [topic(ids=["p1", "p2"])]},
+            {"topics": [topic(ids=["p1", "p2"])], "brief_review": BRIEF_REVIEW},
         ]
         def model(_sys, user, **kwargs):
             prompts.append(user)
@@ -159,7 +163,7 @@ class TestWordcloudAdapter(unittest.TestCase):
         path = Path(chart["wordcloud_artifacts"]["white_path"])
         from PIL import Image
         Image.new("RGB", (1400, 880), "black").save(path)
-        with patch("semantic.chat_json", return_value={"topics": [topic()]}):
+        with patch("semantic.chat_json", return_value={"topics": [topic()], "brief_review": BRIEF_REVIEW}):
             with self.assertRaisesRegex(RuntimeError, "IMAGE_MISMATCH"):
                 adapter.analyze(self.state, chart, self.script_dir, ())
 

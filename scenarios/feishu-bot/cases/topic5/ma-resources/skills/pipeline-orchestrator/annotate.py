@@ -499,7 +499,8 @@ def _r2_task_prompts(
 
 
 def _label_table(labels: list[str], review_items: list[dict] | None) -> str:
-    """标签清单 → 「- 名称：定义（例：…）」。定义与例子来自已确认类别（FIX-31）。"""
+    """标签清单 → 「- 名称：定义（例：…）边界：…」。定义、例子与边界来自 N10 已确认类别
+    （FIX-31；边界含排除情形与单标签优先规则，是人工确认的分类依据，必须进入轮次二）。"""
     items = {str((item or {}).get("name") or ""): item
              for item in (review_items or []) if isinstance(item, dict)}
     rows = []
@@ -512,6 +513,9 @@ def _label_table(labels: list[str], review_items: list[dict] | None) -> str:
             line += f"：{definition}"
         if examples:
             line += f"（例：{'；'.join(examples)}）"
+        boundary = str(meta.get("boundary") or "").strip()
+        if boundary:
+            line += f"\n  边界：{boundary}"
         rows.append(line)
     return "\n".join(rows) if rows else "（无预设）"
 

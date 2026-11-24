@@ -37,7 +37,7 @@ def _load_hitl():
 
 
 HITL = _load_hitl()
-ROWS = [
+BASE_ROWS = [
     {"id": "post-1", "content_mode": "UGC", "title": "抽奖后去买了",
      "content": "中奖了之后在门店购买了酸奶。", "url": "https://example.com/post/1",
      "author": "不得进入审核证据的个人字段", "relevance": True},
@@ -46,6 +46,17 @@ ROWS = [
     {"id": "post-3", "content_mode": "UGC", "title": "无关帖子",
      "content": "其他品牌活动", "relevance": False},
 ]
+# 原版口径：某方向不足 10 条不做类别发现（DISCOVERY_MIN_POSTS）。补足活动相关 UGC 正面样本，
+# 使两条发现链路都真实运行；首行保持为含代表原句的帖子。
+FILLER = [
+    {"id": f"post-f{i}", "content_mode": "UGC", "title": f"活动打卡{i}",
+     "content": f"今天参加了活动第{i}次，体验不错。", "url": f"https://example.com/post/f{i}",
+     "relevance": True}
+    for i in range(10)
+]
+ROWS = [dict(row, ai_sentiment=1) for row in BASE_ROWS + FILLER]
+UGC_RELEVANT = sum(1 for r in ROWS if r["content_mode"] == "UGC" and r["relevance"])
+RELEVANT_POSITIVE = sum(1 for r in ROWS if r["relevance"])
 
 
 def _model_reply(_system, user, **_kwargs):
@@ -88,8 +99,10 @@ class LabelReviewChainTest(unittest.TestCase):
         context = self.payload["review_context"]
         ugc = context["ugc_category_list"]
         opinion = context["opinion_candidates"]
-        self.assertEqual(ugc["sampling"]["population_size"], 2)
-        self.assertEqual(opinion["sampling"]["population_size"], 2)
+        ugc_sampling = next(iter(ugc["campaigns"].values()))["ugc"]["sampling"]
+        opinion_sampling = next(iter(opinion["campaigns"].values()))["positive"]["sampling"]
+        self.assertEqual(ugc_sampling["population_size"], UGC_RELEVANT)
+        self.assertEqual(opinion_sampling["population_size"], RELEVANT_POSITIVE)
         self.assertTrue(all(
             ref["content_type"] == "UGC"
             for item in ugc["review_items"] for ref in item["evidence"]
@@ -98,7 +111,8 @@ class LabelReviewChainTest(unittest.TestCase):
         for item in ugc["review_items"]:
             for ref in item["evidence"]:
                 self.assertEqual(ROWS[ref["source_row_index"]]["id"], ref["post_id"])
-        self.assertEqual(ugc["source_subject"], self.state.artifact_ref("cleaned_data"))
+        # 轮次一后发现：UGC 与观点均基于 annotated_round1（活动相关判定来自轮次一）。
+        self.assertEqual(ugc["source_subject"], self.state.artifact_ref("annotated_round1"))
         self.assertEqual(opinion["source_subject"], self.state.artifact_ref("annotated_round1"))
 
     def test_transport_confirmation_and_gateway_snapshot_preserve_versions(self):
@@ -120,19 +134,14 @@ class LabelReviewChainTest(unittest.TestCase):
             handlers.annotate({"id": "n11", "outputs": ["annotated_data"]}, self.state, {})
         kwargs = call.call_args.kwargs
         rules = {key: kwargs[key] for key in ("opinion_review_items", "ugc_review_items")}
-        for builder in (annotate._r2_sys, annotate._r2_prompt_dh):
-            prompt = builder(frozen["labels"], frozen["ugc_categories"], **rules)
-            self.assertIn(frozen["opinion_review_items"][0]["definition"], prompt)
-            self.assertIn(frozen["ugc_review_items"][0]["boundary"], prompt)
-            self.assertNotIn("https://example.com/post/1", prompt)
+        prompts = annotate._r2_task_prompts("活动", frozen["labels"], frozen["ugc_categories"], False,
+                                            **rules)
+        joined = "\n".join(prompts.values())
+        self.assertIn(frozen["opinion_review_items"][0]["definition"], joined)
+        self.assertIn(frozen["ugc_review_items"][0]["boundary"], joined)
+        self.assertNotIn("https://example.com/post/1", joined)
 
-        with patch.object(annotate.datahub, "api_available", return_value=True), \
-                patch.object(annotate, "_run_datahub") as dh:
-            annotate.annotate_round2(
-                [dict(ROWS[0])], opinion_labels=frozen["labels"],
-                ugc_categories=frozen["ugc_categories"], threshold=1, **rules,
-            )
-        self.assertIn(frozen["ugc_review_items"][0]["boundary"], dh.call_args.args[1])
+        # 轮次二按原版只走小引擎（annot_r2.py 三个独立任务），不经 DataHub。
         seen = []
         def chat(system, user, **kwargs):
             seen.append(system)
@@ -145,7 +154,7 @@ class LabelReviewChainTest(unittest.TestCase):
                 [dict(ROWS[0])], opinion_labels=frozen["labels"],
                 ugc_categories=frozen["ugc_categories"], **rules,
             )
-        self.assertIn(frozen["opinion_review_items"][0]["boundary"], seen[0])
+        self.assertTrue(any(frozen["opinion_review_items"][0]["boundary"] in system for system in seen))
 
     def test_original_card_details_callbacks_and_legacy_compatibility(self):
         card = HITL.build_hc_card(self.job, "N10", 17, self.payload)
