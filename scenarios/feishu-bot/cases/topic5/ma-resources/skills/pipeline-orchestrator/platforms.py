@@ -47,6 +47,7 @@ ALIASES: dict[str, str] = {
     "抖音": "抖音",
     "douyin": "抖音",
     "抖音短视频": "抖音",
+    "抖音app": "抖音",  # 供应商导出站点名；样本 79 条 URL 均为 douyin/iesdouyin 域名
     # 快手
     "快手": "快手",
     "kuaishou": "快手",
