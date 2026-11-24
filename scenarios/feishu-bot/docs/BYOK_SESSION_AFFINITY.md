@@ -20,7 +20,9 @@ BYOK 接入指南的规则是"需要多个 Header 时每个分别按此规则传
 - 取值 `ma-` + session_id:前缀由使用方(模型网关侧)约定,用于区分来源。
 - 同一个 Session 的每次请求取值一致,不同 Session 各自不同。
 - 作用点:`ArkClient.send_message`(首条消息)与 `send_custom_tool_result`(工具结果回传)。`run()`、各 case 的
-  重试 / 续跑 / 催促最终都走这两个方法,因此**一处实现覆盖全部入口**(通用 Gateway、topic6、数字员工、排障 Bot 等)。
+  重试 / 续跑 / 催促最终都走这两个方法,因此**凡是已经带 BYOK 鉴权头的入口**(通用 Gateway、topic6、数字员工、排障 Bot)
+改一处即全部生效。**例外**:topic5 目前没有给 `send_message` 传 `extra_headers`(`topic5_runner.py` 的首条消息),
+它没有 BYOK 头,所以不会带亲和头;topic5 要走 BYOK relay 时需先接入 BYOK 鉴权头,本 PR 不改。
 - 首轮不会漏:`create_session` 先返回 session_id,再发首条消息;Header 随该 `POST /events` 一起提交,Agent Loop 在提交后才启动。
 
 ## 开关与配置
