@@ -22,6 +22,8 @@ import feishu
 from excel_source import normalize_source_file
 import impact
 import label_review
+import traceability
+
 # 人工关卡 node_id → HC 种类（供卡片展示 / resume --hc 定位）。
 NODE_TO_HC = {
     "n01_hc_requirement": "G1",
@@ -239,33 +241,17 @@ _TRACE_FIELDS = ("raw_request", "corrections", "field_sources",
                  "keyword_generation")  # FIX-07：关键词生成 Skill 的调用结果留痕
 
 
-def _intake_module():
-    """按文件位置加载 topic5_intake，不依赖调用方的 sys.path。
-
-    该模块在 case 根目录（本文件的 ../../..），原先靠隐式 sys.path 命中：
-    单跑 hc_bridge 相关测试会 ModuleNotFoundError，属于环境脆弱点。
-    """
-    import importlib
-    import sys
-
-    root = str(Path(__file__).resolve().parents[3])
-    if root not in sys.path:
-        sys.path.insert(0, root)
-    return importlib.import_module("topic5_intake")
-
-
 def _with_traceability(value: dict) -> dict:
     """保证 requirement_confirmed 带上留痕字段，缺省补空结构。
 
     下游（Validator 核对最新更正、词云 call-brief）依赖这些字段存在；
     补齐空值比让调用方到处写 `or {}` 更稳。
     """
-    intake = _intake_module()
     out = dict(value)
     out["raw_request"] = str(value.get("raw_request") or "").strip()
-    out["corrections"] = intake._clean_corrections(value.get("corrections"))
-    out["field_sources"] = intake._clean_field_sources(value.get("field_sources"))
-    out["skill_invocations"] = intake._clean_skill_invocations(
+    out["corrections"] = traceability.clean_corrections(value.get("corrections"))
+    out["field_sources"] = traceability.clean_field_sources(value.get("field_sources"))
+    out["skill_invocations"] = traceability.clean_skill_invocations(
         value.get("skill_invocations"))
     out["delivery_deadline"] = str(value.get("delivery_deadline") or "").strip()
     out["special_notes"] = str(value.get("special_notes") or "").strip()

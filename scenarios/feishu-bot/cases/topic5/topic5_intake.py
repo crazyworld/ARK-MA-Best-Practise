@@ -449,63 +449,21 @@ def _clean_period(value: Any) -> dict:
     return {key: val for key, val in (("start", start), ("end", end)) if val}
 
 
-def _clean_corrections(value: Any) -> list[dict]:
-    """更正记录（FIX-09）：[{at, field, old, new, source}]，用于 Validator 核对最新值。"""
-    value = _unwrap(value)
-    if isinstance(value, dict):
-        value = [value]
-    if not isinstance(value, list):
-        return []
-    out = []
-    for item in value:
-        item = _unwrap(item)
-        if not isinstance(item, dict):
-            continue
-        out.append({
-            "at": str(item.get("at") or item.get("time") or "").strip(),
-            "field": str(item.get("field") or "").strip(),
-            "old": item.get("old"),
-            "new": item.get("new"),
-            "source": str(item.get("source") or "user").strip(),
-        })
-    return out
+def _load_traceability():
+    """留痕清洗函数的唯一事实源在 pipeline-orchestrator/traceability.py（沙箱只挂载 skill）。"""
+    from pathlib import Path as _Path
+    import sys as _sys
+    _orch = _Path(__file__).resolve().parent / "ma-resources" / "skills" / "pipeline-orchestrator"
+    if str(_orch) not in _sys.path:
+        _sys.path.insert(0, str(_orch))
+    import traceability as _traceability
+    return _traceability
 
 
-def _clean_field_sources(value: Any) -> dict[str, str]:
-    """字段来源（FIX-09）：{字段: 原话|默认|推断|用户更正}。"""
-    value = _unwrap(value)
-    if not isinstance(value, dict):
-        return {}
-    allowed = {"原话", "默认", "推断", "用户更正",
-               "utterance", "default", "inferred", "correction"}
-    out = {}
-    for key, source in value.items():
-        text = str(source or "").strip()
-        if text in allowed:
-            out[str(key)] = text
-    return out
-
-
-def _clean_skill_invocations(value: Any) -> list[dict]:
-    """Skill 调用记录（FIX-09）：[{skill, version, at, ok, note}]。"""
-    value = _unwrap(value)
-    if isinstance(value, dict):
-        value = [value]
-    if not isinstance(value, list):
-        return []
-    out = []
-    for item in value:
-        item = _unwrap(item)
-        if not isinstance(item, dict):
-            continue
-        out.append({
-            "skill": str(item.get("skill") or "").strip(),
-            "version": str(item.get("version") or "").strip(),
-            "at": str(item.get("at") or "").strip(),
-            "ok": bool(item.get("ok", True)),
-            "note": str(item.get("note") or "").strip(),
-        })
-    return out
+_traceability = _load_traceability()
+_clean_corrections = _traceability.clean_corrections
+_clean_field_sources = _traceability.clean_field_sources
+_clean_skill_invocations = _traceability.clean_skill_invocations
 
 
 def query_terms(expression: str) -> list[str]:
