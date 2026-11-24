@@ -974,6 +974,22 @@ class SqliteSessionMap:
             )
             """
         )
+        # 会话映射被替换或重置前的归档(只追加)。reset 直接 DELETE 会让旧 session 从本地消失,
+        # 排障需要这份历史把"/new 之前那个会话"找回来。
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS session_history (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                key         TEXT NOT NULL,
+                chat_id     TEXT NOT NULL DEFAULT '',
+                thread_id   TEXT NOT NULL DEFAULT '',
+                session_id  TEXT NOT NULL,
+                created_at  INTEGER,
+                archived_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+                reason      TEXT NOT NULL
+            )
+            """
+        )
         self._conn.execute(
             """
             CREATE TABLE IF NOT EXISTS seen_events (
@@ -1085,16 +1101,37 @@ class SqliteSessionMap:
             ).fetchone()
         return row[0] if row else None
 
+    def _archive_locked(self, key: GroupConversationKey, reason: str, keep_session_id: str = "") -> None:
+        row = self._conn.execute(
+            "SELECT session_id, created_at FROM sessions WHERE key = ?", (key.as_str(),)
+        ).fetchone()
+        if not row or row[0] == keep_session_id:
+            return
+        self._conn.execute(
+            "INSERT INTO session_history (key, chat_id, thread_id, session_id, created_at, reason) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (key.as_str(), key.chat_id, key.thread_id or "", row[0], row[1], reason),
+        )
+
     def save(self, key: GroupConversationKey, session_id: str) -> None:
         with self._lock:
-            # REPLACE：新建或覆盖（会话失效重建时用新 session_id 覆盖旧的）。
+            # 覆盖成不同的 session_id(会话失效重建)时,旧的先归档;同一个 id 重复保存不归档。
+            self._archive_locked(key, "replaced", keep_session_id=session_id)
+            # 同一个 session_id 重复保存(话题别名绑定会这样)不能刷新创建时间:用 UPSERT 而非 REPLACE。
             self._conn.execute(
-                "REPLACE INTO sessions (key, session_id) VALUES (?, ?)",
+                """
+                INSERT INTO sessions (key, session_id) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    created_at = CASE WHEN sessions.session_id = excluded.session_id
+                                      THEN sessions.created_at ELSE strftime('%s', 'now') END,
+                    session_id = excluded.session_id
+                """,
                 (key.as_str(), session_id),
             )
 
     def reset(self, key: GroupConversationKey) -> None:
         with self._lock:
+            self._archive_locked(key, "reset")
             self._conn.execute("DELETE FROM sessions WHERE key = ?", (key.as_str(),))
 
     def claim_event(self, event_id: str) -> bool:

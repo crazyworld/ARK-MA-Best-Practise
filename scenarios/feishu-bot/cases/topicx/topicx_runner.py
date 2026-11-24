@@ -75,6 +75,8 @@ class TopicxRunner:
             user_open_id=message.user_open_id,
             request_text=message.text.strip(),
             topic_thread_id=message.thread_id,
+            user_id=message.user_id,
+            chat_type=message.chat_type,
         )
         if not created:
             return task

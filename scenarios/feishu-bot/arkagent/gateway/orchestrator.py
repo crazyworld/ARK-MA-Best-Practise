@@ -11,6 +11,7 @@ WS 回调（可能来自其它线程）只做去重与入队，满足飞书 3 �
 from __future__ import annotations
 
 import asyncio
+import logging
 import contextlib
 from typing import Awaitable, Callable, Optional
 
@@ -71,6 +72,7 @@ class Gateway:
         before_create_session: Optional[Callable[[], Awaitable[None]]] = None,
         loop: Optional[asyncio.AbstractEventLoop] = None,
         extra_headers: Optional[dict] = None,
+        after_turn: Optional[Callable[[str, str], Awaitable[None]]] = None,
     ) -> None:
         self._store = store
         self._ark = ark
@@ -84,6 +86,9 @@ class Gateway:
         self._role = role_manager
         self._memory = memory_manager
         self._before_create_session = before_create_session
+        # 每轮结束后的可选钩子 (session_id, user_open_id):用于把该 session 的执行日志落成文档等。
+        # 钩子的任何异常都不得影响本轮回复,见 _after_turn。
+        self._after_turn = after_turn
         self._loop = loop
         self._queue = KeyedQueue()
         # BYOK Direct 模式：按请求动态附加的模型鉴权 Header；未配置时为 None（原豆包模式）。
@@ -167,7 +172,9 @@ class Gateway:
             await self._reply(message.chat_id, "已收到，正在处理。首次启动可能需要几分钟。")
             with time_block("gateway.create_session", user=message.user_open_id, first=True):
                 session_id = await self._create_session(message)
-            self._store.save_session(key, session_id, self._agent_id)
+            self._store.save_session(
+                key, session_id, self._agent_id, user_id=message.user_id, chat_type=message.chat_type
+            )
         else:
             progress_task = asyncio.get_event_loop().create_task(self._delayed_progress(message.chat_id))
 
@@ -192,6 +199,17 @@ class Gateway:
         with time_block("gateway.reply", chat=message.chat_id):
             await self._reply(message.chat_id, result_to_reply(result))
         sw.mark("gateway.total", user=message.user_open_id, first=first_message)
+        await self._run_after_turn(session_id, message.user_open_id)
+
+    async def _run_after_turn(self, session_id: str, user_open_id: str) -> None:
+        if self._after_turn is None:
+            return
+        try:
+            await self._after_turn(session_id, user_open_id)
+        except Exception:  # noqa: BLE001 - 旁路能力失败不能让用户收到\"执行失败\"
+            logging.getLogger("arkagent.gateway").warning(
+                "after_turn 钩子失败 session=%s", session_id, exc_info=True
+            )
 
     async def _create_session(self, message: IncomingMessage) -> str:
         resources: list[dict] = []

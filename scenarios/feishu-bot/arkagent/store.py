@@ -54,6 +54,24 @@ class GatewayStore:
                 agent_version TEXT,
                 updated_at TEXT NOT NULL
             );
+            -- 会话映射被替换或删除前的归档(/new 等)。只追加不删除:conversations 里的行一旦
+            -- 被 reset 就再也查不到它属于谁,排障需要这份历史把旧 session 找回来。
+            CREATE TABLE IF NOT EXISTS session_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                conversation_key TEXT NOT NULL,
+                chat_id TEXT NOT NULL DEFAULT '',
+                thread_id TEXT NOT NULL DEFAULT '',
+                user_open_id TEXT NOT NULL DEFAULT '',
+                user_id TEXT NOT NULL DEFAULT '',
+                chat_type TEXT NOT NULL DEFAULT '',
+                session_id TEXT NOT NULL,
+                agent_id TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT '',
+                archived_at TEXT NOT NULL,
+                reason TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_session_history_chat
+                ON session_history(chat_id, archived_at);
             CREATE TABLE IF NOT EXISTS processed_events (
                 event_id TEXT PRIMARY KEY,
                 status TEXT NOT NULL,
@@ -75,6 +93,17 @@ class GatewayStore:
             );
             """
         )
+        # 老库补列:user_id 用于排障 Bot 判断私聊"是不是这个人的"(open_id 按应用隔离,不通用)。
+        cols = {r[1] for r in self._db.execute("PRAGMA table_info(conversations)").fetchall()}
+        if "user_id" not in cols:
+            self._db.execute("ALTER TABLE conversations ADD COLUMN user_id TEXT NOT NULL DEFAULT ''")
+        if "created_at" not in cols:
+            self._db.execute("ALTER TABLE conversations ADD COLUMN created_at TEXT NOT NULL DEFAULT ''")
+        if "chat_type" not in cols:
+            self._db.execute("ALTER TABLE conversations ADD COLUMN chat_type TEXT NOT NULL DEFAULT ''")
+        hist_cols = {r[1] for r in self._db.execute("PRAGMA table_info(session_history)").fetchall()}
+        if "chat_type" not in hist_cols:
+            self._db.execute("ALTER TABLE session_history ADD COLUMN chat_type TEXT NOT NULL DEFAULT ''")
         self._db.commit()
 
     # ---- conversations ----
@@ -90,24 +119,61 @@ class GatewayStore:
             ).fetchone()
         return row[0] if row else None
 
-    def save_session(self, key: ConversationKey, session_id: str, agent_id: str, agent_version: Optional[str] = None) -> None:
+    def save_session(
+        self,
+        key: ConversationKey,
+        session_id: str,
+        agent_id: str,
+        agent_version: Optional[str] = None,
+        *,
+        user_id: str = "",
+        chat_type: str = "",
+    ) -> None:
         with self._lock:
+            # 覆盖不同的 session 时,旧的先归档,否则它会从本地永久消失。
+            self._archive_locked(key, "replaced", keep_session_id=session_id)
             self._db.execute(
                 """
-                INSERT INTO conversations (conversation_key, session_id, agent_id, agent_version, updated_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO conversations
+                    (conversation_key, session_id, agent_id, agent_version, updated_at, user_id, created_at, chat_type)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(conversation_key) DO UPDATE SET
                     session_id = excluded.session_id,
                     agent_id = excluded.agent_id,
                     agent_version = excluded.agent_version,
-                    updated_at = excluded.updated_at
+                    updated_at = excluded.updated_at,
+                    user_id = CASE WHEN excluded.user_id != '' THEN excluded.user_id ELSE conversations.user_id END,
+                    chat_type = CASE WHEN excluded.chat_type != '' THEN excluded.chat_type ELSE conversations.chat_type END,
+                    created_at = CASE WHEN conversations.session_id = excluded.session_id
+                                      THEN conversations.created_at ELSE excluded.created_at END
                 """,
-                (self.conversation_key(key), session_id, agent_id, agent_version, _now_iso()),
+                (self.conversation_key(key), session_id, agent_id, agent_version, _now_iso(), user_id, _now_iso(), chat_type),
             )
             self._db.commit()
 
+    def _archive_locked(self, key: ConversationKey, reason: str, keep_session_id: str = "") -> None:
+        row = self._db.execute(
+            "SELECT session_id, agent_id, user_id, created_at, chat_type FROM conversations WHERE conversation_key = ?",
+            (self.conversation_key(key),),
+        ).fetchone()
+        if not row or row[0] == keep_session_id:
+            return
+        self._db.execute(
+            """
+            INSERT INTO session_history
+                (conversation_key, chat_id, thread_id, user_open_id, user_id, session_id, agent_id,
+                 created_at, archived_at, reason, chat_type)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                self.conversation_key(key), key.chat_id, key.thread_id, key.user_open_id,
+                row[2] or "", row[0], row[1] or "", row[3] or "", _now_iso(), reason, row[4] or "",
+            ),
+        )
+
     def reset_session(self, key: ConversationKey) -> None:
         with self._lock:
+            self._archive_locked(key, "reset")
             self._db.execute(
                 "DELETE FROM conversations WHERE conversation_key = ?",
                 (self.conversation_key(key),),
@@ -116,6 +182,26 @@ class GatewayStore:
 
     def reset_all_sessions(self) -> int:
         with self._lock:
+            rows = self._db.execute(
+                "SELECT conversation_key, session_id, agent_id, user_id, created_at, chat_type FROM conversations"
+            ).fetchall()
+            for conv_key, session_id, agent_id, user_id, created_at, chat_type in rows:
+                # 键格式 chat_id:thread_id:user_open_id(见 conversation_key),拆回各列便于按群检索。
+                chat_id, _, rest = conv_key.partition(":")
+                thread_id, _, open_id = rest.partition(":")
+                self._db.execute(
+                    """
+                    INSERT INTO session_history
+                        (conversation_key, chat_id, thread_id, user_open_id, user_id, session_id, agent_id,
+                         created_at, archived_at, reason, chat_type)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'reset_all', ?)
+                    """,
+                    (
+                        conv_key, chat_id, "" if thread_id == "-" else thread_id,
+                        "" if open_id == "-" else open_id, user_id or "", session_id,
+                        agent_id or "", created_at or "", _now_iso(), chat_type or "",
+                    ),
+                )
             cursor = self._db.execute("DELETE FROM conversations")
             self._db.commit()
             return cursor.rowcount

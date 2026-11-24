@@ -296,6 +296,42 @@ def _text_to_post_content(text: str, roster: "Optional[dict[str, str]]" = None) 
     return json.dumps(post, ensure_ascii=False)
 
 
+@dataclass(frozen=True)
+class ScopeProbe:
+    # ok:所需权限都已开通 | missing_scope:有缺失 | unknown:无法判断(网络、接口报错等)
+    status: str
+    detail: str = ""
+    missing: tuple[str, ...] = ()
+    granted: frozenset = frozenset()
+
+
+USER_ID_SCOPE = "contact:user.employee_id:readonly"
+
+
+def classify_app_scopes(success: bool, code: Optional[int], msg: str, raw: Optional[bytes]) -> ScopeProbe:
+    """把 application/v6/scopes 的响应整理成\"应用身份已开通集合\"。缺不缺由调用方按自己的需求判断。"""
+    if not success:
+        return ScopeProbe("unknown", f"code={code} {msg[:160]}")
+    try:
+        scopes = ((json.loads(raw) if raw else {}).get("data") or {}).get("scopes") or []
+    except (TypeError, ValueError):
+        return ScopeProbe("unknown", "应用权限接口返回了无法解析的内容")
+    # 每项带 scope_type:tenant=应用身份,user=用户身份。bot 以应用身份调接口,**只认 tenant**;
+    # 同名权限只在 user 下开通、tenant 下没有,调用仍会被拒(2026-11-12 实测:分析师应用的
+    # docx:document:create 只有 user 身份,tenant 下缺失,写文档报 99991672)。
+    granted = frozenset(
+        str(item.get("scope_name"))
+        for item in scopes
+        if isinstance(item, dict)
+        and item.get("scope_name")
+        and item.get("grant_status", 1) == 1
+        and item.get("scope_type") == "tenant"
+    )
+    if not granted:
+        return ScopeProbe("unknown", "没有读到任何应用身份(tenant)权限(可能没有权限查询自身权限,或应用只开了用户身份权限)")
+    return ScopeProbe("ok", granted=granted)
+
+
 class FeishuSender:
     """基于 lark-channel-sdk 自带 OpenAPI Client 的消息发送器（reply / send / react / 读历史）。
 
@@ -422,13 +458,11 @@ class FeishuSender:
         self._roster_cache[chat_id] = (now + CHAT_ROSTER_TTL_SECONDS, roster)
         return roster
 
-    def _fetch_user_name(self, open_id: str) -> str:
-        """走原生 `GET /open-apis/contact/v3/users/:user_id?user_id_type=open_id` 反查真名。
+    def _fetch_user(self, ident: str, user_id_type: str = "open_id") -> dict:
+        """查通讯录 user 对象(一次请求),失败抛异常。
 
-        飞书卡片按钮回调只带 open_id，没有 name 字段（见 P2CardActionTrigger.operator）；卡片
-        终态想显示真名就得单发一次 contact API。SDK 无对应 typed model，用 BaseRequest 直发，
-        与 bot_open_id / list_chat_members 同款。同步调用，失败抛异常由 resolve_operator_name
-        兜底。需要 `contact:user.base:readonly` scope。
+        需要两层权限:`contact:contact.*`(通讯录访问入口,任一) + `contact:user.base:readonly`
+        (用户基础字段 name/email)。缺任一层飞书都返回 99991672。
         """
         from lark_channel import AccessTokenType, BaseRequest, HttpMethod
 
@@ -436,8 +470,8 @@ class FeishuSender:
             BaseRequest.builder()
             .http_method(HttpMethod.GET)
             .uri("/open-apis/contact/v3/users/:user_id")
-            .paths({"user_id": open_id})
-            .queries([("user_id_type", "open_id")])
+            .paths({"user_id": ident})
+            .queries([("user_id_type", user_id_type)])
             .token_types({AccessTokenType.TENANT})
             .build()
         )
@@ -450,8 +484,81 @@ class FeishuSender:
         except (TypeError, ValueError, json.JSONDecodeError):
             payload = {}
         data = payload.get("data") if isinstance(payload, dict) else None
-        user = (data or {}).get("user") if isinstance(data, dict) else None
-        return str((user or {}).get("name") or "")
+        return (data or {}).get("user") if isinstance(data, dict) else {}
+
+    def _fetch_user_name(self, open_id: str) -> str:
+        """反查真名,失败抛异常由 resolve_operator_name 兜底(卡片操作人回显用)。"""
+        return str(self._fetch_user(open_id).get("name") or "")
+
+    def try_user_name(self, ident: str, user_id_type: str = "open_id") -> str:
+        """尽力反查用户可读标识:**真名优先,真名没有回退邮箱**;两者都拿不到返回空串,由调用方降级显示 ID。
+
+        供排障日志文档等信息展示用。ident 是租户级 user_id 时用 ``user_id_type="user_id"``
+        (跨应用稳定),是某应用的 open_id 时用 ``"open_id"``。查不到/权限不足都返回空串,
+        不得抛异常阻断文档写入。
+        """
+        if not ident:
+            return ""
+        try:
+            user = self._fetch_user(ident, user_id_type)
+            return str(user.get("name") or user.get("email") or "")
+        except Exception:
+            return ""
+
+    def try_chat_name(self, chat_id: str) -> str:
+        """尽力反查群名;任何失败或查不到返回空串,由调用方降级显示 chat_id。
+
+        需要 ``im:chat:readonly`` 权限。p2p 会话没有群名概念,返回空串。
+        """
+        if not chat_id:
+            return ""
+        try:
+            from lark_channel import AccessTokenType, BaseRequest, HttpMethod
+
+            request = (
+                BaseRequest.builder()
+                .http_method(HttpMethod.GET)
+                .uri("/open-apis/im/v1/chats/:chat_id")
+                .paths({"chat_id": chat_id})
+                .token_types({AccessTokenType.TENANT})
+                .build()
+            )
+            response = self._client.request(request)
+            if not response.success():
+                return ""
+            raw = response.raw.content if response.raw else None
+            payload = json.loads(raw) if raw else {}
+            data = payload.get("data") if isinstance(payload, dict) else {}
+            name = str(data.get("name") or "")
+            if not name:
+                i18n = data.get("i18n_names") if isinstance(data.get("i18n_names"), dict) else {}
+                name = str(i18n.get("zh_cn") or "")
+            return name
+        except Exception:
+            return ""
+
+    def list_app_scopes(self) -> "ScopeProbe":
+        """查询**本应用**(应用身份 / tenant)已开通的权限:``GET /open-apis/application/v6/scopes``。
+
+        2026-11 实测:返回本应用已开通的全部 scope(``grant_status=1`` 为已授予),无需任何探测对象;
+        比\"拿用户 id 试探一次\"准确,且能一次列出全部缺失项。注意 ``lark-cli auth check`` 查的是
+        用户身份(user token),不能代替这个检查。返回而不抛异常:自检失败不应阻断 bot 启动。
+        """
+        from lark_channel import AccessTokenType, BaseRequest, HttpMethod
+
+        request = (
+            BaseRequest.builder()
+            .http_method(HttpMethod.GET)
+            .uri("/open-apis/application/v6/scopes")
+            .token_types({AccessTokenType.TENANT})
+            .build()
+        )
+        try:
+            response = self._client.request(request)
+        except Exception as error:  # noqa: BLE001 - 网络等问题,不是权限结论
+            return ScopeProbe("unknown", f"查询应用权限失败:{error}")
+        raw = response.raw.content if getattr(response, "raw", None) else None
+        return classify_app_scopes(response.success(), getattr(response, "code", None), getattr(response, "msg", "") or "", raw)
 
     def resolve_operator_name(
         self, open_id: str, chat_id: Optional[str] = None

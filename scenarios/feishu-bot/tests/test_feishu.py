@@ -815,3 +815,43 @@ def test_resolve_operator_name_without_chat_id_uses_contacts():
     sender._fetch_user_name = lambda oid: "赵四"
     assert sender.resolve_operator_name("ou_zhao") == "赵四"
 
+
+
+def test_try_user_name_prefers_name_over_email(monkeypatch):
+    sender = _bare_sender()
+    monkeypatch.setattr(sender, "_fetch_user", lambda *a, **k: {"name": "张三", "email": "zhang@corp.com"})
+    assert sender.try_user_name("ou_x") == "张三"
+
+
+def test_try_user_name_falls_back_to_email_when_no_name(monkeypatch):
+    sender = _bare_sender()
+    monkeypatch.setattr(sender, "_fetch_user", lambda *a, **k: {"email": "zhang@corp.com"})
+    assert sender.try_user_name("ou_x") == "zhang@corp.com"
+
+
+def test_try_user_name_returns_empty_when_neither_present(monkeypatch):
+    sender = _bare_sender()
+    monkeypatch.setattr(sender, "_fetch_user", lambda *a, **k: {})
+    assert sender.try_user_name("ou_x") == ""
+
+
+def test_try_user_name_swallows_fetch_failure(monkeypatch):
+    sender = _bare_sender()
+
+    def boom(*a, **k):
+        raise RuntimeError("网络挂了")
+
+    monkeypatch.setattr(sender, "_fetch_user", boom)
+    assert sender.try_user_name("ou_x") == ""
+
+
+def test_try_user_name_returns_empty_for_blank_open_id():
+    assert _bare_sender().try_user_name("") == ""
+
+
+def test_try_user_name_passes_id_type_through(monkeypatch):
+    sender = _bare_sender()
+    seen = {}
+    monkeypatch.setattr(sender, "_fetch_user", lambda ident, uid_type="open_id": seen.update(ident=ident, uid_type=uid_type) or {"name": "张三"})
+    sender.try_user_name("315396", "user_id")
+    assert seen == {"ident": "315396", "uid_type": "user_id"}

@@ -33,6 +33,10 @@ def main(argv: list[str] | None = None) -> int:
                 asyncio.run(_init())
         elif command == "update-agent":
             asyncio.run(_update_agent(argv[1:]))
+        elif command == "trace":
+            from .observability.cli import run as run_trace
+
+            return asyncio.run(run_trace(argv[1:]))
         else:
             _print_help()
         return 0
@@ -112,6 +116,9 @@ def _run(args: list[str] | None = None) -> None:
 
         thread = threading.Thread(target=loop.run_forever, name="gateway-loop", daemon=True)
         thread.start()
+        start_background = getattr(gateway, "start_background", None)
+        if callable(start_background):
+            start_background()  # 后台定时任务(如排障 Bot 的文档同步);必须在事件循环线程启动之后
         recover_active_jobs = getattr(gateway, "recover_active_jobs", None)
         if callable(recover_active_jobs):
             # topic6 在 Gateway 重启后从 MA 历史事件恢复 SSE / HC 卡片；不能阻塞
@@ -122,6 +129,9 @@ def _run(args: list[str] | None = None) -> None:
         print(f"- 飞书 App ID:{config.feishu_app_id}")
         print(f"- 环境变量文件:{case_paths.config_path}")
         print(f"- 锁文件:{lock_path}(pid={os.getpid()};按 App ID 分粒度)")
+        from .preflight import run_preflight
+
+        run_preflight(sender, config, config.feishu_app_id)
         print("正在连接飞书 WebSocket;请在该 Bot 会话中发送消息。")
         start_feishu_gateway(config.feishu_app_id, config.feishu_app_secret, gateway)
 
@@ -377,6 +387,7 @@ def _print_help() -> None:
         "  update-agent  用最新的 system prompt/工具配置更新现有 Agent（不重扫码、不新建 bot）\n"
         "                加 --mcp-url <新地址> 可一并换 MCP 公网地址：重建 static_bearer 凭据 + 写回 config.env\n"
         "  doctor        检查配置并验证方舟 Agent\n"
+        "  trace         任务全链路观测:trace list / trace show <id>(详见 docs/OBSERVABILITY_PLAN.md)\n"
         "  run --case topicx  启动 Topic5/Topic6 统一 Gateway"
     )
 
