@@ -2,6 +2,8 @@
 
 在飞书群里 @ 它,问"这个任务为什么失败 / 卡在哪 / 这一步的输入输出是什么"。
 
+> 部署、权限、配置、上线与迁移步骤见 [`OPERATIONS.md`](OPERATIONS.md)(最终版操作说明)。
+
 ## 它能做什么
 
 - 找到**当前群**最近的任务,给出首个异常点和原因(确定性诊断,不让模型自己翻事件找原因)
@@ -13,7 +15,7 @@
 | 项 | 规则 |
 |---|---|
 | 群聊 | 可排查**本群全部**任务,不区分发起人 |
-| 私聊 | 只能查**自己发起、且发生在私聊里**的任务,用租户级 `user_id` 判断(`open_id` 按应用隔离,不能用)。应用须开通 `contact:user.id:readonly`,否则取不到 `user_id`,私聊会回复无法确认身份。**升级前创建的任务没有 `user_id`,私聊查不到**(不回填,没有可靠依据) |
+| 私聊 | 只能查**自己发起、且发生在私聊里**的任务,用租户级 `user_id` 判断(`open_id` 按应用隔离,不能用)。应用须开通 `contact:user.id:readonly`,否则取不到 `user_id`,私聊会回复无法确认身份。**升级前创建的任务没有 `user_id`,私聊查不到**(不回填,没有可靠依据)。topicx、topic5、分析师、ada-pm、数字员工已记录身份;topic6 暂无,私聊不可用 |
 | 覆盖的 bot | topicx、topic5、topic6(`task_runs` / `pipeline_jobs`);**分析师、ada-pm**(通用 `Gateway` 的 `conversations` + `session_history`,各 case 一个库);**数字员工**(`sessions` + `session_history`) |
 | 对象类型 | **任务**(topicx 系)有状态和 `last_error`;**会话**(分析师 / ada-pm / 数字员工)跨多轮、没有成败状态,`status` 只有 `active`(在用)/ `archived`(被 `/new` 归档),`archived` 不代表出错 |
 | 部署 | 与被排查的 bot **同机**,直接读本机的库;不考虑分布式 |

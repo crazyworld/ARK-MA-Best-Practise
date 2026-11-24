@@ -511,6 +511,8 @@ class Topic5Runner:
         user_message: str,
         user_vault_id: str = "",
         root_message_id: str = "",
+        user_id: str = "",
+        chat_type: str = "",
     ) -> PipelineJob:
         """串行化创建动作，但运行期按话题隔离，允许多个 Job 并发。"""
         async with self._start_lock:
@@ -522,6 +524,8 @@ class Topic5Runner:
                 user_message=user_message,
                 user_vault_id=user_vault_id,
                 root_message_id=root_message_id,
+                user_id=user_id,
+                chat_type=chat_type,
             )
 
     async def start_routed_job(
@@ -538,6 +542,8 @@ class Topic5Runner:
         existing_session_id: str = "",
         on_session_created: Optional[Callable[[str], None]] = None,
         on_job_created: Optional[Callable[[PipelineJob], None]] = None,
+        user_id: str = "",
+        chat_type: str = "",
     ) -> PipelineJob:
         if mode not in ("demo", "full"):
             raise Topic5RunnerError(f"不支持的 Topic5 mode: {mode}")
@@ -555,6 +561,8 @@ class Topic5Runner:
                 skip_topic_guard=True,
                 on_session_created=on_session_created,
                 on_job_created=on_job_created,
+                user_id=user_id,
+                chat_type=chat_type,
             )
 
     async def _start_job_locked(
@@ -572,6 +580,8 @@ class Topic5Runner:
         skip_topic_guard: bool = False,
         on_session_created: Optional[Callable[[str], None]] = None,
         on_job_created: Optional[Callable[[PipelineJob], None]] = None,
+        user_id: str = "",
+        chat_type: str = "",
     ) -> PipelineJob:
         # 主时间线每条触发消息都会创建独立话题，因此 thread_id 为空时不做全局门禁。
         # 若用户在已有话题内再次发触发词，只阻止该话题重复启动；其他话题不受影响。
@@ -632,6 +642,8 @@ class Topic5Runner:
             project_dir="",
             root_message_id=root_message_id,
             task_id=task_id,
+            user_id=user_id,
+            chat_type=chat_type,
         )
         if on_job_created is not None:
             on_job_created(job)

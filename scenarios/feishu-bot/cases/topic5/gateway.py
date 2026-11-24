@@ -234,6 +234,8 @@ class Topic5Gateway:
                     user_message=text,
                     user_vault_id=self._config.vault_id,
                     root_message_id=message.message_id,
+                    user_id=message.user_id,
+                    chat_type=message.chat_type,
                 )
                 log.info("topic5 job started job=%s mode=%s", job.job_id, mode)
             except Topic5RunnerError as error:

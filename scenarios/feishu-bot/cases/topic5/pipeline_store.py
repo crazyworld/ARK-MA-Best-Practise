@@ -125,6 +125,10 @@ class PipelineJob:
     stop_requested_by: str = ""
     failure_scope: str = ""
     retry_strategy: str = ""
+    # 发起人的租户级 user_id 与会话类型:open_id 按应用隔离,排障 Bot(独立应用)靠它判断私聊"是不是本人"。
+    # 升级前的老任务为空串,此时排障 Bot 的私聊不放行。
+    user_id: str = ""
+    chat_type: str = ""
 
 
 @dataclass
@@ -304,6 +308,11 @@ class PipelineStore:
             self._conn.execute(
                 "ALTER TABLE pipeline_jobs ADD COLUMN retry_strategy TEXT NOT NULL DEFAULT ''"
             )
+        for name in ("user_id", "chat_type"):
+            if name not in cols:
+                self._conn.execute(
+                    f"ALTER TABLE pipeline_jobs ADD COLUMN {name} TEXT NOT NULL DEFAULT ''"
+                )
         self._conn.execute(
             """
             CREATE UNIQUE INDEX IF NOT EXISTS idx_pipeline_jobs_task_id
@@ -352,6 +361,8 @@ class PipelineStore:
         project_dir: str,
         root_message_id: str = "",
         task_id: str = "",
+        user_id: str = "",
+        chat_type: str = "",
     ) -> PipelineJob:
         if task_id:
             with self._lock:
@@ -370,6 +381,8 @@ class PipelineStore:
             project_dir=project_dir,
             root_message_id=root_message_id or "",
             task_id=task_id,
+            user_id=user_id or "",
+            chat_type=chat_type or "",
         )
         with self._lock:
             self._conn.execute(
@@ -378,8 +391,8 @@ class PipelineStore:
                     (job_id, chat_id, thread_id, user_open_id, ma_session_id,
                      mode, project_dir, current_phase, status,
                      started_at, updated_at, finished_at, last_error, online_url,
-                     root_message_id, task_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     root_message_id, task_id, user_id, chat_type)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job.job_id,
@@ -398,6 +411,8 @@ class PipelineStore:
                     job.online_url,
                     job.root_message_id,
                     job.task_id,
+                    job.user_id,
+                    job.chat_type,
                 ),
             )
         return job
@@ -1159,6 +1174,8 @@ class PipelineStore:
             retry_strategy=(
                 row["retry_strategy"] if "retry_strategy" in row.keys() else ""
             ),
+            user_id=row["user_id"] if "user_id" in row.keys() else "",
+            chat_type=row["chat_type"] if "chat_type" in row.keys() else "",
             online_url=row["online_url"],
             progress_card_message_id=(
                 row["progress_card_message_id"]

@@ -298,6 +298,8 @@ class TopicxRunner:
                 mode=task.mode,
                 user_message=task.request_text,
                 root_message_id=task.root_message_id,
+                user_id=task.user_id,
+                chat_type=task.chat_type,
                 existing_session_id=task.business_session_id,
                 on_session_created=lambda session_id: self._control.bind_business_session(
                     task.task_id, session_id
@@ -319,6 +321,8 @@ class TopicxRunner:
                     mode=task.mode,
                     user_message=task.request_text,
                     root_message_id=task.root_message_id,
+                    user_id=task.user_id,
+                    chat_type=task.chat_type,
                     existing_session_id=session_id,
                     on_session_created=lambda created_id: self._control.bind_business_session(
                         task.task_id, created_id

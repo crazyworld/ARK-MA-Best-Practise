@@ -713,3 +713,47 @@ def test_react_failure_is_degraded_to_no_reaction():
         assert sender.reacted == []
     finally:
         loop.close()
+
+
+# ---- topic5 私聊身份 ----------------------------------------------------------
+
+
+def test_topic5_job_records_user_identity_and_diagnose_reads_it(tmp_path):
+    from topic5.pipeline_store import PipelineStore
+
+    from arkagent.observability.adapters.sqlite_sources import PipelineJobSource
+    from diagnose.tools import Scope
+
+    db = str(tmp_path / "topic5.db")
+    store = PipelineStore(db)
+    store.create_job("oc_dm", "", "ou_a", "sesn-dm", "full", "", user_id="uid-1", chat_type="p2p")
+    store.create_job("oc_grp", "", "ou_a", "sesn-grp", "full", "", user_id="uid-1", chat_type="group")
+    store.create_job("oc_old", "", "ou_a", "sesn-old", "full", "")  # 升级前形态:无身份
+    source = PipelineJobSource("topic5", db)
+    refs = {r.sessions[0].session_id: r for r in source.list_refs(limit=10)}
+    assert (refs["sesn-dm"].user_id, refs["sesn-dm"].chat_type) == ("uid-1", "p2p")
+    assert refs["sesn-old"].user_id == "" and refs["sesn-old"].chat_type == ""
+
+    me = Scope(chat_id="oc_dm", chat_type="p2p", user_id="uid-1")
+    other = Scope(chat_id="oc_dm2", chat_type="p2p", user_id="uid-2")
+    assert me.allows(refs["sesn-dm"]) and not other.allows(refs["sesn-dm"])
+    assert not me.allows(refs["sesn-old"])  # 老任务宁可查不到
+    group = Scope(chat_id="oc_grp", chat_type="group", user_id="uid-9")
+    assert group.allows(refs["sesn-grp"]) and not group.allows(refs["sesn-dm"])
+
+
+def test_topic5_store_adds_identity_columns_to_a_pre_upgrade_db(tmp_path):
+    import sqlite3
+
+    from topic5.pipeline_store import PipelineStore
+
+    db = str(tmp_path / "old.db")
+    PipelineStore(db)  # 先建出当前 schema,再把两列"退回"成升级前形态
+    conn = sqlite3.connect(db)
+    conn.execute("ALTER TABLE pipeline_jobs DROP COLUMN user_id")
+    conn.execute("ALTER TABLE pipeline_jobs DROP COLUMN chat_type")
+    conn.commit(); conn.close()
+    store = PipelineStore(db)  # 重新打开应自动补列
+    job = store.create_job("oc", "", "ou", "sesn-x", "full", "", user_id="u", chat_type="p2p")
+    got = store.get_job(job.job_id)
+    assert (got.user_id, got.chat_type) == ("u", "p2p")

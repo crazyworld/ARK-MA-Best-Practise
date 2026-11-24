@@ -104,6 +104,9 @@ class PipelineJobSource:
             finished_at_ms=_secs_to_ms(row["finished_at"]),
             last_error=row["last_error"] or "",
             chat_id=_get(row, "chat_id"),
+            # topic5 升级后才有这两列;老任务为空串,私聊不放行(群聊不受影响)。topic6 暂无,同样为空。
+            user_id=_get(row, "user_id"),
+            chat_type=_get(row, "chat_type"),
             sessions=[SessionRef(row["ma_session_id"], "business")],
             db_spans=_hc_spans(conn, row["job_id"]) if with_hc else [],
             meta={
