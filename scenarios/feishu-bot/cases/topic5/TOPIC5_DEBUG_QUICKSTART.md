@@ -20,7 +20,13 @@ Topic5 与 Topic6 共用 `topicX` Python 环境。在仓库根目录首次创建
 conda create -n topicX python=3.11 -y
 conda activate topicX
 python -m pip install -e ".[dev]"
+# Topic5 本地测试（词云/图片自检）需要与 MA 沙箱 environment.json 同版本的依赖：
+python -m pip install "Pillow>=10,<13" "fonttools>=4.50,<5" "wordcloud>=1.9.4,<2" "openpyxl>=3.1,<4" "python-dateutil>=2.8"
 ```
+
+缺这些依赖时 `update_ma.sh` 第 1 步的词云测试会失败（报 `NEEDS_SETUP`），不是代码问题。
+本机 conda 23.11 的 `conda run` 可能因插件报错；先 `conda activate topicX` 再执行脚本即可，
+`update_ma.sh` 检测到当前已激活 topicX 时直接使用当前 python。
 
 后续每次打开新终端，先执行：
 

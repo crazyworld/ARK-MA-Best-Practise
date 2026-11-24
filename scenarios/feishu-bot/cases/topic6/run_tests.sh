@@ -10,7 +10,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../../../.." && pwd)"
 TEST_DIR="$REPO_ROOT/scenarios/feishu-bot"
-CONDA_ENV="topic6"
+CONDA_ENV="${TOPIC6_CONDA_ENV:-topicX}"  # topic5 与 topic6 共用 topicX 环境
 
 # ---- 定位 python ----
 # 优先用 conda env 的 python，找不到就用 PATH 上的
