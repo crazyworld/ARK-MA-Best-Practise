@@ -1047,6 +1047,9 @@ class Topic5Runner:
                 "echo \"$BUNDLE_SHA256  $BUNDLE\" | sha256sum -c - && "
                 "rm -rf \"$TARGET\" && mkdir -p \"$TARGET\" && "
                 "unzip -q \"$BUNDLE\" -d \"$TARGET\"\n"
+                # 编排器按同级目录定位其他 Skill（数说/DataHub/图表/封面…），恢复包只含编排器。
+                "for skill in /mnt/skills/*; do name=$(basename \"$skill\"); "
+                "[ \"$name\" = pipeline-orchestrator ] || ln -sfn \"$skill\" \"$TARGET/$name\"; done\n"
                 "cd \"$TARGET/pipeline-orchestrator\" && "
                 f"{replace_source}"
                 "nohup python3 run_pipeline.py retry "
@@ -1476,6 +1479,14 @@ class Topic5Runner:
                 )
                 await self.resume_job(job, f"G3 {decision}: {note}")
                 return
+            elif hc_kind in ("R1_REVIEW", "R2_REVIEW"):
+                # 标注审核是内部 Validator 门：协调器必须在本 turn 委派并续跑，不得落到用户。
+                reason = (f"{hc_kind} 标注审核未在协调器内完成（须委派独立 Validator 后续跑），"
+                          "已停止以免把内部审核交给用户")
+                log.error("topic5 internal annotation review leaked job=%s hc=%s", job_id, hc_kind)
+                self._store.mark_failed(job_id, reason, retry_strategy=RETRY_STRATEGY_NODE)
+                await self._render_and_patch(job_id, status=STATUS_FAILED, error=reason, force=True)
+                return
             elif hc_kind == "G4":
                 self._store.append_receipt(
                     receipt_type="delivery.ready",
@@ -1805,8 +1816,26 @@ def extract_nonstructured_failure(texts: list[str]) -> dict:
         )
         reason = (
             reason_match.group(1).strip()
-            if reason_match else f"Durable pipeline failed at {node}"
+            if reason_match else _source_failure_reason(node, texts)
+            or f"Durable pipeline failed at {node}"
         )
         reason = re.sub(r"\s+", " ", reason)[:400]
         return {"status": "failed", "node": node, "reason": reason}
     return {}
+
+
+def _source_failure_reason(node: str, texts: list[str]) -> str:
+    """协调器漏写 FINAL_RESULT 时，从本轮文本找回可换源节点的引擎原文错误。
+
+    只限 SOURCE_REPLACEABLE 节点：其标记决定“是否允许上传活动明细续跑”，
+    丢失会把可恢复失败误判为只能新建任务。其它节点保持通用原因，不猜测。
+    """
+    marker = SOURCE_REPLACEABLE.get(node)
+    if not marker:
+        return ""
+    pattern = re.compile(re.escape(marker) + r"[^\n`\"]+")
+    for text in reversed(texts):
+        matches = pattern.findall(text)
+        if matches:
+            return re.sub(r"\s*->\s*(pause|fail)\s*$", "", matches[-1]).strip()[:400]
+    return ""

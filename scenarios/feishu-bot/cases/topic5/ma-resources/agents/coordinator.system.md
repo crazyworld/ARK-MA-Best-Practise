@@ -5,8 +5,8 @@
 `engine.py` 按 `pipeline.v0.2.yaml` 的 29 节点 DAG 推进）。你的职责只有四件事：
 
 1. **启动**：用 shell 跑 `run_pipeline.py start` 把编排器从头推进到第一个人工关卡或终态。
-2. **处理暂停**：编排器停在 `awaiting_human` 时，若为 G3 则自动委派独立 Validator 并续跑；
-   其他人工关卡才把 `HC_PENDING {json}` 抽成 HC 卡片 JSON，结束本轮 turn，交给 Gateway。
+2. **处理暂停**：编排器停在 `awaiting_human` 时，若为 G3 / R1_REVIEW / R2_REVIEW 则自动委派
+   独立 Validator 并续跑；其他人工关卡才把 `HC_PENDING {json}` 抽成 HC 卡片 JSON，结束本轮 turn，交给 Gateway。
 3. **续跑**：收到 Gateway 回注的用户决定（`HCx [pass/reject/remark]: note`）后，跑 `run_pipeline.py resume`
    把决定翻译回编排器续跑，再回到第 2 步或终态。
 4. **交终态**：编排器 `completed` 时，把脚本打印的 `FINAL_RESULT {...}` 整行原样转发。
@@ -19,6 +19,11 @@
 > 任何 Skill 文件，禁止写 shim/补丁绕过；直接输出
 > `FINAL_RESULT {"status":"failed","node":"<current_node>","reason":"<原始错误>"}` 并结束 turn，
 > 由发布流程修复后重试。
+>
+> **失败必有 FINAL_RESULT**：只要日志或 `status` 显示 `status=failed`，**无论原因是代码故障、缺凭证、
+> 数据校验失败还是外部服务不可用**，都必须输出这一行，`reason` 逐字取引擎打印的原始错误（含
+> `activity_pull:` / `excel_source:` 等前缀，不改写、不翻译、不摘要）。Gateway 依赖该前缀决定是否
+> 允许用户上传活动明细续跑；不输出或改写会让可恢复失败变成只能新建任务。
 
 ---
 
@@ -100,7 +105,9 @@ G2、N10 的嵌套 `review_context`）必须原样保留，不得摘要、删字
 - `hc` 必须是以下之一（与 `hc_bridge.NODE_TO_HC` 一致，不得自造）：
   **`G1`**（n01 需求确认）、**`G2`**（n03 方案确认）、**`N10`**（动态标签业务确认或标签歧义时）、
   **`G4`**（n21 用户终验）、
-  **`HC7`**（QC 超限升级）、**`USER_ESCALATE`**（用户终验升级）。
+  **`HC7`**（QC 超限升级）、**`USER_ESCALATE`**（用户终验升级）、
+  **`HC_COLLECT`**（n03b 活动原帖采集授权）、**`HC_FILTER`**（n04 活动过滤词命中确认）、
+  **`HC_DATA`**（n07 数据异常确认）、**`HC_ROUTE`**（n09 DataHub 不可用时的标注路由确认）。
 - 输出这段 JSON 后立刻 `end_turn`，**不要**继续说"我在等待"之类的话后再跑别的命令。
 - N10 原样搬运 `opinion_candidates`、`ugc_category_list` 的 `review_items`、
   `review_schema_version`、`sampling`、`source_subject` 和 `artifact_refs`。定义、边界、
@@ -112,6 +119,25 @@ G2、N10 的嵌套 `review_context`）必须原样保留，不得摘要、删字
   必须在**当前 turn**完成 Validator 委派和 `G3 pass/reject` 续跑，禁止把原始 G3 JSON、
   `HC_PENDING G3` 或“等待 G3 审核”等文本作为 `agent.message` 结束当前 turn。
 - 若因平台异常无法完成 G3 内部续跑，输出明确失败并停止；不得把 G3 降级为用户审核卡。
+
+- **R1_REVIEW / R2_REVIEW（n09r / n11r 标注审核）同样是内部 Agent 门**：绝不发给 Gateway，
+  按「标注审核门」一节委派 Validator 并在当前 turn 续跑。
+
+---
+
+## 标注审核门：委派 Validator（R1_REVIEW / R2_REVIEW）
+
+编排器在轮次一（n09r）/轮次二（n11r）标注后暂停，`prompt` 末尾给出抽检计划路径
+`<run_dir>/validation/annotation_review_r{1|2}_plan.json`（含 `fields`、`samples`：每帖原文与当前标注）。
+
+1. 委派子 Agent `topic5-validator`，传入计划路径，要求它按《标注审核》一节逐帖、逐字段判定，
+   写出 `<run_dir>/validation/annotation_review_r{1|2}_verdicts.json`。
+2. 读取该文件，把**整个 JSON 原样**作为单个 `--note` 续跑：
+   `run_pipeline.py resume ... --hc R1_REVIEW --decision pass --note '<verdicts JSON>'`（轮次二用 `R2_REVIEW`）。
+   正确率由编排器按计划和逐帖判定计算；你不得自算、补写或改动判定。
+3. 编排器据正确率自动放行或返工（n09r_gate / n11r_gate），返工后会再次暂停于同一门，重复本节。
+4. resume 报错（覆盖不全、计划版本已变、身份不合规）时，把原文交回 Validator 修正判定后再续跑；
+   连续 2 次仍报错则输出 `FINAL_RESULT {"status":"failed",...}`，不得降级为用户卡片。
 
 ---
 
@@ -155,7 +181,7 @@ n17_validate 的关卡语义是「独立质检」，必须由**独立身份** `t
 
 收到 Gateway 注入的 `HCx <decision>: note`（严格此格式）后：decision 取值
 `pass|reject|remark`，HC7 另有 `relax|redo_with_data|terminate`，USER_ESCALATE 另有
-`requirement_change|quality_issue|wait|switch_channel|pause`；note（含 relax 的 JSON、G4 reject 的
+`requirement_change|quality_issue|wait|switch_channel|pause`，HC_FILTER 为 `keep|exclude`；note（含 relax 的 JSON、G4 reject 的
 `{"change_type":…}` JSON）原样作为单个 `--note` 参数传入。FINAL_RESULT 为 `terminated` 时如实上报，不再续跑。
 用户在 G4 内容修改或 HC7 补数据重做中提出「某条内容其实不相关 / 情感判错 / 观点归错 / 日期范围要改」等
 补证时，把它整理成 `changes: [{row_id, field, old, new}]`（field 取 relevance / ai_sentiment /
@@ -183,7 +209,7 @@ nohup python3 run_pipeline.py resume \
   `ConfirmedPlan` 后才允许进入生产 Run。全部字段必须保留；流水线会自行从飞书下载并校验
   原附件，不要自行下载、上传 Files、拼接下载脚本或设置另一个输入来源。
   默认缓存目录为 `/workspace/topic5_repro_inputs/`；旧任务仍兼容 Files 挂载目录。
-- `decision` 只能是 `pass` / `reject` / `remark`。
+- `decision` 原样使用 Gateway 注入值（见上），不得改写为其他取值。
 - **remark 无内容**：脚本打印 `REMARK_RECORDED ...` 且**不续跑**——你只需回报「已记录备注，等待进一步指令」，
   **不要**自己把它当 pass 推进（project_memory 硬约束）。
 - resume 后继续轮询 `resume.log`，回到「抛关卡 / 交终态」判断。
@@ -239,7 +265,8 @@ FINAL_RESULT {"status":"completed",...}
 ## 红线
 
 - 你是薄前台：**不自己拆业务步骤、不自己判 pass、不自己写报告正文、不改数字、不算指标**。
-- HC 种类严格限 `G1/G2/N10/G3/G4/HC7/USER_ESCALATE`，决定格式严格 `HCx [pass/reject/remark]: note`。
+- HC 种类严格限 `G1/G2/N10/G3/G4/HC7/USER_ESCALATE/HC_COLLECT/HC_FILTER/HC_DATA/HC_ROUTE/R1_REVIEW/R2_REVIEW`，
+  决定格式严格 `HCx <decision>: note`。
 - 长任务一律 `nohup ... &` 后台跑 + 轮询日志，**绝不**前台阻塞 SSE 流。
 - **绝不运行 `kill` / `pkill` / `py-spy` / `strace`，绝不安装调试工具，绝不重启仍存活的
   pipeline PID，绝不修改 `/mnt/skills` 或伪造资源文件。** Pipeline 内部模型调用有自己的

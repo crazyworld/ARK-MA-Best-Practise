@@ -66,6 +66,23 @@ DECISION_REMARK = "remark"
 PENDING_REMARK_NOTE = "等待补充说明"
 # FIX-04：活动数据来源。auto=默认自动采集原帖；upload=G2 后等待用户上传 Excel（原行为）。
 ACTIVITY_DATA_MODE = (os.environ.get("TOPIC5_ACTIVITY_DATA_MODE") or "auto").strip().lower()
+DECISION_KEEP = "keep"
+DECISION_EXCLUDE = "exclude"
+# 标注审核（n09r/n11r）与 G3 同构：由协调器委派独立 Validator 后自动续跑，不发用户卡片。
+INTERNAL_HC_KINDS = frozenset({"G3", "R1_REVIEW", "R2_REVIEW"})
+# 流程内暂停点的两个按钮：(决定, 按钮文案, 样式)。与 hc_bridge 对应 _resume_* 的语义一致。
+_CHOICE_BUTTONS = {
+    "HC_FILTER": ((DECISION_EXCLUDE, "剔除命中帖子", "primary_filled"),
+                  (DECISION_KEEP, "保留命中帖子", "default")),
+    # 数据异常 / DataHub 路由只能在本 Session 内“继续”：补数据或补凭证都需要新 Session，
+    # 因此不提供会让流程停在已处理卡片上的第二个按钮，改为提示停止后新建任务。
+    "HC_DATA": (("pass", "知情并继续（报告披露数据限制）", "primary_filled"),),
+    "HC_ROUTE": (("pass", "改用直连模型标注", "primary_filled"),),
+}
+_CHOICE_HINTS = {
+    "HC_DATA": "> 如需补充或合并数据，请停止本任务，整理后新建任务。",
+    "HC_ROUTE": "> 如需使用 DataHub，请停止本任务，补充 DataHub 凭证后新建任务。",
+}
 # FIX-35：HC7 三选一（与 hc_bridge.HC7_* 同值）
 DECISION_RELAX = "relax"
 DECISION_REDO = "redo_with_data"
@@ -114,6 +131,24 @@ _HC_META = {
         "icon": "download_outlined",
         "title": "HC · 活动原帖采集授权",
         "subtitle": "自动采集涉及数据费用，确认数量上限后才创建任务",
+    },
+    "HC_FILTER": {
+        "template": "orange",
+        "icon": "filter_outlined",
+        "title": "HC · 活动过滤词命中确认",
+        "subtitle": "活动明细中有帖子命中活动过滤词，请决定保留还是剔除",
+    },
+    "HC_DATA": {
+        "template": "orange",
+        "icon": "warning_outlined",
+        "title": "HC · 数据异常确认",
+        "subtitle": "活动数据存在严重异常，请确认是否继续",
+    },
+    "HC_ROUTE": {
+        "template": "orange",
+        "icon": "warning_outlined",
+        "title": "HC · 标注路由确认",
+        "subtitle": "数据量达到 DataHub 阈值但 DataHub 不可用，请选择标注方式",
     },
     "USER_ESCALATE": {
         "template": "red",
@@ -751,6 +786,16 @@ def _collect_elements(job, event_id: int, payload: dict) -> list[dict]:
                 "value": _action_value(job.job_id, "HC_COLLECT", event_id, DECISION_PASS)}]}]
 
 
+def _choice_elements(job, hc_kind: str, event_id: int) -> list[dict]:
+    """流程内暂停点：两个互斥决定按钮，点击即续跑。"""
+    return [{"tag": "button", "text": {"tag": "plain_text", "content": label}, "type": style,
+             "width": "fill",
+             "behaviors": [{"type": "callback",
+                            "value": _action_value(job.job_id, hc_kind, event_id, decision)}]}
+            for decision, label, style in _CHOICE_BUTTONS[hc_kind]] + (
+        [{"tag": "markdown", "content": _CHOICE_HINTS[hc_kind]}] if hc_kind in _CHOICE_HINTS else [])
+
+
 def collect_note(payload: dict, form_value: dict, operator: str, event_id: int) -> str:
     grants = {}
     for i, p in enumerate(collect_pending(payload)):
@@ -929,6 +974,8 @@ def build_hc_card(
                 ),
             )
         )
+    elif hc_kind in _CHOICE_BUTTONS:
+        elements.extend(_choice_elements(job, hc_kind, event_id))
     elif hc_kind not in ("USER_ESCALATE", "HC_COLLECT"):
         elements.append(
             {
@@ -952,7 +999,7 @@ def build_hc_card(
         elements.extend(_user_escalate_elements(job, event_id, payload))
     if hc_kind == "HC_COLLECT":
         elements.extend(_collect_elements(job, event_id, payload))
-    if hc_kind not in ("G1", "HC7", "USER_ESCALATE", "HC_COLLECT"):
+    if hc_kind not in ("G1", "HC7", "USER_ESCALATE", "HC_COLLECT", *_CHOICE_BUTTONS):
         elements.append(
             {
                 "tag": "form",
@@ -1067,7 +1114,9 @@ def build_hc_resolved_card(
     """构造"已处理"终态卡片:头部改灰(wathet),按钮换成决策标语,不再有可点行为。"""
     meta = _HC_META.get(hc_kind, _HC_META["G1"])
     decision_emoji = {DECISION_PASS: "✅", DECISION_REJECT: "❌", DECISION_REMARK: "📝"}.get(decision, "•")
-    decision_label = {DECISION_PASS: "通过", DECISION_REJECT: "打回", DECISION_REMARK: "备注"}.get(decision, decision)
+    choice_labels = {d: label for d, label, _ in _CHOICE_BUTTONS.get(hc_kind, ())}
+    decision_label = choice_labels.get(decision) or {
+        DECISION_PASS: "通过", DECISION_REJECT: "打回", DECISION_REMARK: "备注"}.get(decision, decision)
     resolved_at = time.strftime("%Y-%m-%d %H:%M:%S")
     elements: list[dict] = [
         {

@@ -56,7 +56,11 @@ RETRY_STRATEGY_RESUME_SESSION = "resume_session"
 RETRY_STRATEGY_NODE = "retry_node"
 
 # HC 卡点标识(对齐 skills/pipeline-orchestrator/hc_bridge.NODE_TO_HC)。
-HC_KINDS = ("G1", "G2", "N10", "G3", "G4", "HC7", "USER_ESCALATE", "HC_COLLECT")
+HC_KINDS = (
+    "G1", "G2", "N10", "G3", "G4", "HC7", "USER_ESCALATE", "HC_COLLECT",
+    # 流程内暂停点：活动过滤词命中 / 数据异常 / DataHub 路由；标注审核为内部 Validator 门。
+    "HC_FILTER", "HC_DATA", "HC_ROUTE", "R1_REVIEW", "R2_REVIEW",
+)
 
 
 def _new_job_id() -> str:

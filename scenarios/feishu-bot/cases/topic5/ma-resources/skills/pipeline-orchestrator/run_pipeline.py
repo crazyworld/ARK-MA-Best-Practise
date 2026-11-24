@@ -104,7 +104,7 @@ def main() -> None:
     ap.add_argument("--decision",
                     choices=["pass", "reject", "remark", "relax", "redo_with_data", "terminate",
                              "requirement_change", "quality_issue", "wait", "switch_channel",
-                             "upload"],
+                             "upload", "keep", "exclude"],
                     help="resume：用户决定")
     ap.add_argument("--note", default="", help="resume：附注（remark 必带内容才续跑）")
     ap.add_argument("--source-name", help="replace-source：新源文件展示名")

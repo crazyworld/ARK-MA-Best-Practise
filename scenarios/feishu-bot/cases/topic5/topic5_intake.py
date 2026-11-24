@@ -767,6 +767,7 @@ def _build_campaigns(raw: dict, normalized: dict, activity_terms: list) -> tuple
             end = _clean_text(line.get("period_end"))[:10]
             query = _clean_text(line.get("activity_query"))
             fw = line.get("filter_words")
+            exclude = _clean_text(line.get("activity_filter"))
         else:
             # 字段分隔用分号（；/;）。检索式本身用 | 表示「或」，不能再拿 | 当字段分隔符，
             # 否则 `瑞幸+(A|B)` 会被拆碎（FIX_PLAN 原定的 | 分隔与 FIX-08 语法冲突）。
@@ -774,6 +775,7 @@ def _build_campaigns(raw: dict, normalized: dict, activity_terms: list) -> tuple
             parts += [""] * (5 - len(parts))
             name, start, end, query = parts[0], parts[1][:10], parts[2][:10], parts[3]
             fw = None
+            exclude = _clean_text(parts[4])
         if not name:
             continue
         if start and end and start > end:
@@ -790,6 +792,8 @@ def _build_campaigns(raw: dict, normalized: dict, activity_terms: list) -> tuple
             "period_end": end or normalized.get("period_end"),
             "activity_query": query or normalized.get("activity_query"),
             "filter_words": words or list(activity_terms),
+            # 剔除词与活动匹配词分开存；空 = 用需求级 activity_filter，两者都空则不核对。
+            "activity_filter": exclude,
         })
     if not parsed:
         return ([{

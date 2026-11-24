@@ -34,12 +34,17 @@ NODE_TO_HC = {
     "n21_hc_user": "G4",
     "n_user_escalate": "USER_ESCALATE",
     "n03b_activity_pull": "HC_COLLECT",
+    "n04_run_init": "HC_FILTER",
+    "n09r_review_r1": "R1_REVIEW",
+    "n11r_review_r2": "R2_REVIEW",
+    "n07_clean": "HC_DATA",
+    "n09_annotate_r1": "HC_ROUTE",
 }
 HC_TO_NODE = {v: k for k, v in NODE_TO_HC.items()}
 
 # 决定关键词 → 规范化。
 _DECISION_RE = re.compile(
-    r"^\s*(?:HC\w+|G\d)?\s*\[?\s*(pass|reject|remark|confirmed|issues|escalate|upload)\s*\]?\s*[:：]?\s*(.*)$",
+    r"^\s*(?:HC\w+|G\d)?\s*\[?\s*(pass|reject|remark|confirmed|issues|escalate|upload|keep|exclude)\s*\]?\s*[:：]?\s*(.*)$",
     re.IGNORECASE | re.DOTALL)
 _G1_REQUIRED = (
     "brand",
@@ -433,6 +438,7 @@ def _g4_rework(st, confirmation: dict, note) -> dict:
 # FIX-35：HC7 三选一（KS_Workflow HC-7：放宽该项并留痕 / 补充数据后重做 / 终止项目）
 HC7_RELAX, HC7_REDO, HC7_TERMINATE = "relax", "redo_with_data", "terminate"
 REDO_INVALIDATE = [
+    "filterword_decision",
     "run_record", "resource_lock", "context_snapshot", "brand_stats", "brand_stats_baseline",
     "cleaned_data", "denoised_data", "noise_review", "annotated_round1", "r1_review",
     "opinion_candidates", "confirmed_opinion_labels", "ugc_category_list", "annotated_data",
@@ -537,6 +543,18 @@ def _resume_collect(st, decision: str, note) -> dict:
             "_control": {"next": COLLECT_NODE}}
 
 
+# FIX-11：活动过滤词命中确认（保留 / 剔除由用户决定）
+FILTER_NODE = "n04_run_init"
+
+
+def _resume_filterword(decision: str, note: str) -> dict:
+    """keep → 保留命中行；exclude → n07 清洗时剔除。写入决定后重跑 n04 完成剩余初始化。"""
+    if decision not in ("keep", "exclude"):
+        raise ValueError("过滤词确认只接受 keep（保留）或 exclude（剔除）")
+    return {"filterword_decision": {"decision": decision, "note": str(note or "").strip()},
+            "_control": {"next": FILTER_NODE}}
+
+
 # FIX-58：数据异常严重项确认（有效量不足 / 多 Sheet 需合并）
 DATA_EXCEPTION_NODE = "n07_clean"
 
@@ -564,6 +582,7 @@ def _resume_annotation_review(st, node_id: str, decision: str, note: str) -> dic
     校验通过后把整个报告写进对应的 artifact 键（r1_review / r2_review）。
     """
     art_key = "r1_review" if node_id == "n09r_review_r1" else "r2_review"
+    stage = "round1" if node_id == "n09r_review_r1" else "round2"
     # note 可以是 JSON 字符串也可以是已解析 dict（兼容测试 helper 直接传 dict 的场景）
     if isinstance(note, dict):
         review = note
@@ -580,6 +599,9 @@ def _resume_annotation_review(st, node_id: str, decision: str, note: str) -> dic
         raise ValueError(f"{node_id}: qc_metadata.actor_role 必须是 Validator")
     if metadata.get("mode") != "independent-agent":
         raise ValueError(f"{node_id}: qc_metadata.mode 必须是 independent-agent")
+    if "verdicts" in review:
+        # 正式路径：正确率由编排器按落盘计划与逐帖判定计算，不采信审核方自报的汇总数。
+        review = _review_from_verdicts(st, node_id, stage, review)
     accuracy = review.get("accuracy")
     if not isinstance(accuracy, dict) or not accuracy:
         raise ValueError(f"{node_id}: 审核结果缺少 accuracy（至少一个字段的正确率）")
@@ -589,6 +611,39 @@ def _resume_annotation_review(st, node_id: str, decision: str, note: str) -> dic
     if not verdict_count:
         raise ValueError(f"{node_id}: 审核结果没有任何逐帖判定（verdict_count=0）")
     return {art_key: {**review, "decision": decision}}
+
+
+def _review_from_verdicts(st, node_id: str, stage: str, review: dict) -> dict:
+    import handlers
+    import review_plan
+    path = handlers.review_plan_path(st.run_dir, stage)
+    if not path.is_file():
+        raise ValueError(f"{node_id}: 缺少抽检计划 {path}")
+    plan = json.loads(path.read_text(encoding="utf-8"))
+    key = (plan.get("subject") or {}).get("key")
+    if plan.get("subject") != st.artifact_ref(key):
+        raise ValueError(f"{node_id}: 抽检计划绑定的标注版本已变化，需重新生成计划")
+    fields = list(plan.get("fields") or [])
+    planned = {str(s.get("id")) for s in plan.get("samples") or []}
+    verdicts = [v for v in review.get("verdicts") or [] if isinstance(v, dict)]
+    seen = {(str(v.get("id")), str(v.get("field"))) for v in verdicts}
+    extra = sorted({i for i, _ in seen} - planned)
+    if extra:
+        raise ValueError(f"{node_id}: 含计划外帖子的判定：{extra[:5]}")
+    missing = sorted((i, f) for i in planned for f in fields if (i, f) not in seen)
+    if missing:
+        raise ValueError(f"{node_id}: 判定未覆盖计划样本（缺 {len(missing)} 项，如 {missing[:3]}）")
+    computed = review_plan.accuracy_from_verdicts(
+        [v for v in verdicts if str(v.get("field")) in fields], reviewed_ids=sorted(planned))
+    return {
+        **{k: v for k, v in review.items() if k not in ("accuracy", "field_stats", "verdict_count")},
+        **computed,
+        "verdict_count": computed["reviewed_total"],
+        "plan": {k: plan.get(k) for k in ("stage", "sample_size", "remaining_after_plan",
+                                         "population", "uncovered_strata", "seed")},
+        "plan_subject": plan.get("subject"),
+        "samples": [{"id": s.get("id")} for s in plan.get("samples") or []],
+    }
 
 
 def build_human_outputs(
@@ -623,6 +678,8 @@ def build_human_outputs(
         return _resume_data_exception(decision, note)
     if node_id == COLLECT_NODE:
         return _resume_collect(st, decision, note)
+    if node_id == FILTER_NODE:
+        return _resume_filterword(decision, note)
 
     # n09r / n11r 标注审核：与 G3 同构——只接受独立 Validator 持久化的审核结果。
     if node_id in ANNOTATION_REVIEW_NODES:

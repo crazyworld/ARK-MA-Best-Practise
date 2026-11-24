@@ -292,11 +292,10 @@ def _apply_filterword_decision(plan: dict, rows: list, state) -> tuple[list, int
         return rows, 0
     campaigns = [c for c in (plan.get("campaigns") or []) if isinstance(c, dict)]
     if not campaigns:
-        campaigns = [{"id": plan.get("activity_name"),
-                      "filter_words": plan.get("activity_filter") or []}]
+        campaigns = [{"id": plan.get("activity_name")}]
     drop: set[int] = set()
     for camp in campaigns:
-        words = camp.get("filter_words") or plan.get("activity_filter") or []
+        words = camp.get("activity_filter") or plan.get("activity_filter") or []
         if not words:
             continue
         name = str(camp.get("id") or camp.get("name") or "")
@@ -3384,12 +3383,11 @@ def _check_activity_filterwords(plan: dict, rows: list, state) -> dict:
     decided = state.read_artifact("filterword_decision") or {}
     campaigns = [c for c in (plan.get("campaigns") or []) if isinstance(c, dict)]
     if not campaigns:
-        campaigns = [{"id": plan.get("activity_name"),
-                      "filter_words": plan.get("activity_filter") or []}]
+        campaigns = [{"id": plan.get("activity_name")}]
     aggregate = {"hits": [], "hit_rows": 0, "total_rows": len(rows or []),
                  "ratio": 0.0, "per_campaign": {}}
     for camp in campaigns:
-        words = camp.get("filter_words") or plan.get("activity_filter") or []
+        words = camp.get("activity_filter") or plan.get("activity_filter") or []
         if not words:
             continue
         name = str(camp.get("id") or camp.get("name") or "")
@@ -4173,10 +4171,49 @@ def annotation_review(node, state, ctx):
         rows, stage="round1" if stage == "round1" else "round2",
         reviewed_ids=reviewed, config=config)
     sample_plan["campaign"] = str(plan.get("activity_name") or "")
+    plan_path = _write_review_plan(state, stage, _key, rows, sample_plan)
     raise HumanPause(
-        prompt=f"{node.get('name', node['id'])}：{sample_plan['sample_size']} 帖待抽检",
+        prompt=(f"{node.get('name', node['id'])}：{sample_plan['sample_size']} 帖待抽检；"
+                f"抽检计划 {plan_path}"),
         expect=node.get("outputs", []),
     )
+
+
+# 各轮独立审核的字段（原版 QC Protocol §5：轮次一情感+相关性分别判定；轮次二观点）。
+REVIEW_FIELDS = {"round1": ("sentiment", "relevance"), "round2": ("opinion",)}
+_REVIEW_LABEL_KEYS = ("ai_sentiment", "relevance", "opinion", "ugc_category",
+                      "discussion_dimension", "content_mode")
+
+
+def review_plan_path(run_dir: Path, stage: str) -> Path:
+    return Path(run_dir) / "validation" / f"annotation_review_{stage[0]}{stage[-1]}_plan.json"
+
+
+def _write_review_plan(state, stage: str, key: str, rows: list[dict], sample_plan: dict) -> Path:
+    """抽检计划落盘：独立 Validator 逐帖判定的唯一输入，绑定当前标注版本。"""
+    by_id = {str(r.get("_annot_id") or r.get("id") or ""): r for r in rows}
+    samples = []
+    for item in sample_plan.get("samples") or []:
+        row = by_id.get(str(item.get("id")), {})
+        samples.append({
+            **item,
+            "title": row.get("title") or "",
+            "content": row.get("content") or "",
+            "url": row.get("url") or "",
+            "platform": row.get("_platform") or row.get("site_name") or "",
+            "labels": {k: row.get(k) for k in _REVIEW_LABEL_KEYS if k in row},
+        })
+    payload = {
+        **{k: v for k, v in sample_plan.items() if k != "samples"},
+        "stage": stage,
+        "fields": list(REVIEW_FIELDS[stage]),
+        "subject": state.artifact_ref(key),
+        "samples": samples,
+    }
+    path = review_plan_path(state.run_dir, stage)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
 
 
 @handler("annotation_review_decision")

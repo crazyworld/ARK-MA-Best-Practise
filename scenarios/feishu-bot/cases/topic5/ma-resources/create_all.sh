@@ -163,6 +163,21 @@ fi
 if [ -z "$ENVIRONMENT_ID" ]; then
   ENVIRONMENT_ID=$(find_by_name "environments" "$env_name" || true)
 fi
+# ---- 沙箱环境变量渲染 ----
+# 沙箱内模型调用需要带 /api/v3 的 ARK_BASE_URL；Gateway 配置常不写它（用默认值），
+# 未导出时会被渲染成空串，导致 semantic.llm_available() 为假、去噪/标注/写作全部失败。
+export ARK_BASE_URL="$BASE_URL"
+# 必需凭证为空时中止：--update-env 会整体覆盖环境变量，空值会清掉已生效的 token。
+# SSJH_USERNAME/PASSWORD/FIXED_TOKEN 允许为空（缺失时 n03b 如实阻断，用户可改为上传活动明细）。
+_missing=()
+for _name in ARK_API_KEY ARK_BASE_URL SSJH_API_TOKEN FEISHU_APP_ID FEISHU_APP_SECRET; do
+  eval "_value=\${$_name:-}"
+  [ -n "$_value" ] || _missing+=("$_name")
+done
+if [ "${#_missing[@]}" -gt 0 ]; then
+  echo "沙箱必需环境变量为空：${_missing[*]}；已中止，未更新 Environment" >&2
+  exit 3
+fi
 # environment.json 里 config.env 用 ${VAR} 字面占位,先展开一次。
 # 方舟不做二次插值,不展开就把 "${DATAHUB_API_KEY}" 死字符串灌进沙箱。
 # macOS 默认不带 envsubst,改用 jq 遍历字符串值做 ${VAR} 替换(未 export 的变量替成空串,与 envsubst 行为一致)。
@@ -177,6 +192,7 @@ env_payload="$(
     subst
   ' "$ROOT/environment.json"
 )"
+# ---- 沙箱环境变量渲染结束 ----
 if [ -n "$ENVIRONMENT_ID" ]; then
   if [ "$UPDATE_ENV" = "1" ]; then
     # 原地更新 config;新配置只对后续 Session 生效。POST /environments/{id} body={"config": ...}
