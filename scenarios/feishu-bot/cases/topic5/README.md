@@ -71,6 +71,17 @@ Bot 会基于触发消息创建独立话题，按以下顺序推进：
 
 Gateway 设 `TOPIC5_ACTIVITY_DATA_MODE=upload` 可恢复「G2 后等待上传 Excel」的旧流程。
 
+### 过程文件同步与测试回放
+
+- 编排器每次保存 run 状态时，把整个 run 目录（`run.json`、`artifacts/`、`annotation_cache/`、
+  `activity_collection/` 等）增量发布到 Session 输出目录 `/mnt/session/outputs/<task>/<run>/`；
+  Gateway 经 Files API 轮询下载并还原到 `cases/topic5/data/artifacts/<job_id>/<task>/<run>/`。
+  `TOPIC5_ARTIFACT_SYNC_DIR` 可改目录，设为 `off` 关闭；不发飞书消息。
+- 在 Gateway 的 config.env 设 `TOPIC5_REPLAY_JOB_ID=<已同步的历史 job_id>` 并重启后，新任务复用该任务的
+  外部数据：活动原帖采集（n03b）、品牌活动期/基准期与词云（n05/n06/n13）以及标注缓存；清洗、去噪、
+  统计、图表、写作、质检、发布照常真跑。G1 取数参数须与录制任务一致，不一致直接报错停止。
+  去掉该配置并重启即恢复真实取数。
+
 活动 Excel 默认直接从飞书附件下载到 MA 沙箱，避免依赖方舟 Files 存储配额。
 Gateway 先下载并校验文件容器，持久化原消息引用与 SHA256；流水线再下载同一附件，
 校验哈希后缓存到 `/workspace/topic5_repro_inputs/`，重试与续跑复用经校验的缓存。
