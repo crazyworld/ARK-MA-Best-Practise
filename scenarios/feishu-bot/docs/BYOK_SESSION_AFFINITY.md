@@ -45,10 +45,9 @@ BYOK 接入指南的规则是"需要多个 Header 时每个分别按此规则传
 - 单元测试:`tests/test_ark.py -k affinity`(6 项):首条消息与工具结果回传都带头且值相同、按 Session 取值、默认关闭、
   无 BYOK 头不追加、不修改入参、环境变量开关;另有一条走完整 `run()`(自定义工具调用 → 结果回传 → idle)的用例。
   已验证:去掉 `_byok_headers` 调用后其中 3 项失败。
-- **未验证(本 PR 不含这些结论)**:
-  1. relay 端是否真的按该 Header 粘滞、缓存命中率是否提升——需要在带 relay 的真实环境对比(同一 Session 多轮,观察 `cached_tokens`)。
-  2. 方舟是否对自定义 Header 名做白名单——BYOK 指南没有写死,"多个 Header 分别传入"的措辞偏通用透传,但没有实测。
-     建议首次开启时先发一条消息,确认请求未被方舟拒绝、relay 日志里能看到 `X-Partner-Session-Id`。
+- **已由使用方在真实环境实测**(2026-11-24,非本 PR 的自动化测试):relay 按该 Header 的粘滞可用;
+  方舟对自定义 Header 名**没有白名单**,`X-Partner-Session-Id` 可正常透传。
+- **仍未量化**:缓存命中率提升了多少(同一 Session 多轮对比 `cached_tokens`),本 PR 不含数据。
 
 ## 与既有配置的关系
 
