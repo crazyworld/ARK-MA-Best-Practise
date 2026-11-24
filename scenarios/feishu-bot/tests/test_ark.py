@@ -525,6 +525,97 @@ async def test_send_message_without_extra_headers_unchanged():
     assert "X-User-Model-Header-Authorization" not in route.calls.last.request.headers
 
 
+# ---- BYOK 会话亲和:X-Partner-Session-Id = ma-<session_id> ----
+AFFINITY = "X-User-Model-Header-X-Partner-Session-Id"
+BYOK_AUTH = {"X-User-Model-Header-Authorization": "Bearer enterprise-token"}
+
+
+@respx.mock
+async def test_session_affinity_header_added_on_send_message_and_tool_result():
+    route = respx.post(f"{BASE}/sessions/sesn-1/events").mock(return_value=httpx.Response(200, json={"data": []}))
+    client = ArkClient("key", BASE, session_affinity=True)
+    await client.send_message("sesn-1", "你好", extra_headers=BYOK_AUTH)
+    await client.send_custom_tool_result("sesn-1", "tool-1", "ok", extra_headers=BYOK_AUTH)
+    await client.aclose()
+    for call in route.calls:
+        assert call.request.headers[AFFINITY] == "ma-sesn-1"
+        assert call.request.headers["X-User-Model-Header-Authorization"] == "Bearer enterprise-token"
+
+
+@respx.mock
+async def test_session_affinity_value_follows_each_session():
+    route = respx.post(url__regex=rf"{BASE}/sessions/.+/events").mock(return_value=httpx.Response(200, json={"data": []}))
+    client = ArkClient("key", BASE, session_affinity=True)
+    await client.send_message("sesn-a", "1", extra_headers=BYOK_AUTH)
+    await client.send_message("sesn-b", "2", extra_headers=BYOK_AUTH)
+    await client.aclose()
+    assert [c.request.headers[AFFINITY] for c in route.calls] == ["ma-sesn-a", "ma-sesn-b"]
+
+
+@respx.mock
+async def test_session_affinity_off_by_default_and_without_byok_headers():
+    route = respx.post(f"{BASE}/sessions/sesn-1/events").mock(return_value=httpx.Response(200, json={"data": []}))
+    off = ArkClient("key", BASE, session_affinity=False)
+    await off.send_message("sesn-1", "x", extra_headers=BYOK_AUTH)
+    assert AFFINITY not in route.calls.last.request.headers
+    await off.aclose()
+    # 开启但本次没有 BYOK 头(方舟原生模型的 Session):任何 X-User-Model-Header-* 都会让方舟 400,必须保持干净。
+    on = ArkClient("key", BASE, session_affinity=True)
+    await on.send_message("sesn-1", "x")
+    assert AFFINITY not in route.calls.last.request.headers
+    await on.aclose()
+
+
+@respx.mock
+async def test_session_affinity_does_not_mutate_callers_headers():
+    respx.post(f"{BASE}/sessions/sesn-1/events").mock(return_value=httpx.Response(200, json={"data": []}))
+    client = ArkClient("key", BASE, session_affinity=True)
+    shared = dict(BYOK_AUTH)
+    await client.send_message("sesn-1", "x", extra_headers=shared)
+    await client.aclose()
+    assert shared == BYOK_AUTH  # 各 gateway 的 extra_headers 是跨 Session 共享的字典,不能被写入某个 Session 的值
+
+
+def test_session_affinity_env_switch(monkeypatch):
+    from arkagent.ark import session_affinity_enabled
+
+    for value, expected in [("1", True), ("true", True), ("ON", True), ("0", False), ("", False), ("no", False)]:
+        assert session_affinity_enabled({"BYOK_SESSION_AFFINITY": value}) is expected
+    assert session_affinity_enabled({}) is False
+    monkeypatch.setenv("BYOK_SESSION_AFFINITY", "true")
+    assert ArkClient("key", BASE)._session_affinity is True
+    monkeypatch.delenv("BYOK_SESSION_AFFINITY")
+    assert ArkClient("key", BASE)._session_affinity is False
+
+
+@respx.mock
+async def test_run_sends_affinity_on_first_message_and_tool_results():
+    """一轮里首条消息与工具结果回传都带同一个亲和值(首轮不能漏)。"""
+    respx.get(f"{BASE}/sessions/sesn-1/events/stream").mock(
+        return_value=httpx.Response(
+            200,
+            text=": ready\n\n"
+            'data: {"type":"agent.custom_tool_use","id":"custom-1","name":"lookup","input":{}}\n\n'
+            'data: {"type":"agent.message","content":[{"type":"text","text":"完成"}]}\n\n'
+            'data: {"type":"session.status_idle"}\n\n',
+            headers={"Content-Type": "text/event-stream"},
+        )
+    )
+    route = respx.post(f"{BASE}/sessions/sesn-1/events").mock(return_value=httpx.Response(200, json={"data": []}))
+
+    async def handler(name, arguments):
+        return "ok", False
+
+    client = ArkClient("key", BASE, session_affinity=True)
+    await client.run("sesn-1", "你好", 5_000, custom_tool_handler=handler, extra_headers=BYOK_AUTH)
+    await client.aclose()
+
+    bodies = [json.loads(c.request.content)["events"][0]["type"] for c in route.calls]
+    assert bodies == ["user.message", "user.custom_tool_result"]
+    for call in route.calls:
+        assert call.request.headers[AFFINITY] == "ma-sesn-1"
+
+
 # ---- static bearer (卡点 A) ----
 @respx.mock
 async def test_create_static_bearer_credential_shape():

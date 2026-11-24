@@ -18,7 +18,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import AsyncIterator, Awaitable, Callable, Optional
+from typing import AsyncIterator, Awaitable, Callable, Mapping, Optional
 from urllib.parse import quote, urlencode
 
 import httpx
@@ -169,12 +169,50 @@ def _capture_ma_request_id(operation: str, path: str, response: httpx.Response) 
         os.close(descriptor)
 
 
+# 会话亲和:让 BYOK 的模型网关(relay)把同一个 MA Session 的请求粘到同一后端。
+# 走 X-User-Model-Header-* 通用透传,relay 收到的是去掉前缀后的 X-Partner-Session-Id。
+SESSION_AFFINITY_HEADER = "X-User-Model-Header-X-Partner-Session-Id"
+SESSION_AFFINITY_PREFIX = "ma-"
+SESSION_AFFINITY_ENV = "BYOK_SESSION_AFFINITY"
+
+
+def session_affinity_enabled(env: Optional[Mapping[str, str]] = None) -> bool:
+    environ = os.environ if env is None else env
+    return (environ.get(SESSION_AFFINITY_ENV) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def with_session_affinity(extra_headers: Optional[dict], session_id: str) -> Optional[dict]:
+    """在 BYOK 请求头上追加会话亲和 Header;不修改入参,没有 BYOK 头时原样返回。
+
+    只在已带 ``X-User-Model-Header-*`` 时才追加:方舟原生模型的 Session 收到任何这类 Header 都会
+    400 InvalidModelHeader,所以"本次请求不带 BYOK 头"的路径(如切换模型前创建的旧 Session)必须保持干净。
+    值是 ``ma-<session_id>``,同一个 Session 的每次请求(首条消息、工具结果回传、重试)取值一致。
+    """
+    if not extra_headers or not session_id:
+        return extra_headers
+    merged = dict(extra_headers)
+    merged[SESSION_AFFINITY_HEADER] = f"{SESSION_AFFINITY_PREFIX}{session_id}"
+    return merged
+
+
 class ArkClient:
-    def __init__(self, api_key: str, base_url: str, client: Optional[httpx.AsyncClient] = None):
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str,
+        client: Optional[httpx.AsyncClient] = None,
+        *,
+        session_affinity: Optional[bool] = None,
+    ):
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self._client = client or httpx.AsyncClient(timeout=REQUEST_TIMEOUT)
         self._environment_configs: dict[str, dict] = {}
+        # BYOK 会话亲和开关:显式传参优先,否则看环境变量 BYOK_SESSION_AFFINITY,默认关闭。
+        self._session_affinity = session_affinity_enabled() if session_affinity is None else session_affinity
+
+    def _byok_headers(self, session_id: str, extra_headers: Optional[dict]) -> Optional[dict]:
+        return with_session_affinity(extra_headers, session_id) if self._session_affinity else extra_headers
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -797,7 +835,7 @@ class ArkClient:
             "POST",
             f"/sessions/{quote(session_id, safe='')}/events",
             {"events": events},
-            extra_headers=extra_headers,
+            extra_headers=self._byok_headers(session_id, extra_headers),
         )
 
     async def get_session(self, session_id: str) -> dict:
@@ -853,7 +891,7 @@ class ArkClient:
                     }
                 ]
             },
-            extra_headers=extra_headers,
+            extra_headers=self._byok_headers(session_id, extra_headers),
         )
 
     async def run(
