@@ -46,9 +46,9 @@ def command(skill_dir, stage, *arguments):
 def input_payload(cid, dimension, platform, frequency, plan, metric="unknown"):
     """Preserve complete original table, order, case, symbols and numeric values."""
     campaign = next((c for c in plan.get("campaigns", []) if str(c.get("id")) == str(cid)), {})
-    # Acquisition currently uses the plan-level window for each query.
-    start = plan.get("period_start")
-    end = plan.get("period_end")
+    # FIX-54：使用该活动自身周期（多活动各自窗口），缺失时回退方案窗口。
+    start = campaign.get("period_start") or plan.get("period_start")
+    end = campaign.get("period_end") or plan.get("period_end")
     subject = str(plan.get("brand") or plan.get("project") or "未知对象")
     if cid != "brand":
         subject += "·" + str(campaign.get("name") or cid)
@@ -61,13 +61,63 @@ def input_payload(cid, dimension, platform, frequency, plan, metric="unknown"):
                              or "；".join(map(str, plan.get("business_questions") or []))),
             "background": str(plan.get("background") or ""),
             "period": f"{start or '未知'}—{end or '未知'}",
-            "platform": LABELS.get(platform, platform),
+            "platform": (f"综合已选平台（{'、'.join(LABELS.get(p, p) for p in plan.get('platforms') or [])}）"
+                         if platform == "all" else LABELS.get(platform, platform)),
             # SSJH cloud_word here is queried without sentiment/content filtering.
             "sentiment": "全部", "content_type": "全部",
         },
         "metric": metric,
         "words": [{"term": term, "value": value} for term, value in frequency.items()],
     }
+
+
+CALL_BRIEF_PROMPT_REF = "topic_configs/marketing-activity-review/prompts/wordcloud_call_brief.md"
+# 原版 v1.4 默认问题（需求未给出适用问题时使用；不新增需求门槛）。
+DEFAULT_QUESTIONS = {
+    "brand": "已确认品牌窗口内，讨论由哪些实质相关内容构成，品牌与人物、产品及使用场景如何关联",
+    "overall": "当前活动传播内容的重点是什么",
+    "brand_dim": "活动讨论中品牌以什么方式被关联",
+    "product": "活动中的产品信息、场景和体验如何被表达",
+}
+MAX_QUESTIONS = 3
+
+
+def _sha(value) -> str:
+    return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def build_call_brief(plan: dict, requirement: dict, cid: str, dimension: str, platform: str) -> dict:
+    """词云调用 brief（原版 wordcloud_call_brief.md v1.4）：调用层内部记录，不进 Skill input/客户报告。
+
+    从已保存需求（原始请求、更正、业务问题、活动目标）提取 1–3 个适用问题；
+    品牌层问同期整体讨论，活动层问活动讨论；无适用问题时用默认问法。
+    """
+    level = "brand" if cid == "brand" else "activity"
+    sources = {
+        "raw_request": requirement.get("raw_request") or "",
+        "corrections": requirement.get("corrections") or [],
+        "business_questions": requirement.get("business_questions") or plan.get("business_questions") or [],
+        "campaign_goal": plan.get("campaign_goal") or [],
+    }
+    focus = [str(q).strip() for q in sources["business_questions"] if str(q).strip()]
+    if level == "activity":
+        focus += [f"活动讨论是否回应「{g}」这一目标" for g in sources["campaign_goal"]
+                  if g and g != "待数据推断"]
+    default_key = "brand" if level == "brand" else ("brand_dim" if dimension == "brand" else dimension)
+    questions = list(dict.fromkeys(focus))[:MAX_QUESTIONS] or [DEFAULT_QUESTIONS.get(default_key,
+                                                                                    DEFAULT_QUESTIONS["overall"])]
+    brief = {
+        "analysis_level": level, "dimension": dimension,
+        "platform": "综合已选平台" if platform == "all" else LABELS.get(platform, platform),
+        "requirement_refs": [{"source": key, "sha256": _sha(value)} for key, value in sources.items()],
+        "user_focus": str(sources["raw_request"]).strip(),
+        "analysis_questions": questions,
+        "question_origin": "执行Agent依据已保存需求组织的问题，非新增用户原话",
+        "prompt_ref": CALL_BRIEF_PROMPT_REF,
+    }
+    brief["brand_name" if level == "brand" else "campaign_name"] = (
+        str(plan.get("brand") or "") if level == "brand" else str(cid))
+    return brief
 
 
 def render(spec, out_root, skill_dir, font=None):
@@ -173,14 +223,20 @@ SYSTEM = """你是词云议题分析师，遵守 wordcloud-insight v0.2.6。
 默认2–4个议题，最多5个，只支持1个就写1个。短而具体的内容标题，代表词原文，
 一段1–3句发现；有依据时点到业务含义，不强制行动建议。内部 rationale 说明依据。
 禁止在标题/解读/建议中使用人均、转化率、转化、性价比。正常完成不加limitations或免责声明。
-只返回所要求的JSON；不得声称脚本验证已经完成。"""
+只返回所要求的JSON；不得声称脚本验证已经完成。
+Topic5 解读要求（wordcloud_call_brief.md v1.4）：围绕 call-brief 的核心问题组织议题，先综合判断再选证据，
+不只把词分成人物/产品/玩法等类别，不为回应目标编造缺口；每段判断先行，再用词频关系、内容组合或原帖支撑；
+没有测量认同、转化、增长或功效时不写成已实现结果；低词频不推出完整产品名缺席或自发讨论占比；
+只附活动标签而内容无关（无关商品、穿搭、舞蹈等且无实质关联）的样本只记为话题命中但内容无关，不作为正式议题；
+品牌整体说明同期品牌讨论构成及关联方式，活动整体概括活动传播重点，品牌交集说明品牌关联方式，
+产品交集优先说明产品信息、场景和体验表达；不复写整体结论顶替维度分析。"""
 
 
 def ask(system, user, validate, max_tokens=4096, audit_dir=None):
     feedback = ""
     for attempt in range(3):
         value = semantic.chat_json(system, user + feedback, max_tokens=max_tokens,
-                                   retries=1, thinking="disabled")
+                                   retries=1, thinking="disabled", lm_scope="wordcloud")
         if audit_dir:
             Path(audit_dir).mkdir(parents=True, exist_ok=True)
             write(Path(audit_dir) / f"attempt-{attempt + 1}.json",
@@ -269,6 +325,31 @@ def validate_topics(data, words, allowed_ids, forbidden):
                 + "；引用只能从allowed_read_ids选择，未读帖需先走supplemental_post_ids补读。")
 
 
+def check_brief_scope(brief: dict, scope: dict, context: dict) -> None:
+    """brief 与范围/输入上下文一致（对象、维度、平台），不一致即拒绝（原版：context 由当前需求生成并校验）。"""
+    level = "brand" if scope.get("campaign") == "brand" else "activity"
+    platform = scope.get("platform")
+    expected_platform = "综合已选平台" if platform == "all" else LABELS.get(platform, platform)
+    mismatches = [name for name, ok in (
+        ("analysis_level", brief.get("analysis_level") == level),
+        ("dimension", brief.get("dimension") == scope.get("dimension")),
+        ("platform", brief.get("platform") == expected_platform
+         and str(context.get("platform") or "").startswith(expected_platform)),
+        ("campaign", level == "brand" or brief.get("campaign_name") == str(scope.get("campaign"))),
+    ) if not ok]
+    if mismatches:
+        raise RuntimeError("wordcloud call-brief 与范围不一致：" + "、".join(mismatches))
+
+
+def validate_brief_review(data, brief):
+    """语义复核须回应 call-brief：至少回答一个问题，或说明未回答的真实原因。"""
+    review = data.get("brief_review")
+    require(isinstance(review, dict), "缺 brief_review 语义复核结果")
+    answered = [q for q in review.get("answered_questions") or [] if q in brief["analysis_questions"]]
+    require(bool(answered) or bool(str(review.get("unanswered_reason") or "").strip()),
+            "议题未回答 call-brief 问题：" + json.dumps(brief["analysis_questions"], ensure_ascii=False))
+
+
 def analyze(state, chart, skill_dir, forbidden):
     rendered = chart.get("wordcloud_artifacts")
     if not rendered:
@@ -285,7 +366,13 @@ def analyze(state, chart, skill_dir, forbidden):
     if payload != expected_input:
         raise RuntimeError("wordcloud-insight: n14 input.json 与范围词表不一致")
     words = {row["term"] for row in payload["words"]}
-    base = "完整输入（范围和全部原词/原数值）：\n" + json.dumps(payload, ensure_ascii=False)
+    brief = chart.get("call_brief") or (chart.get("spec") or {}).get("call_brief")
+    require(isinstance(brief, dict) and brief.get("analysis_questions"), "缺少词云 call-brief")
+    check_brief_scope(brief, rendered["scope"], payload["context"])
+    brief_file = root / "call-brief.json"
+    write(brief_file, brief)
+    base = ("完整输入（范围和全部原词/原数值）：\n" + json.dumps(payload, ensure_ascii=False)
+            + "\n\ncall-brief（本模块要回答的问题）：\n" + json.dumps(brief, ensure_ascii=False))
     prepared = prepare_posts(state, rendered["scope"], root)
     reads, selection_note, stopping_reason = [], "", ""
     if prepared:
@@ -424,10 +511,14 @@ post_ids只能引用已读白名单中的ID且每议题不重复；候选索引�
 OCR包装/商品页只支持归属或页面宣称，不当成用户体验、已验证性能或整体销售效果。
 核对原句支持的具体判断、否定/条件、多字段属于同帖；未核查的营销宣称需准确表述为宣传内容。
 保留能成立的发现，删改没有依据的判断，不强制行动建议，不另加常规限制段落。
+另按原版语义复核逐项检查：是否回答 call-brief 中的适用问题；是否为综合判断而非词表复述；
+是否把仅挂话题的无关内容当作正式议题；业务含义是否增加理解；是否与其他议题重复；是否把目标或营销宣称写成结果。
+返回中加入 "brief_review":{"answered_questions":["已回答的 call-brief 问题原文"],"unanswered_reason":"未回答的真实原因，可空"}。
 terms仍只能从本范围完整输入words逐字选择；post_ids只选已读白名单且不重复。
 返回 {"topics":[{"title":"短标题","terms":["原词"],"interpretation":"复核后的发现",
 "rationale":"内部证据及判断强度","post_ids":["实际已读ID，可空"]}]}。""",
-                   lambda data: validate_topics(data, words, {r["post_id"] for r in reads}, forbidden),
+                   lambda data: (validate_topics(data, words, {r["post_id"] for r in reads}, forbidden),
+                                 validate_brief_review(data, brief)),
                    max_tokens=6144, audit_dir=root / "semantic/delivery-review")
     topics = {"topics": reviewed["topics"]}
     topics_file = root / "topics.json"
@@ -446,5 +537,7 @@ terms仍只能从本范围完整输入words逐字选择；post_ids只选已读�
                       ("analysis.md", "preview.html", "analysis-evidence.json",
                        "wordcloud.png", "wordcloud-white.png", "render.json")},
         "topics_path": str(topics_file), "input_path": str(input_file),
+        "call_brief_ref": {"path": str(brief_file), "sha256": file_hash(brief_file)},
+        "brief_review": reviewed.get("brief_review"),
         **({"post_review_path": str(review_file)} if prepared else {}),
     }

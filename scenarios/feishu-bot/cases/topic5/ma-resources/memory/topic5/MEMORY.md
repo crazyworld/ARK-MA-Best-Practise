@@ -25,9 +25,10 @@
 - **触发词**:**"复盘报告" / "营销复盘" / "活动复盘"**(由 gateway `Topic5Runner` 分派进入 topic5 主线)。
 - **薄 Agent 边界**:协调器**不做业务判断**,只跑 `run_pipeline.py start/resume/status` 驱动确定性编排器,
   遇人工关卡抛 HC JSON 结束 turn,HC 决定回注后续跑。所有口径逻辑在编排器 handler,**不在 Prompt**。
-- **人工关卡(7 门,不可跳过/合并)**:`G1`(n01 需求)/`G2`(n03 方案)/`N10`(n10 观点标签)/
-  `G3`(n17 Validator 质检)/`G4`(n21 用户终验)/`HC7`(QC 超限升级)/`USER_ESCALATE`(终验升级)。
-  由 gateway 渲染飞书交互卡片,回帖以 `user.message`(`HCx [pass/reject/remark]: note`)塞回 Session。
+- **人工关卡(不可跳过/合并)**:质量门 `G1`(n01 需求)/`G2`(n03 方案)/`G3`(n17 Validator 质检)/`G4`(n21 用户终验);
+  操作级 HC `HC_COLLECT`(n03b 采集授权)/`N10`(n10 观点标签)/`HC7`(QC 超限:放宽留痕/补数据重做/终止)/
+  `USER_ESCALATE`(终验超时或返工超 3 轮)。由 gateway 渲染飞书交互卡片,回帖以 `user.message`
+  (`HCx <decision>: note`)塞回 Session;note 原样传给 `--note`。
 - **Validator 独立身份**:G3 质检由平级子 Agent `topic5-validator` 执行,只读报告、不改正文、不写飞书;
   `pass_policy = p0_count==0`,≤3 轮,超限走 HC7。
 - **交付**:走**飞书文档**(转移所有权 + 导出回读核对 + 记录 revision_id 三门禁),**不走妙搭 Miaoda**。

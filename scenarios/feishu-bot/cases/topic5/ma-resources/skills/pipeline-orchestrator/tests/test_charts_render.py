@@ -108,9 +108,8 @@ class TestChartSpecs(unittest.TestCase):
         stats = {"campaigns": {"c1": {
             "metrics": {"活动相关条数": 30},
             "mention_funnel": {
-                "brand_hits": 20,
-                "product_hits": 10,
-                "has_product_keywords": True,
+                "method": "keyword_mention", "tier1": 30, "tier2": 20,
+                "tier3": 10, "degraded": False,
             },
         }}}
         specs = {
@@ -181,7 +180,7 @@ class TestChartsRenderHandler(unittest.TestCase):
             version="v0.0", report_name="立白营销活动复盘",
         )
         md = handlers._fallback_report_md(
-            _STATS_BUNDLE, chart_urls, {}, "five", "0.0"
+            _STATS_BUNDLE, chart_urls, {}, "four", "0.0"
         )
         self.assertIn("营销活动复盘报告", md)
         # 降级无图：report 不应嵌入 None 链接。

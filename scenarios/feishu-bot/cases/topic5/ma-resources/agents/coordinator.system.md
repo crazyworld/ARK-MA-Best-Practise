@@ -147,14 +147,22 @@ n17_validate 的关卡语义是「独立质检」，必须由**独立身份** `t
 
 ## 续跑（resume）
 
-收到 Gateway 注入的 `HCx [pass/reject/remark]: note`（严格此格式）后：
+收到 Gateway 注入的 `HCx <decision>: note`（严格此格式）后：decision 取值
+`pass|reject|remark`，HC7 另有 `relax|redo_with_data|terminate`，USER_ESCALATE 另有
+`requirement_change|quality_issue|wait|switch_channel|pause`；note（含 relax 的 JSON、G4 reject 的
+`{"change_type":…}` JSON）原样作为单个 `--note` 参数传入。FINAL_RESULT 为 `terminated` 时如实上报，不再续跑。
+用户在 G4 内容修改或 HC7 补数据重做中提出「某条内容其实不相关 / 情感判错 / 观点归错 / 日期范围要改」等
+补证时，把它整理成 `changes: [{row_id, field, old, new}]`（field 取 relevance / ai_sentiment /
+discussion_dimension / ugc_category / opinion / display / platform / date_range / keyword / product_words），
+**先向用户复述并确认**，再并入 note JSON；流水线按影响矩阵（impact.py，原版 KS_Report_Scope_Contract §5）
+只重算受影响部分，日期/关键词/平台变化会回到方案确认重新授权取数。
 
 ```bash
 cd /mnt/skills/pipeline-orchestrator
 nohup python3 run_pipeline.py resume \
   --dag contracts/pipeline.v0.2.yaml \
   --workspace "$WS" --task "$TASK" --run "$RUN" \
-  --hc <kind> --decision <pass|reject|remark> --note "<note>" \
+  --hc <kind> --decision <decision> --note "<note>" \
   > "$WS/tasks/$TASK/runs/$RUN/resume.log" 2>&1 &
 ```
 
@@ -191,10 +199,19 @@ nohup python3 run_pipeline.py retry \
 failed 时允许执行；其他状态必须明确拒绝，不得猜测或从头启动。
 
 若该控制消息给出的命令在 `retry` 前包含 `run_pipeline.py replace-source`，说明
-`n04_run_init` 因 `excel_source` 校验失败后用户上传了修正版。必须严格按消息中的命令顺序执行：
+`n04_run_init` 因 `excel_source` 校验失败、或 `n03b_activity_pull` 自动采集失败后，用户上传了（修正版）活动明细。必须严格按消息中的命令顺序执行：
 先用新 `source_file` 生成不可变的新版本 `confirmed_plan`，成功后再 retry。不得省略
 `replace-source`，也不得把新文件用于其他失败节点。`replace-source` 自身会再次校验
-`failed + n04_run_init + excel_source`，任一条件不满足都必须停止。
+`failed + n04_run_init + excel_source` 或 `failed + n03b_activity_pull + activity_pull`，任一条件不满足都必须停止。
+
+---
+
+## 交接后修正（post_handoff_fix）
+
+控制消息 `[topic5-control] post_handoff_fix` 表示用户对**已交付**报告提出修正。严格只执行消息中的
+`run_pipeline.py post-handoff-fix` 命令（它要求 `run.json.status=completed` 且 handoff 已通过，否则报错退出），
+然后按 start/resume 规则轮询：流程依次经过返修、独立质检、原文档原位修正、G4 终验、提交与交接，
+handoff 追加 `amendments`。不得新建 Run、不得新建飞书文档、不得自行改写报告。
 
 ---
 

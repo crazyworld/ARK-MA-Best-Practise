@@ -54,6 +54,8 @@ class TestCleanCampaign(unittest.TestCase):
 
     def _run(self, brand_stats):
         self.st.write_artifact("brand_stats", brand_stats)
+        # 小样本夹具：数据异常严重项（<100 条）已由用户确认继续（FIX-58）。
+        self.st.write_artifact("data_exception_ack", {"decision": "continue"})
         excel_payload = {
             "rows": handlers._iter_ssjh_rows(brand_stats),
             "meta": brand_stats.get("meta") or {},
@@ -80,8 +82,7 @@ class TestCleanCampaign(unittest.TestCase):
         self.assertEqual(rec["total_out"], 2)        # a(一条) + b
         self.assertEqual(rec["removed"]["duplicate"], 1)
         self.assertEqual(rec["removed"]["out_of_period"], 2)
-        # 剔除 3/5 = 60% > 10% → 需抽查
-        self.assertTrue(rec["needs_sampling_review"])
+        self.assertEqual(rec["remove_ratio"], 0.6)
 
     def test_derives_platform_kol_ymd(self):
         bs = _brand_stats([_row("x", "20260715", 1, 9, fans=600000)])
@@ -118,6 +119,7 @@ class TestCleanCampaign(unittest.TestCase):
 
     def test_uploaded_excel_rows_take_precedence(self):
         # 即使 SSJH 有 articles，只要 confirmed_plan 冻结了上传源，n07 应消费 Excel 行。
+        self.st.write_artifact("data_exception_ack", {"decision": "continue"})   # FIX-58 小样本
         self.st.write_artifact(
             "brand_stats",
             _brand_stats([_row("ssjh", "20260710", 1, 999)]),
@@ -215,16 +217,16 @@ class TestAggregate(unittest.TestCase):
 
     def test_metrics_and_whitelist(self):
         rows = [
-            {"relevance": "是", "sentiment": 1, "interaction_cnt": 100,
+            {"relevance": "是", "ai_sentiment": 1, "interaction_cnt": 100,
              "title": "立白活动", "content": "", "keywords": ["立白"], "_platform": "xiaohongshu"},
-            {"relevance": "是", "sentiment": 0, "interaction_cnt": 50,
+            {"relevance": "是", "ai_sentiment": 0, "interaction_cnt": 50,
              "title": "普通", "content": "立白洗衣粉好用", "keywords": [], "_platform": "xiaohongshu"},
-            {"relevance": "否", "sentiment": -1, "interaction_cnt": 999,
+            {"relevance": "否", "ai_sentiment": -1, "interaction_cnt": 999,
              "title": "无关", "content": "", "keywords": [], "_platform": "xiaohongshu"},
         ]
         self._seed_annotated(rows)
         self.st.write_artifact("confirmed_plan", {
-            "brand_words": ["立白"], "product_words": ["洗衣粉"],
+            "brand": "立白", "product_words": ["洗衣粉"],
         })
         bundle = self._agg()
         camp = bundle["campaigns"]["default"]
@@ -233,8 +235,9 @@ class TestAggregate(unittest.TestCase):
         self.assertEqual(m["活动相关条数"], 2)
         self.assertEqual(m["互动量"], 150)
         self.assertEqual(m["条均互动量"], 75.0)
-        # 品牌提及 2/2
-        self.assertEqual(m["品牌提及率"], 1.0)
+        # 品牌提及 2/2 = 100% ≥ 95% → 退化，不输出独立的品牌提及率（原版 aggregate.py:191）
+        self.assertTrue(camp["mention_funnel"]["degraded"])
+        self.assertIsNone(m["品牌提及率"])
         # 白名单落在产物里；禁用措辞不出现在 metrics 键
         self.assertEqual(bundle["metric_whitelist"], list(handlers.METRIC_WHITELIST))
         for key in m:
@@ -244,11 +247,11 @@ class TestAggregate(unittest.TestCase):
     def test_nsr_denominator_is_fixed_to_pos_plus_neg(self):
         """FIX-13：分母恒为正面+负面，与客户 aggregate.py 一致，无参数开关。"""
         rows = [
-            {"relevance": "是", "sentiment": 1, "interaction_cnt": 1},
-            {"relevance": "是", "sentiment": 0, "interaction_cnt": 1},
-            {"relevance": "是", "sentiment": 0, "interaction_cnt": 1},
-            {"relevance": "是", "sentiment": 1, "interaction_cnt": 1},
-            {"relevance": "是", "sentiment": -1, "interaction_cnt": 1},
+            {"relevance": "是", "ai_sentiment": 1, "interaction_cnt": 1},
+            {"relevance": "是", "ai_sentiment": 0, "interaction_cnt": 1},
+            {"relevance": "是", "ai_sentiment": 0, "interaction_cnt": 1},
+            {"relevance": "是", "ai_sentiment": 1, "interaction_cnt": 1},
+            {"relevance": "是", "ai_sentiment": -1, "interaction_cnt": 1},
         ]
         self._seed_annotated(rows)
         camp = self._agg()["campaigns"]["default"]
@@ -259,10 +262,10 @@ class TestAggregate(unittest.TestCase):
     def test_nsr_ignores_legacy_param_if_present(self):
         """旧 Run 参数残留不会改变口径（参数已废弃，恒按正+负）。"""
         rows = [
-            {"relevance": "是", "sentiment": 1, "interaction_cnt": 1},
-            {"relevance": "是", "sentiment": 0, "interaction_cnt": 1},
-            {"relevance": "是", "sentiment": -1, "interaction_cnt": 1},
-            {"relevance": "是", "sentiment": 1, "interaction_cnt": 1},
+            {"relevance": "是", "ai_sentiment": 1, "interaction_cnt": 1},
+            {"relevance": "是", "ai_sentiment": 0, "interaction_cnt": 1},
+            {"relevance": "是", "ai_sentiment": -1, "interaction_cnt": 1},
+            {"relevance": "是", "ai_sentiment": 1, "interaction_cnt": 1},
         ]
         self._seed_annotated(rows)
         self.st.params["nsr_denominator_includes_neutral"] = True  # 残留参数
@@ -274,20 +277,20 @@ class TestAggregate(unittest.TestCase):
         rows = []
         # 维度 A：12 正 + 12 负 + 20 中性 = 44 行，但正+负=24 < 30 → 样本不足
         for _ in range(12):
-            rows.append({"relevance": "是", "sentiment": 1, "interaction_cnt": 1,
+            rows.append({"relevance": "是", "ai_sentiment": 1, "interaction_cnt": 1,
                          "discussion_dimension": "品牌"})
         for _ in range(12):
-            rows.append({"relevance": "是", "sentiment": -1, "interaction_cnt": 1,
+            rows.append({"relevance": "是", "ai_sentiment": -1, "interaction_cnt": 1,
                          "discussion_dimension": "品牌"})
         for _ in range(20):
-            rows.append({"relevance": "是", "sentiment": 0, "interaction_cnt": 1,
+            rows.append({"relevance": "是", "ai_sentiment": 0, "interaction_cnt": 1,
                          "discussion_dimension": "品牌"})
         # 维度 B：16 正 + 15 负 = 31 ≥ 30 → 可用
         for _ in range(16):
-            rows.append({"relevance": "是", "sentiment": 1, "interaction_cnt": 1,
+            rows.append({"relevance": "是", "ai_sentiment": 1, "interaction_cnt": 1,
                          "discussion_dimension": "产品"})
         for _ in range(15):
-            rows.append({"relevance": "是", "sentiment": -1, "interaction_cnt": 1,
+            rows.append({"relevance": "是", "ai_sentiment": -1, "interaction_cnt": 1,
                          "discussion_dimension": "产品"})
         self._seed_annotated(rows)
         dims = self._agg()["campaigns"]["default"]["dimension_nsr"]
@@ -308,9 +311,9 @@ class TestAggregate(unittest.TestCase):
 
     def test_multi_campaign_not_summed(self):
         rows = [
-            {"relevance": "是", "sentiment": 1, "interaction_cnt": 10,
+            {"relevance": "是", "ai_sentiment": 1, "interaction_cnt": 10,
              "title": "A活动打卡", "content": "", "keywords": []},
-            {"relevance": "是", "sentiment": 1, "interaction_cnt": 20,
+            {"relevance": "是", "ai_sentiment": 1, "interaction_cnt": 20,
              "title": "B活动测评", "content": "", "keywords": []},
         ]
         self._seed_annotated(rows)
@@ -335,22 +338,90 @@ class TestAggregate(unittest.TestCase):
         camp = self._agg()["campaigns"]["default"]
         self.assertEqual(camp["sentiment_dist"], {"positive": 1, "neutral": 0, "negative": 0})
 
+    def test_sentiment_missing_within_5pct_excluded_from_denominator(self):
+        """FIX-23：100 行中 3 行缺 AI 情感 → 不报错，情感分母 97（原版 aggregate.py:77-88）。"""
+        rows = [{"relevance": "是", "ai_sentiment": 1, "interaction_cnt": 1} for _ in range(97)]
+        rows += [{"relevance": "是", "interaction_cnt": 1} for _ in range(3)]
+        self._seed_annotated(rows)
+        bundle = self._agg()
+        camp = bundle["campaigns"]["default"]
+        self.assertEqual(sum(camp["sentiment_dist"].values()), 97)
+        self.assertEqual(camp["metrics"]["活动相关条数"], 100)   # 声量不剔除
+        self.assertTrue(any("3/100" in w for w in bundle["warnings"]))
+
+    def test_sentiment_missing_over_5pct_raises(self):
+        rows = [{"relevance": "是", "ai_sentiment": 1, "interaction_cnt": 1} for _ in range(94)]
+        rows += [{"relevance": "是", "interaction_cnt": 1} for _ in range(6)]
+        self._seed_annotated(rows)
+        with self.assertRaises(ValueError):
+            self._agg()
+
+    def test_platform_sentiment_is_not_a_fallback(self):
+        """有 sentiment 无 ai_sentiment → 计为缺失，不回退平台情感。"""
+        rows = [{"relevance": "是", "ai_sentiment": 1, "interaction_cnt": 1} for _ in range(99)]
+        rows.append({"relevance": "是", "sentiment": -1, "interaction_cnt": 1})
+        self._seed_annotated(rows)
+        camp = self._agg()["campaigns"]["default"]
+        self.assertEqual(camp["sentiment_dist"]["negative"], 0)
+        self.assertEqual(sum(camp["sentiment_dist"].values()), 99)
+
+    def test_unlabeled_relevance_excluded_with_warning(self):
+        rows = [{"relevance": "是", "ai_sentiment": 1, "interaction_cnt": 1},
+                {"ai_sentiment": 1, "interaction_cnt": 1}]
+        self._seed_annotated(rows)
+        bundle = self._agg()
+        self.assertEqual(bundle["campaigns"]["default"]["metrics"]["活动相关条数"], 1)
+        self.assertTrue(any("轮次一未标注" in w for w in bundle["warnings"]))
+
+    def test_multi_campaign_without_partition_raises(self):
+        rows = [{"relevance": "是", "ai_sentiment": 1, "interaction_cnt": 1}]
+        self._seed_annotated(rows)
+        self.st.write_artifact("confirmed_plan", {"campaigns": [{"id": "A"}, {"id": "B"}]})
+        with self.assertRaises(ValueError):
+            self._agg()
+
+    def test_stats_scope_and_irrelevant_review(self):
+        """FIX-21：原始 100、清洗剔除 5、AI 判否 15、保留 80（100 = 95 进标注 + 5 清洗剔除）。"""
+        rows = [{"relevance": "是", "ai_sentiment": 1, "interaction_cnt": 1} for _ in range(80)]
+        rows += [{"relevance": "否", "ai_sentiment": 0, "interaction_cnt": 1} for _ in range(15)]
+        self._seed_annotated(rows)
+        self.st.write_artifact("denoised_data", {"rows": [], "clean_record": {
+            "removed": {"duplicate": 3, "out_of_period": 2}}})
+        scope = self._agg()["campaigns"]["default"]["stats_scope"]
+        self.assertEqual((scope["raw"], scope["noise_removed"], scope["ai_irrelevant"],
+                          scope["kept"], scope["excluded"]), (100, 5, 15, 80, 20))
+        self.assertTrue(scope["irrelevant_review_required"])   # 15/95 > 10%
+
+    def test_cross_tabs_by_platform_and_type(self):
+        rows = [{"relevance": "是", "ai_sentiment": 1, "interaction_cnt": 10,
+                 "_platform": "douyin", "content_mode": "UGC", "_publish_ymd": "20261001"},
+                {"relevance": "是", "ai_sentiment": 1, "interaction_cnt": 5,
+                 "_platform": "douyin", "content_mode": "PGC", "_publish_ymd": "20261001"}]
+        self._seed_annotated(rows)
+        camp = self._agg()["campaigns"]["default"]
+        self.assertEqual(camp["trend_by_platform_type"]["20261001"]["douyin"],
+                         {"UGC": 1, "PGC": 1})
+        self.assertEqual(camp["interaction_by_platform_type"]["douyin"], {"UGC": 10, "PGC": 5})
+
     def test_mention_funnel_nested(self):
         # 提及漏斗嵌套：产品提及是品牌提及的子集 → 产品提及占比 ≤ 1
         rows = [
-            {"relevance": "是", "sentiment": 1, "interaction_cnt": 1,
+            {"relevance": "是", "ai_sentiment": 1, "interaction_cnt": 1,
              "title": "立白洗衣粉很好", "content": "", "keywords": []},   # 品牌+产品
-            {"relevance": "是", "sentiment": 1, "interaction_cnt": 1,
+            {"relevance": "是", "ai_sentiment": 1, "interaction_cnt": 1,
              "title": "立白不错", "content": "", "keywords": []},         # 仅品牌
-            {"relevance": "是", "sentiment": 1, "interaction_cnt": 1,
+            {"relevance": "是", "ai_sentiment": 1, "interaction_cnt": 1,
              "title": "洗衣粉通用", "content": "", "keywords": []},        # 仅产品，不计入漏斗
         ]
+        # 补 2 条既无品牌也无产品的行，使 Tier2/Tier1=2/5 不触发 95% 退化。
+        rows += [{"relevance": "是", "ai_sentiment": 1, "interaction_cnt": 1,
+                  "title": "其他", "content": "", "keywords": []} for _ in range(2)]
         self._seed_annotated(rows)
         self.st.write_artifact("confirmed_plan",
-                               {"brand_words": ["立白"], "product_words": ["洗衣粉"]})
+                               {"brand": "立白", "product_words": ["洗衣粉"]})
         camp = self._agg()["campaigns"]["default"]
-        self.assertEqual(camp["mention_funnel"]["brand_hits"], 2)
-        self.assertEqual(camp["mention_funnel"]["product_hits"], 1)   # 仅品牌行内的产品命中
+        self.assertEqual(camp["mention_funnel"]["tier2"], 2)
+        self.assertEqual(camp["mention_funnel"]["tier3"], 1)   # 仅品牌行内的产品命中
         self.assertLessEqual(camp["metrics"]["产品提及占比"], 1.0)
 
     def test_preserves_complete_brand_statistics_block(self):
@@ -369,7 +440,7 @@ class TestAggregate(unittest.TestCase):
         }
         self.st.write_artifact("brand_stats", brand_stats)
         self._seed_annotated([
-            {"relevance": "是", "sentiment": 1, "interaction_cnt": 1},
+            {"relevance": "是", "ai_sentiment": 1, "interaction_cnt": 1},
         ])
         brand = self._agg()["brand"]
         self.assertEqual(brand["source"], brand_stats)
@@ -379,8 +450,8 @@ class TestAggregate(unittest.TestCase):
         self.assertEqual(brand["trend"]["20260102"], 48)
 
 
-class TestCleanToAggregateFlow(unittest.TestCase):
-    """清洗→聚合串联：cleaned_data.rows 直接喂聚合（标注接真前的回退路径）。"""
+class TestAggregateFailClosed(unittest.TestCase):
+    """聚合只认标注产物：未标注不回退清洗 rows（原版 aggregate.py:68-74 直接退出）。"""
 
     def setUp(self):
         self.ws = tempfile.mkdtemp()
@@ -389,26 +460,17 @@ class TestCleanToAggregateFlow(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.ws, ignore_errors=True)
 
-    def test_flow_without_annotation(self):
-        bs = _brand_stats([
-            _row("a", "20260710", 1, 10, title="立白", keywords=["立白"]),
-            _row("b", "20260712", -1, 20, title="立白", keywords=["立白"]),
-        ])
-        self.st.write_artifact("brand_stats", bs)
-        with patch(
-            "handlers.excel_source.load_activity_rows",
-            return_value={
-                "rows": handlers._iter_ssjh_rows(bs),
-                "meta": bs["meta"],
-            },
-        ):
-            out = handlers.clean_campaign({"id": "n07"}, self.st, {})
-        # 直调 handler 不经引擎持久化，手动写回 Artifact（模拟引擎 commit）
-        self.st.write_artifact("cleaned_data", out["artifacts"]["cleaned_data"])
-        # 无 annotated_data → 回退清洗 rows；无 relevance → relevance_missing
-        bundle = handlers.aggregate({"id": "n12"}, self.st, {})["artifacts"]["stats_bundle"]
-        self.assertTrue(bundle["relevance_missing"])
-        self.assertEqual(bundle["campaigns"]["default"]["metrics"]["活动相关条数"], 2)
+    def test_no_annotation_raises(self):
+        self.st.write_artifact("denoised_data", {"rows": [
+            {"title": "立白", "sentiment": 1, "interaction_cnt": 1}]})
+        with self.assertRaises(ValueError):
+            handlers.aggregate({"id": "n12"}, self.st, {})
+
+    def test_zero_relevant_raises(self):
+        self.st.write_artifact("annotated_data", {"rows": [
+            {"relevance": "否", "ai_sentiment": 1, "interaction_cnt": 1}]})
+        with self.assertRaises(ValueError):
+            handlers.aggregate({"id": "n12"}, self.st, {})
 
 
 if __name__ == "__main__":

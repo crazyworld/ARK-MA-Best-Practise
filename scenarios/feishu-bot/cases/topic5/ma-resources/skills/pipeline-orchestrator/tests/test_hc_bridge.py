@@ -366,8 +366,13 @@ class TestBuildHumanOutputs(unittest.TestCase):
             "node": "n03_hc_plan",
             "expect": ["confirmed_plan"],
         }
+        # FIX-04：upload 模式保持原行为（缺文件拒绝）；默认 auto 模式交 n03b 自动采集。
+        self.st.params["activity_data_mode"] = "upload"
         with self.assertRaisesRegex(ValueError, "缺少活动明细文件引用"):
             hc_bridge.build_human_outputs(self.st, "pass", "")
+        self.st.params["activity_data_mode"] = "auto"
+        out = hc_bridge.build_human_outputs(self.st, "pass", "auto")
+        self.assertNotIn("source_file", out["confirmed_plan"])
 
     def test_g1_accepts_requirement_without_product_dimension(self):
         self.st.human = {
@@ -476,6 +481,45 @@ class TestEndToEndViaBridge(unittest.TestCase):
         self.assertTrue(ho["terminal_accepted"])
         self.assertTrue(ho["validated"])
         self.assertNotIn("demo_validated", ho)
+        return st
+
+    def test_post_handoff_fix_reenters_and_appends_amendment(self):
+        """FIX-38：交接后修正 → n19 → n17 → n20 → G4 → n23 → n24，handoff 追加 amendments。"""
+        st = self.test_full_run_passes_all_gates()
+        first = st.read_artifact("handoff")
+        with self.assertRaises(ValueError):
+            hc_bridge.post_handoff_fix_outputs(st, "")
+        fix = hc_bridge.post_handoff_fix_outputs(st, "2.1.1 平台结论里小红书占比写错，应为 45%")
+        self.assertIn("feishu_doc", fix["invalidate"])
+        with compliant_pipeline_services():
+            engine.reopen_completed(self.dag, st, entry=hc_bridge.POST_HANDOFF_ENTRY,
+                                    artifacts=fix["artifacts"], invalidate=fix["invalidate"],
+                                    reason="test")
+            steps = 0
+            visited = []
+            while st.status == "awaiting_human" and steps < 30:
+                visited.append(st.human["node"])
+                if st.human["node"] == "n17_validate":
+                    _write_qc(st)
+                outs = hc_bridge.build_human_outputs(st, "pass", "")
+                hc_bridge.clear_hc_pending(st.run_dir)
+                engine.resume(self.dag, st, human_outputs=outs or {})
+                steps += 1
+        self.assertEqual(st.status, "completed")
+        self.assertIn("n21_hc_user", visited)            # 修正后仍须用户终验
+        events = [e["event"] for e in st.events] if hasattr(st, "events") else []
+        if events:
+            self.assertIn("post_handoff_reopen", events)
+        for node in ("n19_fix", "n17_validate", "n20_delivery_draft", "n23_delivery_commit", "n24_handoff"):
+            self.assertEqual(st.node_rec(node)["status"], "completed", node)
+        # handoff 的 amendments 合并逻辑（测试桩替换了 handoff handler，这里直接验证合并函数）。
+        fix_art = fix["artifacts"]["post_handoff_fix"]
+        merged = handlers.merge_amendments(fix_art, 2, "1.1", True)
+        self.assertEqual(merged[0]["request"], "2.1.1 平台结论里小红书占比写错，应为 45%")
+        self.assertEqual(merged[0]["from_revision_id"], first.get("bound_revision_id"))
+        self.assertEqual(merged[0]["to_revision_id"], 2)
+        self.assertEqual(handlers.merge_amendments({"history": merged, "pending": None}, 3, "1.2", True),
+                         merged)
 
 
 if __name__ == "__main__":

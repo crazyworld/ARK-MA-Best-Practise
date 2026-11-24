@@ -48,19 +48,8 @@ METRIC_WHITELIST = policy.METRIC_WHITELIST
 AGGREGATE_SUM_PATTERNS = ("合计声量", "总声量", "声量总和", "累计声量", "声量合计")
 # 否定/免责标记：同一行出现时说明是“不相加”口径声明而非违规断言，跳过。
 AGGREGATE_DISCLAIMER_MARKERS = ("不相加", "不合计", "逐个", "分别统计", "不得相加", "勿")
-# 五章结构核心章节：用正则容忍“综合表现定位”等变体（report_chapters=five）；缺任一核心章记 P0。
-CORE_CHAPTER_PATTERNS = {
-    "品牌传播": re.compile(r"品牌传播"),
-    "活动传播": re.compile(r"活动传播"),
-    "综合定位": re.compile(r"综合.{0,4}定位"),
-    "经验总结": re.compile(r"经验总结"),
-}
-BRAND_SECTION_PATTERNS = {
-    "1.1传播概况": re.compile(r"1\.1.{0,12}传播概况"),
-    "1.2口碑分析": re.compile(r"1\.2.{0,12}口碑分析"),
-    "1.3内容分析": re.compile(r"1\.3.{0,12}内容分析"),
-    "1.4热门内容": re.compile(r"1\.4.{0,12}热门内容"),
-}
+# 章节结构（FIX-42）：四章 + 品牌 1.1~1.4 + 逐活动 2.N.1~2.N.5 + 2.{N+1} + 3.1~3.3，
+# 全部来自 policy.REPORT_*，本文件不再写死标题。
 MIN_BODY_CHARS = 200  # 内容层过短（降级空壳）记 P1。
 RAW_JSON_PATTERN = re.compile(r"[\{\[]\s*\"[^\"\n]+\"\s*:")
 INTERNAL_FIELD_NAMES = (
@@ -149,6 +138,14 @@ def _tables(md):
     return result
 
 
+UGC_QUOTE_CHECK = 40
+OPINION_QUOTE_CHECK = 40
+
+
+def _quote_head(row, limit):
+    return re.sub(r"\s+", " ", str(row.get("content") or row.get("title") or "")).strip()[:limit]
+
+
 def _module_checks(md, requirement, stats, charts):
     issues = []
     def fail(key, title, evidence, locus):
@@ -158,13 +155,19 @@ def _module_checks(md, requirement, stats, charts):
     next_heading = re.search(r"(?m)^#{2,4}\s+", intro)
     intro = intro[:next_heading.start()] if next_heading else intro
     if requirement:
-        for term in ("分析对象", "关键词", "过滤词", "品牌大盘", "活动明细"):
+        # FIX-43：KS §零 定稿版字段（数据平台/时间周期/分析对象/关键词/过滤词）。
+        for term in ("数据平台", "时间周期", "分析对象", "关键词", "过滤词"):
             if term not in intro:
-                fail("description-" + term, "数据说明缺必要字段", term, "00")
+                fail("description-" + term, "数据说明缺必要字段", term, "数据说明")
+        for term in policy.DESCRIPTION_FORBIDDEN_TERMS:
+            if term in intro:
+                issues.append(_issue(f"P2-description-{term}", "P2",
+                                     "数据说明区出现方法论/版本/口径说明", term, "数据说明",
+                                     fix_required=False))
         for key in ("brand_query", "activity_query", "product_query", "brand_filter", "activity_filter"):
             value = str(requirement.get(key) or "")
             if value and value.replace("|", r"\|") not in intro and value not in intro:
-                fail("query-" + key, "数据说明未披露实际查询配置", key, "00")
+                fail("query-" + key, "数据说明未披露实际查询配置", key, "数据说明")
     chart_ids = {item.get("chart_id") for item in charts.get("charts") or []}
     objects = [("brand", stats.get("brand") or {}, "1.4")]
     objects += [(cid, bundle, f"2.{index}.5") for index, (cid, bundle) in enumerate((stats.get("campaigns") or {}).items(), 1)]
@@ -181,8 +184,8 @@ def _module_checks(md, requirement, stats, charts):
                 fail("cloud-brand-" + platform, "缺品牌大盘词云", platform, "1.3")
         hot = _section(md, hot_prefix)
         tables = _tables(hot)
-        for kind, fields in (("pgc", ["排名", "标题", "内容≤100字", "内容类型", "站点名称", "作者", "URL", "总互动量"]),
-                             ("ugc", ["排名", "内容≤100字", "站点名称", "URL", "总互动量"])):
+        for kind, fields in (("pgc", list(policy.HOT_PGC_COLUMNS)),
+                             ("ugc", list(policy.HOT_UGC_COLUMNS))):
             rows = (bundle.get("top_content") or {}).get(kind) or []
             if not rows:
                 continue
@@ -203,13 +206,14 @@ def _module_checks(md, requirement, stats, charts):
                     fail(f"opinion-body-{cid}-{direction}", "活动口碑缺观点分析", name, f"2.{index}.3")
                 for topic in analysis.get("top5") or []:
                     if topic["label"] not in opinion or not all(
-                        str(row.get("content") or row.get("title") or "")[:100] in opinion
+                        _quote_head(row, OPINION_QUOTE_CHECK) in re.sub(r"\s+", " ", opinion)
                         for row in topic.get("representatives") or []
                     ):
                         fail(f"opinion-evidence-{cid}-{direction}-{topic['label']}", "观点未展示代表原文", topic["label"], f"2.{index}.3")
             ugc = _section(md, f"2.{index}.4")
             for category in (bundle.get("ugc_analysis") or {}).get("categories") or []:
-                if category["label"] not in ugc or not all(str(row.get("content") or row.get("title") or "")[:100] in ugc
+                # UGC 代表原文正文只保留 40-60 字（KS 2.N.4②），按前 40 字（去空白）核对。
+                if category["label"] not in ugc or not all(_quote_head(row, UGC_QUOTE_CHECK) in re.sub(r"\s+", " ", ugc)
                                                          for row in category.get("representatives") or []):
                     fail(f"ugc-evidence-{cid}-{category['label']}", "UGC类别缺代表内容", category["label"], f"2.{index}.4")
     for table in _tables(md):
@@ -255,6 +259,318 @@ def _category_name_issues(campaigns: dict) -> list[dict]:
                 "参与方式应为动作或内容形式，情感由独立字段承载",
                 locus="stats_bundle",
             ))
+    return issues
+
+
+# 检查清单 3.10 类别 MECE（P1）的确定性部分；包含/交叉等语义判断交 Agent 段。
+_PAIR_SUFFIXES = (("好", "差"), ("高", "低"), ("多", "少"), ("快", "慢"))
+_DIMENSION_WORDS = {"平台": ("小红书", "抖音", "微博", "B站", "快手", "知乎", "视频号"),
+                    "人群": ("学生", "宝妈", "白领", "男生", "女生", "粉丝群体")}
+
+
+def _category_mece_issues(campaigns: dict) -> list[dict]:
+    issues: list[dict] = []
+    for cid, bundle in (campaigns or {}).items():
+        by_kind: dict[str, list[str]] = {}
+        for kind, name in _category_labels(bundle):
+            by_kind.setdefault(kind, [])
+            if name not in by_kind[kind]:
+                by_kind[kind].append(name)
+        for kind, names in by_kind.items():
+            for good, bad in _PAIR_SUFFIXES:
+                stems = {n[:-1] for n in names if n.endswith(good)} & {n[:-1] for n in names if n.endswith(bad)}
+                for stem in sorted(stems):
+                    issues.append(_issue(f"P1-category-mece-pair-{cid}-{stem}", "P1", "类别 MECE：成对倾向类别（3.10）",
+                                         f"{cid}: {kind}类别「{stem}{good}」与「{stem}{bad}」把情感拆成两类",
+                                         locus="stats_bundle", fix_required=False))
+            for dimension, words in _DIMENSION_WORDS.items():
+                hits = [n for n in names if any(w in n for w in words)]
+                if hits:
+                    issues.append(_issue(f"P1-category-mece-dim-{cid}-{kind}-{dimension}", "P1",
+                                         "类别 MECE：混入其他维度（3.10）",
+                                         f"{cid}: {kind}类别 {hits} 混入{dimension}维度",
+                                         locus="stats_bundle", fix_required=False))
+    return issues
+
+
+def _heading_present(md: str, number: str, title: str) -> bool:
+    """标题行（# 或加粗编号）同时含编号与标题；容忍编号与标题间少量字符。"""
+    pattern = rf"(?m)^(?:#{{1,6}}\s+|\*\*){re.escape(number)}(?![\d.]).{{0,16}}{re.escape(title)}"
+    return bool(re.search(pattern, md))
+
+
+def _structure_issues(md: str, campaign_ids: list[str]) -> list[dict]:
+    """检查清单 1.5 / 5.7 / 5.8 / 5.12：固定四章结构（KS_Report_Template §一）。"""
+    issues: list[dict] = []
+    for chapter in policy.REPORT_CHAPTERS:
+        if not re.search(rf"(?m)^#{{1,3}}\s+{re.escape(chapter)}", md):
+            issues.append(_issue(f"P0-missing-chapter-{chapter}", "P0",
+                                 f"缺固定章节「{chapter}」（5.7）",
+                                 "报告固定四章：一品牌/二活动/三经验总结/四总结与建议",
+                                 locus="structure"))
+    for retired in policy.RETIRED_SECTION_TITLES:
+        if retired in md:
+            issues.append(_issue(f"P0-retired-section-{retired}", "P0",
+                                 f"使用已废弃的章节「{retired}」（1.5/5.7）",
+                                 "提及漏斗节标题为「提及漏斗分析」；拉升效果并入二章末 2.{N+1}",
+                                 locus="structure"))
+    for number, title in policy.BRAND_SECTIONS:
+        if not _heading_present(md, number, title):
+            issues.append(_issue(f"P0-missing-brand-section-{number}{title}", "P0",
+                                 f"缺品牌子章节「{number} {title}」（5.7）",
+                                 "品牌章固定 1.1~1.4", locus="structure"))
+    if not campaign_ids:
+        campaign_ids = [m.group(2).strip() for m in re.finditer(
+            r"(?m)^#{2,5}\s+2\.(\d+)\s+(?:活动\s+)?(.+?)\s*$", md)
+            if policy.LIFT_SECTION_TITLE not in m.group(2)]
+    if not campaign_ids:
+        issues.append(_issue("P0-missing-campaign-sections", "P0", "缺逐活动 2.N 分节（5.7）",
+                             "未检出任何「2.N <活动名>」标题", locus="structure"))
+    for index, campaign_id in enumerate(campaign_ids, 1):
+        if campaign_id and campaign_id not in md:
+            issues.append(_issue(f"P0-missing-campaign-{index}", "P0",
+                                 f"缺活动分节「{campaign_id}」（5.7）",
+                                 f"正文未检出活动名称「{campaign_id}」", locus="structure"))
+        for suffix, title in policy.CAMPAIGN_SECTIONS:
+            number = f"2.{index}.{suffix}"
+            if not _heading_present(md, number, title):
+                issues.append(_issue(f"P0-missing-campaign-section-{index}-{suffix}", "P0",
+                                     f"缺活动子章节「{number} {title}」（5.7）",
+                                     f"活动「{campaign_id}」缺固定结构", locus="structure"))
+    lift = policy.lift_prefix(len(campaign_ids))
+    if not _heading_present(md, lift, policy.LIFT_SECTION_TITLE):
+        issues.append(_issue("P0-missing-lift-section", "P0",
+                             f"缺「{lift} {policy.LIFT_SECTION_TITLE}」（5.8）",
+                             "二章最后一节，编号 = 活动个数 + 1；基准不可用也须保留并披露",
+                             locus=lift))
+    for number, title in policy.SUMMARY_SECTIONS:
+        if not _heading_present(md, number, title):
+            issues.append(_issue(f"P0-missing-summary-{number}", "P0",
+                                 f"经验总结缺少「{number} {title}」（5.7）",
+                                 "三章固定 3.1 成功经验 / 3.2 待改进问题 / 3.3 后续行动计划",
+                                 locus=number))
+    issues.extend(_experience_issues(_chapter_body(md, policy.REPORT_CHAPTERS[2])))
+    issues.extend(_callout_issues(md))
+    final = _chapter_body(md, policy.REPORT_CHAPTERS[3])
+    if "下次活动建议" in final:
+        issues.append(_issue("P2-summary-duplicates-action-plan", "P2",
+                             "「四、总结与建议」仍设下次活动建议（5.12）",
+                             "行动建议统一写在 3.3，四章只保留核心成果表与待改善方向",
+                             locus="四"))
+    return issues
+
+
+_SENTENCE_SPLIT = re.compile(r"(?<=[。！？!?])")
+
+
+def _sentences(text: str) -> list[str]:
+    return [part.strip() for part in _SENTENCE_SPLIT.split(text) if part.strip()]
+
+
+def _callout_blocks(md: str, mark: str) -> list[tuple[int, str]]:
+    """(行号, 正文)；正文为标记行之后连续的 `>` 行。"""
+    lines, blocks = md.splitlines(), []
+    for index, line in enumerate(lines):
+        if line.strip().startswith(mark):
+            body = [line.strip()[len(mark):].strip()]
+            for follow in lines[index + 1:]:
+                if not follow.startswith(">"):
+                    break
+                body.append(follow.lstrip("> ").strip())
+            blocks.append((index + 1, "".join(body)))
+    return blocks
+
+
+def _callout_style_issues(text: str, key: str, severity: str) -> list[dict]:
+    issues = []
+    if re.match(r"\s*[\d+\-]", text):
+        issues.append(_issue(f"{severity}-callout-number-first-{key}", severity,
+                             "Callout 以数字开头", text[:60], key, fix_required=False))
+    for group, label in ((policy.CALLOUT_ADVICE_TERMS, "建议"), (policy.CALLOUT_DEGREE_TERMS, "程度副词"),
+                         (policy.CALLOUT_METAPHOR_TERMS, "比喻"), (policy.CALLOUT_CAUSAL_TERMS, "因果推断")):
+        hits = [term for term in group if term in text]
+        if hits:
+            issues.append(_issue(f"{severity}-callout-{label}-{key}", severity,
+                                 f"Callout 含{label}", "、".join(hits), key, fix_required=False))
+    return issues
+
+
+def _callout_issues(md: str) -> list[dict]:
+    """检查清单 5.5 / 5.14 / 5.15。只检查显式标记的 Callout。"""
+    issues: list[dict] = []
+    insights = _callout_blocks(md, policy.INSIGHT_MARK)
+    if insights:
+        line_no, text = insights[0]
+        first_chapter = re.search(rf"(?m)^#{{1,2}}\s+{re.escape(policy.REPORT_CHAPTERS[0])}", md)
+        if len(insights) > 1 or (first_chapter and md.find(policy.INSIGHT_MARK) > first_chapter.start()):
+            issues.append(_issue("P0-insight-callout-position", "P0", "整体洞察 Callout 不在最前或不唯一（5.5）",
+                                 f"L{line_no}", "整体洞察"))
+        if len(_sentences(text)) != 3:
+            issues.append(_issue("P1-insight-callout-sentences", "P1",
+                                 "整体洞察不是固定三句（5.14）",
+                                 f"{len(_sentences(text))} 句", "整体洞察", fix_required=False))
+        issues += _callout_style_issues(text, "insight", "P1")
+    for line_no, text in _callout_blocks(md, policy.TIP_MARK):
+        key = f"L{line_no}"
+        if len(_sentences(text)) > 1:
+            issues.append(_issue(f"P2-tip-callout-sentences-{key}", "P2",
+                                 "各节 Callout 超过一句（5.15）", text[:60], key, fix_required=False))
+        issues += _callout_style_issues(text, key, "P2")
+    for chapter in policy.REPORT_CHAPTERS[2:]:
+        if policy.TIP_MARK in _chapter_body(md, chapter) or policy.INSIGHT_MARK in _chapter_body(md, chapter):
+            issues.append(_issue(f"P2-summary-callout-{chapter}", "P2", "三、四章出现 callout（5.15）",
+                                 chapter, chapter, fix_required=False))
+    return issues
+
+
+# 经验总结质量红线（KS_Content_Analysis_Prompt 经验总结合成 Prompt）。
+VAGUE_ACTION_PATTERN = re.compile(r"持续优化|持续加强|进一步加强|加强\S{0,6}(?:建设|管理|力度)")
+SOURCE_REF_PATTERN = re.compile(r"\d\.\d|\d\.\{?N")
+
+
+def _experience_issues(body: str) -> list[dict]:
+    """三章：经验/问题缺来源章节 → P1；行动计划空泛表述 → P2。"""
+    issues: list[dict] = []
+    for match in re.finditer(r"(?ms)^\*\*((?:经验|问题)\s*\d+[^*]*)\*\*(.*?)(?=^\*\*|^#|\Z)", body):
+        if not SOURCE_REF_PATTERN.search(match.group(2)):
+            issues.append(_issue(f"P1-experience-source-{match.group(1)[:6]}", "P1",
+                                 "经验/问题未标注来源章节和数值", match.group(1).strip(), "三",
+                                 fix_required=False))
+    for line in body.splitlines():
+        hit = VAGUE_ACTION_PATTERN.search(line)
+        if hit:
+            issues.append(_issue(f"P2-vague-action-{hit.group(0)}", "P2",
+                                 "行动计划使用空泛表述", line.strip()[:80], "三",
+                                 fix_required=False))
+    return issues
+
+
+def _chapter_body(md: str, chapter: str) -> str:
+    match = re.search(rf"(?m)^#{{1,3}}\s+{re.escape(chapter)}[^\n]*", md)
+    if not match:
+        return ""
+    tail = md[match.end():]
+    end = re.search(r"(?m)^#{1,2}\s+[一二三四五六]、", tail)
+    return tail[:end.start()] if end else tail
+
+
+def _consistency_issues(stats: dict) -> list[dict]:
+    """检查清单 2.11 同一活动各表总数一致；2.12 讨论对象分组计数加总回全量。
+
+    数据字段缺失时不判（FIX-34：数据未就绪不得误判 P0）。
+    """
+    issues: list[dict] = []
+    for index, (cid, bundle) in enumerate(((stats or {}).get("campaigns") or {}).items(), 1):
+        total = ((bundle or {}).get("metrics") or {}).get("活动相关条数")
+        if not isinstance(total, int):
+            continue
+        sums = {}
+        sentiment = (bundle.get("sentiment_dist") or {})
+        if sentiment:
+            sums["情感分布合计"] = sum(v for v in sentiment.values() if isinstance(v, int))
+        platform = bundle.get("platform_dist") or {}
+        if platform:
+            sums["平台分布合计"] = sum(v for v in platform.values() if isinstance(v, int))
+        content = bundle.get("content_type_dist") or {}
+        if content:
+            sums["内容类型合计"] = sum(v for v in content.values() if isinstance(v, int))
+        for name, value in sums.items():
+            if name == "情感分布合计":
+                missing = int(bundle.get("sentiment_missing") or 0)
+                value += missing
+            if value != total:
+                issues.append(_issue(f"P0-total-mismatch-{index}-{name}", "P0",
+                                     f"同一活动总数不一致（2.11）：{name} {value} ≠ 活动相关 {total}",
+                                     cid, f"2.{index}", artifact="stats_bundle",
+                                     suggested_fix="核对聚合口径，所有分布须以活动相关内容为分母"))
+        groups = bundle.get("dimension_counts")
+        if isinstance(groups, dict) and groups:
+            grouped = sum(v for v in groups.values() if isinstance(v, int))
+            if grouped != total:
+                issues.append(_issue(f"P0-dimension-sum-{index}", "P0",
+                                     f"讨论对象分组计数加总 {grouped} ≠ 活动相关 {total}（2.12）",
+                                     cid, f"2.{index}.3", artifact="stats_bundle",
+                                     suggested_fix="三组讨论对象须互斥且覆盖全部活动相关内容"))
+    return issues
+
+
+def _content_length_issues(md: str) -> list[dict]:
+    """检查清单 5.13：热门内容表「内容」列不超过 50 字（含省略号）。"""
+    issues: list[dict] = []
+    for table in _tables(md):
+        header = table[0]
+        if "内容" not in header or "总互动量" not in header:
+            continue
+        col = header.index("内容")
+        for row in table[1:]:
+            if col < len(row) and len(row[col].strip().rstrip("…")) > policy.HOT_EXCERPT_CHARS:
+                issues.append(_issue("P1-hot-content-length", "P1", "热门内容列超过 50 字（5.13）",
+                                     row[col][:60], "热门内容", fix_required=False))
+                break
+    return issues
+
+
+def _ugc_redundant_table_issues(md: str) -> list[dict]:
+    """检查清单 5.16（原清单重复编号的 5.12）：② UGC 参与方式分布饼图后不得再跟同数据表。"""
+    match = re.search(r"(?m)^.*② *UGC 参与方式分布.*$", md)
+    if not match:
+        return []
+    following = re.search(r"(?m)^(?:#{1,6}\s|\*\*③)", md[match.end():])
+    block = md[match.end(): match.end() + following.start()] if following else md[match.end():]
+    if re.search(r"(?m)^\|.*(占比|条数).*\|\s*$", block):
+        return [_issue("P1-ugc-redundant-table", "P1", "UGC 参与方式饼图后有冗余数据表（5.16）",
+                       "② UGC 参与方式分布 小节内出现数据表；饼图已含全部类别与占比",
+                       "2.N.4②", fix_required=False)]
+    return []
+
+
+def _funnel_issues(md: str, stats: dict, has_product_query: bool) -> list[dict]:
+    """检查清单 4.3 三级漏斗逻辑（FIX-18）。按 stats 的漏斗方法/退化状态确定性判定。
+
+    - main_discussion：三组互斥，写成递进漏斗（出现 Tier 层级）→ P0；
+    - 退化（Tier2/Tier1 ≥95%）却仍呈现 Tier2 / 品牌提及率 → P1；
+    - 未退化且有 Tier3：缺「品牌内容中的产品提及占比 …（Tier3 N / Tier2 M）」分母写法 → P1；
+    - 漏斗记录了产品词、未退化却缺产品层 → P0（以统计实际使用的产品词为准）。
+    无漏斗统计（旧产物）时回退到全文检查「有产品词但缺递进漏斗」。
+    """
+    issues: list[dict] = []
+    campaigns = (stats or {}).get("campaigns") or {}
+    funnels = [(index, cid, (bundle or {}).get("mention_funnel"))
+               for index, (cid, bundle) in enumerate(campaigns.items(), 1)]
+    funnels = [(i, cid, f) for i, cid, f in funnels if isinstance(f, dict) and f.get("method")]
+    if not funnels:
+        if has_product_query and not re.search(
+                r"三级.{0,8}漏斗|Tier\s*1.{0,80}Tier\s*2.{0,80}Tier\s*3", md, re.S):
+            issues.append(_issue("P0-product-funnel", "P0", "有产品关键词但缺递进提及漏斗",
+                                 "要求至少呈现活动相关→品牌提及→产品提及的递进关系",
+                                 locus="2.N.2"))
+        return issues
+    for index, cid, funnel in funnels:
+        body = _section(md, f"2.{index}.2")
+        locus = f"2.{index}.2"
+        if funnel["method"] == "main_discussion":
+            if re.search(r"Tier\s*[23]", body):
+                issues.append(_issue(f"P0-funnel-main-discussion-{cid}", "P0",
+                                     "主讨论对象方法写成递进漏斗（4.3）",
+                                     f"{cid}: 三个主对象组互斥，不构成 Tier 递进", locus=locus))
+            continue
+        if funnel.get("degraded"):
+            if re.search(r"Tier\s*2|品牌提及率", body):
+                issues.append(_issue(f"P1-funnel-degraded-{cid}", "P1",
+                                     "品牌提及层已退化仍作为主指标呈现（4.3）",
+                                     f"{cid}: Tier2/Tier1={funnel.get('tier2_ratio')} ≥ 95%",
+                                     locus=locus))
+            continue
+        if funnel.get("tier3") is not None:
+            if not re.search(r"品牌内容中的产品提及占比.{0,20}（Tier3\s*\d+\s*/\s*Tier2\s*\d+）", body):
+                issues.append(_issue(f"P1-funnel-denominator-{cid}", "P1",
+                                     "漏斗表产品提及占比未写明分母（4.3）",
+                                     "应写「品牌内容中的产品提及占比 X%（Tier3 N / Tier2 M）」"
+                                     "并另列占活动总量比例", locus=locus))
+        elif funnel.get("product_keywords") and funnel.get("tier2") is not None:
+            issues.append(_issue(f"P0-funnel-missing-product-{cid}", "P0",
+                                 "有产品词、未退化却缺产品层（4.3）",
+                                 f"{cid}: 漏斗统计缺 Tier3", locus=locus))
     return issues
 
 
@@ -362,7 +678,7 @@ def scan_markdown(
                 f"P0-privacy-ugc-{ln_no}", "P0", "UGC 个人账号未匿名",
                 f"L{ln_no}: {line.strip()}", locus=f"L{ln_no}",
             ))
-        if re.search(r"确定性模板生成|结构[：:]\s*five|报告（v\d", line):
+        if re.search(r"确定性模板生成|结构[：:]\s*(?:four|five)|报告（v\d", line):
             issues.append(_issue(
                 f"P0-internal-template-{ln_no}", "P0", "报告暴露内部模板或版本",
                 f"L{ln_no}: {line.strip()}", locus=f"L{ln_no}",
@@ -373,57 +689,7 @@ def scan_markdown(
     if not body:
         issues.append(_issue("P0-empty", "P0", "报告内容为空", "markdown 为空字符串"))
     else:
-        for name, pat in CORE_CHAPTER_PATTERNS.items():
-            if not pat.search(md):
-                issues.append(_issue(
-                    f"P0-missing-chapter-{name}", "P0", f"缺核心章节「{name}」",
-                    f"未在标题或正文中检出「{name}」（容忍变体）", locus="structure"))
-        for name, pat in BRAND_SECTION_PATTERNS.items():
-            if not pat.search(md):
-                issues.append(_issue(
-                    f"P0-missing-brand-section-{name}", "P0",
-                    f"缺品牌子章节「{name}」",
-                    f"未检出完整品牌 1.1-1.4 结构中的「{name}」",
-                    locus="structure",
-                ))
-        campaign_ids = list(expected_campaigns or [])
-        if not campaign_ids:
-            campaign_ids = [
-                match.group(2).strip()
-                for match in re.finditer(
-                    r"^#{2,5}\s+2\.(\d+)\s+活动\s+(.+?)\s*$", md, flags=re.M
-                )
-            ]
-        if not campaign_ids:
-            issues.append(_issue(
-                "P0-missing-campaign-sections", "P0",
-                "缺逐活动 2.N 分节",
-                "未检出任何「2.N 活动 <活动名>」标题",
-                locus="structure",
-            ))
-        for index, campaign_id in enumerate(campaign_ids, 1):
-            if campaign_id and campaign_id not in md:
-                issues.append(_issue(
-                    f"P0-missing-campaign-{index}", "P0",
-                    f"缺活动分节「{campaign_id}」",
-                    f"正文未检出活动名称「{campaign_id}」",
-                    locus="structure",
-                ))
-            for suffix, title in (
-                ("1", "传播概况"), ("2", "活动声量渗透分析"),
-                ("3", "口碑分析"), ("4", "内容分析"), ("5", "热门内容"),
-            ):
-                pattern = re.compile(
-                    rf"2\.{index}\.{suffix}.{{0,16}}{re.escape(title)}"
-                )
-                if not pattern.search(md):
-                    issues.append(_issue(
-                        f"P0-missing-campaign-section-{index}-{suffix}",
-                        "P0",
-                        f"缺活动子章节「2.{index}.{suffix} {title}」",
-                        f"活动「{campaign_id}」缺固定结构",
-                        locus="structure",
-                    ))
+        issues.extend(_structure_issues(md, list(expected_campaigns or [])))
 
     # 6) 需求一致性与当前项目适配规则。
     requirement = requirement or {}
@@ -436,39 +702,15 @@ def scan_markdown(
             "P0-scope-pgc-ugc", "P0", "报告超出 content_scope 输出 PGC/UGC 对比",
             f"content_scope={content_scope}", locus="requirement",
         ))
-    if requirement.get("product_query"):
-        has_funnel = bool(
-            re.search(r"三级.{0,8}漏斗|Tier\s*1.{0,80}Tier\s*2.{0,80}Tier\s*3", md, re.S)
-            or (
-                "品牌提及率" in md
-                and "产品提及占比" in md
-                and re.search(r"活动相关(?:内容|条数|声量)", md)
-            )
-        )
-        if not has_funnel:
-            issues.append(_issue(
-                "P0-product-funnel", "P0", "有产品关键词但缺递进提及漏斗",
-                "要求至少呈现活动相关→品牌提及→产品提及的递进关系",
-                locus="2.N.2",
-            ))
+    issues.extend(_funnel_issues(md, stats, bool(requirement.get("product_query"))))
+    issues.extend(_consistency_issues(stats))
+    issues.extend(_content_length_issues(md))
+    issues.extend(_ugc_redundant_table_issues(md))
     if re.search(r"竞品\s*(?:SOV|分析|声量)", md, re.I):
         issues.append(_issue(
             "P0-competitor-retired", "P0", "报告包含已下线的竞品分析",
-            "当前 Topic5 权威口径已下线 competitor_sov", locus="3.2",
+            "当前 Topic5 权威口径已下线 competitor_sov", locus="竞品",
         ))
-    if requirement or stats:
-        if not re.search(r"3\.1.{0,20}(?:基准|活动期)", md):
-            issues.append(_issue(
-                "P0-missing-baseline-section", "P0", "缺少 3.1 活动期与基准期对比",
-                "基准数据不可用时也必须保留 3.1 并披露 DataIssue", locus="3.1",
-            ))
-        for title in ("成功经验", "待改进问题", "行动计划"):
-            if title not in md:
-                issues.append(_issue(
-                    f"P0-missing-summary-{title}", "P0",
-                    f"经验总结缺少「{title}」",
-                    "四章必须包含成功经验、待改进问题和行动计划", locus="4",
-                ))
     if "整体洞察" in md and "品牌传播" in md:
         if md.find("整体洞察") > md.find("品牌传播"):
             issues.append(_issue(
@@ -482,6 +724,7 @@ def scan_markdown(
     # 7a) 检查清单 3.9（P0）：观点 / UGC 参与方式的类别名带情感或评价倾向。
     #     只判断类别名本身；代表原文里的用户措辞不在此列（清单原文）。
     issues.extend(_category_name_issues(campaigns))
+    issues.extend(_category_mece_issues(campaigns))
     for cid, bundle in (campaigns or {}).items():
         metrics = (bundle or {}).get("metrics") or {}
         product_share = metrics.get("产品提及占比")

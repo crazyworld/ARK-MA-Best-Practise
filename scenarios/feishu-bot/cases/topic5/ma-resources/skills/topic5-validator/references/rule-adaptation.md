@@ -1,6 +1,6 @@
 # Topic5 Validator 规则适配表
 
-版本：`topic5-validator-qc-v1.8`
+版本：`topic5-validator-qc-v1.9`（来源：客户检查清单 v1.22）
 来源：客户 `Topic5_营销活动复盘检查清单.md` v1.5。  
 判定层：`deterministic`=脚本全量检查；`semantic`=独立 Validator Agent 全文语义检查；
 `post_publish`=飞书文档创建后检查；`human_authority`=只能由用户确认。
@@ -14,7 +14,7 @@
 | 1.2 | applicable | deterministic+semantic | 有产品关键词时必须呈现品牌→产品的递进提及漏斗 |
 | 1.3 | applicable | deterministic | 活动章节数、名称与冻结需求一致 |
 | 1.4 | not_applicable | deterministic | 竞品 SOV 已下线；报告出现竞品分析反而阻断 |
-| 1.5 | adapted | deterministic | 3.1 基准期对比为标配；基准数据不可用时必须披露 DataIssue |
+| 1.5 | adapted | deterministic | 2.{N+1} 活动拉升效果为标配（二章末节）；基准数据不可用时保留标题并披露 DataIssue |
 | 1.8 | adapted | deterministic | 单平台时平台饼图可省略并改文字，不判缺图 |
 | 2.1 | applicable | semantic | 品牌情感只回指受控统计源 `sentiment_dist` |
 | 2.2 | applicable | semantic | 活动情感只回指 AI 标注聚合 |
@@ -26,7 +26,7 @@
 | 2.8 | applicable | semantic | 峰值归因必须有帖子聚类证据 |
 | 3.1 | applicable | semantic | 议题解读只做归纳，不逐条泄漏原帖 |
 | 3.1b | applicable | semantic | 广告、地理定位等噪音词不得作为正式议题 |
-| 3.1c | applicable | deterministic+semantic | 关键词行内列示；解读为一段连贯叙事，不输出内部结构 |
+| 3.1c | adapted | deterministic+semantic | 关键词行内列示；议题解读通常 1–3 句，不因不足 80 字或只有 1 句直接判错，重点检查发现与证据；不输出内部结构（以质检协议现行版为准，旧「80–120 字」不再执行） |
 | 3.2 | applicable | semantic | 主观评价必须有明确数据证据 |
 | 3.3 | applicable | semantic | 有负面样本时必须正视并给有边界的建议 |
 | 3.4 | applicable | deterministic+semantic | 基准期对比只表述相关变化，不写活动导致增长 |
@@ -47,11 +47,15 @@
 | 5.5 | applicable | deterministic | 整体洞察位于标题之后、首章之前 |
 | 5.6 | applicable | post_publish+human_authority | 洞察使用飞书 callout，不用 blockquote 冒充 |
 | 5.7 | applicable | deterministic | 五个固定章节和每活动 2.N.1~2.N.5 齐全 |
-| 5.8 | adapted | deterministic | 3.1 基准期对比必做或披露不可用；3.2 竞品章节不得出现 |
+| 5.8 | adapted | deterministic | 2.{N+1} 活动拉升效果必做或披露不可用；竞品章节不得出现 |
 | 5.9 | applicable | deterministic+semantic | 经验总结含成功经验、待改进问题、行动计划 |
 | 5.10 | applicable | deterministic | 上游有 KOL/UGC 数据时输出对应模块 |
 | 5.11 | applicable | deterministic | 2.N.4 各子模块顺序为分析文字→图→表 |
-| 5.12 | applicable | deterministic | UGC 分布饼图后不重复输出同数据表 |
+| 5.12 | applicable | deterministic | 「四、总结与建议」不重复设下次活动建议（与 3.3 重复） |
+| 5.13 | applicable | deterministic | 热门内容表「内容」列不超过 50 字 |
+| 5.14 | applicable | deterministic+semantic | 整体洞察为固定三句（判断→数字证据→意味） |
+| 5.15 | applicable | deterministic+semantic | 各节 callout 一句、能看出好坏、不放建议 |
+| 5.16 | applicable | deterministic | UGC 分布饼图后不重复输出同数据表（原清单重复编号 5.12，此处改为唯一编号；历史日志保留原号） |
 | 6.1 | applicable | deterministic+visual | 图表配色遵守品牌/情感/内容类型规范；单平台例外 |
 | 6.2 | adapted | deterministic+post_publish | 内容层允许受控本地 PNG；飞书交付必须转为 media，不得残留本地路径 |
 | 6.3 | applicable | deterministic | 不得有 TODO、待补充、空白章节或占位符 |

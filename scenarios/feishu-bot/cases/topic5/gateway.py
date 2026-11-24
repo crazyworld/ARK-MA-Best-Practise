@@ -46,6 +46,8 @@ except ImportError:  # pragma: no cover - standalone compatibility
 
 log = logging.getLogger("arkagent.case.topic5")
 CONTINUE_COMMAND_RE = re.compile(r"^/(?:continue|resume)(?:\s+(.*))?$", re.IGNORECASE)
+# FIX-38：交接后修正（话题内，任务已完成时）。
+FIX_COMMAND_RE = re.compile(r"^/fix(?:\s+(.*))?$", re.IGNORECASE | re.DOTALL)
 
 _USAGE = (
     "当前 Bot 启用 topic5 复盘报告场景。发送「复盘报告 demo」"
@@ -178,6 +180,22 @@ class Topic5Gateway:
                 self._store.complete_event(message.event_id, "completed")
                 return
 
+            fix_match = FIX_COMMAND_RE.fullmatch(text)
+            if fix_match:
+                try:
+                    fixed = await self._runner.post_handoff_fix(
+                        chat_id=message.chat_id, thread_id=message.thread_id,
+                        request=fix_match.group(1) or "")
+                    reply = ("[/fix] 当前话题没有已交付的报告；/fix 只用于已完成任务的修正。"
+                             if fixed is None else
+                             f"[/fix] 已收到修正请求，将在原飞书文档上修改（链接不变），"
+                             f"修改后重新质检并请你终验。job_id={fixed.job_id}")
+                except Topic5RunnerError as error:
+                    reply = f"[/fix] {error}"
+                await self._reply(message.chat_id, reply)
+                self._store.complete_event(message.event_id, "completed")
+                return
+
             continue_match = CONTINUE_COMMAND_RE.fullmatch(text)
             if continue_match:
                 continuation_message = (continue_match.group(1) or "").strip() or "继续"
@@ -207,6 +225,14 @@ class Topic5Gateway:
                         message.chat_id,
                         f"[/continue] {message_hint}已重新订阅进度 job_id={resumed.job_id}。若该 Session 已在方舟侧终止,稍后进度卡片会回落为失败。",
                     )
+                self._store.complete_event(message.event_id, "completed")
+                return
+
+            if await self._hitl.restore_archived(
+                chat_id=message.chat_id,
+                thread_id=message.thread_id,
+                user_open_id=message.user_open_id,
+            ):
                 self._store.complete_event(message.event_id, "completed")
                 return
 

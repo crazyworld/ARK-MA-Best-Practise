@@ -65,7 +65,7 @@ python3 /mnt/skills/topic5-validator/scripts/scan_report.py \
   "validator": "topic5-validator",
   "validation_id": "validation_xxx",
   "subject": {"artifact_id": "report_md@vN", "key": "report_md", "version": 1, "sha256": "..."},
-  "rules_version": "topic5-validator-qc-v1.8",
+  "rules_version": "topic5-validator-qc-v1.9",
   "validator_version": "<mounted skill version>",
   "execution_source": "<independent MA session/execution id>",
   "execution_ref": {"task_id": "...", "run_id": "...", "attempt_id": "..."},
@@ -81,12 +81,41 @@ python3 /mnt/skills/topic5-validator/scripts/scan_report.py \
 - `n18_qc_gate` 读 `has_p0`：有 P0 → `has_p0_retry`（n19_fix 修复后版本递增复检）；
   超 `qc_max_rounds`（默认 3）→ `has_p0_maxed`（人工升级 HC7）；无 P0 → `no_p0`（放行 n20 交付）。
 - **放行策略**：`pass_policy = p0_count == 0`。
+- **噪音回退**（FIX-06）：高点核查发现明确噪音时，该 P0 issue 带 `noise_ids: [帖子ID…]` 与
+  `return_to: "Step5.5"`；`n18_qc_gate` 路由 `noise_found` → n18b 失效去噪及下游 → n07b 增量去噪全链重算，
+  最多 2 次，超过走 HC7。不能只改报告文字或仅从榜单删除。
+
+## 逐模块范围核对（FIX-61，KS_Report_Scope_Contract）
+
+`stats_bundle.campaigns.<id>._scope_index` 给出每个模块的需求指纹（requirement_sha）、对象、周期、平台、
+内容范围、相关性筛选、方法与分母。报告中该模块的口径描述（周期、平台、分母、仅 UGC/PGC 等）与之不符 → P0；
+requirement_sha 与当前 requirement_confirmed 不一致（模块基于旧需求计算）→ P0。
+
+## 口径专项（缺陷清单 Q2/Q5）
+
+- 总互动量：报告写「点赞+评论+转发」等自行加总公式，或把按发布时间排序的内容称为互动量 Top → P1；
+  `metrics.互动量/条均互动量` 为 null 却写出具体数值 → P0（编造）。
+- 权威媒体：对央媒、党媒报道设权重、折算互动量/曝光量/综合价值分，或把相似内容直接认定为转载、
+  估算未监测到的传播 → P1；缺证据时应写「不可量化」。
+
+## 高点相关性核查（原版 QC Protocol §6，P0 专项）
+
+输入：`stats_bundle.brand.peak_evidence` 与 `stats_bundle.campaigns.<id>.peak_evidence`
+（声量 Top3 日期当天互动前 10 帖；互动 Top3 日期主要贡献帖，累计 ≥80%）。
+
+- 声量高点：阅读当天主要讨论内容，确认高点由当前品牌/活动相关内容构成；互动高点：核对主要贡献帖的互动量和真实内容，排除无关热点、引流挂标签、同名歧义。
+- 按层级判断：品牌层判 `brand_related`，活动层按活动边界判 `campaign_related`，可分别为 是/否/证据不足。品牌日常内容不能用于活动高点归因；赞助型按确认范围判断；**负面评价本身不构成无关**。
+- 先读命中句及前后句，不明确再读全文和识别字段；逐帖记录层级、日期、平台、ID/链接、原文依据、判定、理由、互动量。仅拿到部分帖子时不声称已验证全天；缺分母时不编造贡献占比。
+- 证据不足：记录「证据不足，未核实」（P1），保留高点数值并说明原因未能确认，**不判为无关**；报告声称已确认相关但证据不足 → P0。
+- 明确噪音：P0，附 `noise_ids` 与 `return_to: "Step5.5"`。
+- 结果写入 `qc_report.peak_relevance_checks`：`[{level, campaign, metric: volume|interaction, date, reviewed_ids, verdict, issue, noise_ids}]`。该检查与标注抽查分开记录，不设正确率或抽查数量门槛。
 
 ## 分级口径
 
 - **P0 禁发**（拦截交付）：禁用措辞「人均 / 转化率 / 转化 / 性价比」；多活动相加「合计声量 / 总声量」
-  （同行含免责声明则不算违规）；报告为空；缺核心章节（品牌传播 / 活动传播 / 综合定位（容忍「综合
-  表现定位」变体）/ 经验总结）；缺品牌 1.1-1.4 或任一活动 2.N.1-2.N.5；
+  （同行含免责声明则不算违规）；报告为空；缺固定四章（一、品牌传播表现 / 二、活动传播表现 / 三、经验总结 / 四、总结与建议）；
+  缺品牌 1.1-1.4、任一活动 2.N.1-2.N.5、二章末 2.{N+1} 活动拉升效果或 3.1-3.3；
+  仍使用「综合表现定位」「活动声量渗透」旧章节；
   数字编造；提及漏斗越界。
 - **P1 可披露放行**（记录不拦截）：内容偏短、非必需补充证据偏弱。
 - **P2 提示**：风格 / 措辞建议。

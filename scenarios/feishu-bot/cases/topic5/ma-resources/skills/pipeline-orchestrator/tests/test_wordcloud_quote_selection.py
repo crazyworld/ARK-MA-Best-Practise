@@ -70,14 +70,16 @@ class TestQuoteSelection(unittest.TestCase):
                 "raw_source": {"articles": {"xiaohongshu": [{"id": "p", "content": body}]}}
             }}}})
             state.write_artifact("stats_bundle", {})
-            payload = {"words": [{"term": "好用", "value": 1}], "context": {}, "metric": "unknown"}
+            payload = {"words": [{"term": "好用", "value": 1}], "context": {"platform": "小红书"},
+                       "metric": "unknown"}
             input_file = root / "input.json"
             adapter.write(input_file, payload)
             render = root / "render"
             render.mkdir()
             chart = {"wordcloud_input": payload, "wordcloud_artifacts": {
                 "input_path": str(input_file), "output_dir": str(render),
-                "scope": {"campaign": "c", "dimension": "overall", "platform": "xiaohongshu"}}}
+                "scope": {"campaign": "c", "dimension": "overall", "platform": "xiaohongshu"}},
+                "call_brief": adapter.build_call_brief({}, {}, "c", "overall", "xiaohongshu")}
             selected = next(c for c in adapter.quote_choices({"text": body}) if "并非" in c["excerpt"])
             topic = {"title": "使用讨论", "terms": ["好用"], "interpretation": "样本讨论使用感受。",
                      "rationale": "原文保留条件，不推断购买效果。", "post_ids": ["p"]}
@@ -88,7 +90,8 @@ class TestQuoteSelection(unittest.TestCase):
                   "evidence": [{"field": "text", "quote_id": selected["quote_id"],
                                 "claim": "样本保留限定", "relation": "qualifies"}]}]},
                 {"topics": [topic], "supplemental_post_ids": [], "stopping_reason": "原帖已读"},
-                {"topics": [topic]},
+                {"topics": [topic], "brief_review": {
+                    "answered_questions": [adapter.DEFAULT_QUESTIONS["overall"]], "unanswered_reason": ""}},
             ]
             prompts = []
             def model(_system, user, **kwargs):

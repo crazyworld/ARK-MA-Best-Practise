@@ -13,7 +13,7 @@ from __future__ import annotations
 import io
 import re
 import zipfile
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Callable, Optional
 
 # 平台候选唯一事实源见 pipeline-orchestrator/platforms.py（FIX-17）。
@@ -131,11 +131,17 @@ def validate_xlsx_container(
         raise IntakeValidationError("文件不是有效的 .xlsx 工作簿") from error
 
 
+def _campaign_type_initial(current: Any) -> str:
+    """关键词能力初判可预选；未确认（空/待数据推断/待确认）时不预选，由用户选择。"""
+    text = str(current or "").strip()
+    return "" if text in ("", PENDING_INFERENCE, "待确认") else text
+
+
 def _campaign_type_options(current: Any) -> tuple[tuple[str, str], ...]:
     """下拉选项；能力预填的值不在示例清单里时追加到首位，避免 initial_option 失配。"""
     options: list[str] = list(CAMPAIGN_TYPE_OPTIONS)
     text = str(current or "").strip()
-    if text and text not in options:
+    if text and text not in options and text != "待确认":
         options.insert(0, text)
     return tuple((item, item) for item in options)
 
@@ -323,14 +329,14 @@ def build_requirement_form(
                 required=False,
                 initial_option=str(values.get("content_scope") or "all"),
             ),
-            # FIX-10：业务属性字段（可选，由关键词生成能力预填，用户可改）。
-            _field_label("活动类型（可选，未填由数据推断）"),
+            # Q1：活动主类型由用户或关键词生成能力确认，不再由数据推断。
+            _field_label("活动类型（可参考关键词能力初判；未确认时记为待确认，依赖类型的模块暂不执行）"),
             _select(
                 "campaign_type",
                 "活动类型",
                 _campaign_type_options(values.get("campaign_type")),
                 required=False,
-                initial_option=str(values.get("campaign_type") or PENDING_INFERENCE),
+                initial_option=_campaign_type_initial(values.get("campaign_type")) or PENDING_INFERENCE,
             ),
             _input(
                 "product_category", "产品类别（可选）", "例如：咖啡茶饮；留空由数据推断",
@@ -354,6 +360,12 @@ def build_requirement_form(
                 "例如：2026-09-30 ~ 2026-10-05；不覆盖统计窗口",
                 required=False,
                 default_value=_text_default(values.get("actual_event_period")),
+            ),
+            _input(
+                "baseline_period", "品牌基准期（可选）",
+                "例如：2026-08-29 ~ 2026-09-27；留空默认取活动开始日前30天（多活动以合并窗口开始日为参照）",
+                required=False,
+                default_value=_text_default(values.get("baseline_period")),
             ),
             _input(
                 "brand_supplement_activity_terms", "补入品牌关键词的活动关键词（可选）",
@@ -519,6 +531,8 @@ SPLIT_GAP_DAYS = 30
 PENDING_INFERENCE = "待数据推断"
 MAX_CAMPAIGN_GOALS = 2
 # KS_Report_Required_Fields_List.md:53 主类型示例（G1 下拉选项，可自由填写其他值）。
+# Q1：9 类为关键词 Skill 的参考主类型，不是封闭枚举（表外/复合选「其他」并写明）；
+# 「待数据推断」保留为「尚未确认」的占位：不再由数据推断填定（KS_Classification_Rules v0.9）。
 CAMPAIGN_TYPE_OPTIONS = (
     "IP联名", "品牌跨界联名", "明星代言或合作", "话题挑战或互动",
     "新品发布或产品推广", "促销或节日营销", "线下活动或快闪",
@@ -752,11 +766,14 @@ def normalize_requirement(form_value: dict[str, Any]) -> dict:
             "brand_query_terms": brand_words,
             "coverage_warnings": coverage_warnings,
             "campaigns": campaigns,
-            # FIX-12：合并窗口 = 最早开始 ~ 最晚结束；基准期取合并窗口前 30 天。
+            # FIX-12：合并窗口 = 最早开始 ~ 最晚结束。
             "period_start": merge_start or normalized["period_start"],
             "period_end": merge_end or normalized["period_end"],
             "merge_window": {"start": merge_start, "end": merge_end},
             "split_suggestion": split_suggestion,
+            # 缺陷清单 Q3：基准期起止写入需求确认单；后续取数/计算/图表统一读取，不再推算。
+            **resolve_baseline(raw.get("baseline_period"), merge_start or normalized["period_start"],
+                               merge_end or normalized["period_end"]),
             "business_questions": [
                 item.strip()
                 for item in re.split(
@@ -774,7 +791,7 @@ def _build_campaigns(raw: dict, normalized: dict, activity_terms: list) -> tuple
 
     FIX-12 / 原版 Phase1 多活动规则：
       - 每行 `活动名；开始；结束；活动表达式；活动过滤词`，最多 5 行（分号分隔）。
-      - 第一章品牌数据取合并窗口（最早开始 ~ 最晚结束），基准期为合并窗口前 30 天。
+      - 第一章品牌数据取合并窗口（最早开始 ~ 最晚结束）；基准期见 resolve_baseline（Q3）。
       - 相邻活动间隔 >30 天给出拆分建议，但不阻断（客户要求提示而非拒绝）。
       - 未填多行 → 单活动，与原有行为完全一致。
     """
@@ -837,6 +854,34 @@ def _build_campaigns(raw: dict, normalized: dict, activity_terms: list) -> tuple
             min(starts) if starts else None,
             max(ends) if ends else None,
             _split_suggestion(parsed))
+
+
+BASELINE_DEFAULT_DAYS = 30
+
+
+def resolve_baseline(user_value: Any, window_start: str, window_end: str) -> dict:
+    """品牌基准期（缺陷清单 Q3）：用户已确认日期优先；未指定时取参照开始日前30天
+    （单活动=活动开始日，多活动=合并窗口开始日），即开始日−30 至 −1 天，与活动期不重叠。"""
+    period = _clean_period(user_value)
+    if period.get("start") or period.get("end"):
+        start, end = period.get("start", ""), period.get("end", "")
+        if not (start and end):
+            raise IntakeValidationError("品牌基准期需同时填写开始和结束日期")
+        try:
+            d0, d1 = datetime.strptime(start, "%Y-%m-%d"), datetime.strptime(end, "%Y-%m-%d")
+        except ValueError as error:
+            raise IntakeValidationError("品牌基准期日期格式须为 YYYY-MM-DD") from error
+        if d0 > d1:
+            raise IntakeValidationError("品牌基准期开始日期不能晚于结束日期")
+        if window_start and end >= window_start[:10] and start <= (window_end or window_start)[:10]:
+            raise IntakeValidationError("品牌基准期不能与活动统计窗口重叠")
+        return {"baseline_start": start, "baseline_end": end, "baseline_source": "user"}
+    if not window_start:
+        return {}
+    anchor = datetime.strptime(window_start[:10], "%Y-%m-%d")
+    return {"baseline_start": (anchor - timedelta(days=BASELINE_DEFAULT_DAYS)).strftime("%Y-%m-%d"),
+            "baseline_end": (anchor - timedelta(days=1)).strftime("%Y-%m-%d"),
+            "baseline_source": "default"}
 
 
 def _split_suggestion(campaigns: list) -> str | None:
@@ -1055,6 +1100,9 @@ def requirement_snapshot_rows(requirement: dict) -> list[tuple[str, str]]:
             f"{requirement.get('period_end') or '未填写'}",
         ),
         ("目标平台", platforms or "未填写"),
+        # Q3：基准期实际起止（默认值也写明来源）。
+        ("品牌基准期", _baseline_text(requirement)),
+        ("活动类型", requirement.get("campaign_type") or "待数据推断"),
         ("品牌取数关键词", requirement.get("brand_query") or "未填写"),
         ("品牌过滤词", requirement.get("brand_filter") or "无"),
         ("活动取数关键词", requirement.get("activity_query") or "未填写"),
@@ -1069,6 +1117,14 @@ def requirement_snapshot_rows(requirement: dict) -> list[tuple[str, str]]:
         ("交付截止", requirement.get("delivery_deadline") or "未填写"),
         ("特殊说明", requirement.get("special_notes") or "无"),
     ]
+
+
+def _baseline_text(requirement: dict) -> str:
+    start, end = requirement.get("baseline_start"), requirement.get("baseline_end")
+    if not (start and end):
+        return "未记录"
+    suffix = "（默认前30天，可另行指定并确认）" if requirement.get("baseline_source") == "default" else ""
+    return f"{start} ～ {end}{suffix}"
 
 
 def format_requirement_snapshot(requirement: dict, *, heading: bool = True) -> str:

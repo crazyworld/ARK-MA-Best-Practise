@@ -45,6 +45,9 @@ STATUS_PAUSED = "paused"
 STATUS_DONE = "done"
 STATUS_FAILED = "failed"
 STATUS_STOPPED = "stopped"
+# FIX-37：终验累计 5 个工作日无回应 → 归档暂停；只由用户终止，用户任何回复恢复 G4。
+STATUS_ARCHIVED_PAUSED = "archived_paused"
+G4_ARCHIVE_BUSINESS_DAYS = 5
 
 FAILURE_SCOPE_RECOVERABLE = "recoverable"
 FAILURE_SCOPE_SESSION = "session"
@@ -53,7 +56,7 @@ RETRY_STRATEGY_RESUME_SESSION = "resume_session"
 RETRY_STRATEGY_NODE = "retry_node"
 
 # HC 卡点标识(对齐 skills/pipeline-orchestrator/hc_bridge.NODE_TO_HC)。
-HC_KINDS = ("G1", "G2", "N10", "G3", "G4", "HC7", "USER_ESCALATE")
+HC_KINDS = ("G1", "G2", "N10", "G3", "G4", "HC7", "USER_ESCALATE", "HC_COLLECT")
 
 
 def _new_job_id() -> str:
@@ -64,12 +67,49 @@ def _now() -> int:
     return int(time.time())
 
 
+# FIX-37：法定节假日与调休上班日（国办发明电〔2025〕7号，2026 年）。表外年份只跳过周末并告警。
+OFF_DAYS = {
+    2026: ("0101-0103", "0215-0223", "0404-0406", "0501-0505", "0619-0621", "0925-0927", "1001-1007"),
+}
+WORK_DAYS = {
+    2026: ("0104", "0214", "0228", "0509", "0920", "1010"),
+}
+
+
+def _expand(ranges) -> set[str]:
+    days: set[str] = set()
+    for item in ranges:
+        start, _, end = item.partition("-")
+        cursor = datetime.strptime(start, "%m%d")
+        stop = datetime.strptime(end or start, "%m%d")
+        while cursor <= stop:
+            days.add(cursor.strftime("%m%d"))
+            cursor += timedelta(days=1)
+    return days
+
+
+_OFF = {year: _expand(ranges) for year, ranges in OFF_DAYS.items()}
+_WORK = {year: set(days) for year, days in WORK_DAYS.items()}
+
+
+def is_business_day(value: datetime) -> bool:
+    year, key = value.year, value.strftime("%m%d")
+    if year not in _OFF:
+        import logging
+        logging.getLogger("arkagent.topic5.store").warning(
+            "节假日表未覆盖 %s 年，按只跳过周末计算工作日", year)
+        return value.weekday() < 5
+    if key in _WORK[year]:
+        return True
+    return value.weekday() < 5 and key not in _OFF[year]
+
+
 def _add_business_days(epoch: int, days: int) -> int:
     value = datetime.fromtimestamp(epoch)
     added = 0
     while added < days:
         value += timedelta(days=1)
-        if value.weekday() < 5:
+        if is_business_day(value):
             added += 1
     return int(value.timestamp())
 
@@ -433,7 +473,7 @@ class PipelineStore:
                     SELECT * FROM pipeline_jobs
                     WHERE chat_id = ?
                       AND (thread_id = ? OR topic_thread_id = ?)
-                      AND status IN (?, ?, ?, ?, ?)
+                      AND status IN (?, ?, ?, ?, ?, ?)
                     ORDER BY started_at DESC LIMIT 1
                     """,
                     (
@@ -445,6 +485,7 @@ class PipelineStore:
                         STATUS_WAIT_INPUT,
                         STATUS_STOPPING,
                         STATUS_PAUSED,
+                        STATUS_ARCHIVED_PAUSED,
                     ),
                 ).fetchone()
             else:
@@ -455,7 +496,7 @@ class PipelineStore:
                     SELECT * FROM pipeline_jobs
                     WHERE chat_id = ? AND user_open_id = ?
                       AND thread_id = '' AND topic_thread_id = ''
-                      AND status IN (?, ?, ?, ?, ?)
+                      AND status IN (?, ?, ?, ?, ?, ?)
                     ORDER BY started_at DESC LIMIT 1
                     """,
                     (
@@ -466,6 +507,7 @@ class PipelineStore:
                         STATUS_WAIT_INPUT,
                         STATUS_STOPPING,
                         STATUS_PAUSED,
+                        STATUS_ARCHIVED_PAUSED,
                     ),
                 ).fetchone()
         return self._row_to_job(row) if row else None
@@ -483,7 +525,7 @@ class PipelineStore:
                 SELECT * FROM pipeline_jobs
                 WHERE chat_id = ?
                   AND (thread_id = ? OR topic_thread_id = ?)
-                  AND status IN (?, ?, ?, ?, ?)
+                  AND status IN (?, ?, ?, ?, ?, ?)
                 ORDER BY started_at DESC LIMIT 1
                 """,
                 (
@@ -495,7 +537,21 @@ class PipelineStore:
                     STATUS_WAIT_INPUT,
                     STATUS_STOPPING,
                     STATUS_PAUSED,
+                    STATUS_ARCHIVED_PAUSED,
                 ),
+            ).fetchone()
+        return self._row_to_job(row) if row else None
+
+    def get_done_job_by_topic(self, chat_id: str, thread_id: str) -> Optional[PipelineJob]:
+        """FIX-38：话题内最近一个已完成（已交接）的任务，供 /fix 交接后修正。"""
+        thread = thread_id or ""
+        if not thread:
+            return None
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM pipeline_jobs WHERE chat_id = ? AND (thread_id = ? OR topic_thread_id = ?) "
+                "AND status = ? ORDER BY finished_at DESC LIMIT 1",
+                (chat_id, thread, thread, STATUS_DONE),
             ).fetchone()
         return self._row_to_job(row) if row else None
 
@@ -516,7 +572,7 @@ class PipelineStore:
                     SELECT * FROM pipeline_jobs
                     WHERE chat_id = ?
                       AND (thread_id = ? OR topic_thread_id = ?)
-                      AND status IN (?, ?, ?, ?, ?)
+                      AND status IN (?, ?, ?, ?, ?, ?)
                     ORDER BY updated_at DESC LIMIT 1
                     """,
                     (
@@ -528,6 +584,7 @@ class PipelineStore:
                         STATUS_WAIT_INPUT,
                         STATUS_FAILED,
                         STATUS_PAUSED,
+                        STATUS_ARCHIVED_PAUSED,
                     ),
                 ).fetchone()
             else:
@@ -536,7 +593,7 @@ class PipelineStore:
                     SELECT * FROM pipeline_jobs
                     WHERE chat_id = ? AND user_open_id = ?
                       AND thread_id = '' AND topic_thread_id = ''
-                      AND status IN (?, ?, ?, ?, ?)
+                      AND status IN (?, ?, ?, ?, ?, ?)
                     ORDER BY updated_at DESC LIMIT 1
                     """,
                     (
@@ -547,6 +604,7 @@ class PipelineStore:
                         STATUS_WAIT_INPUT,
                         STATUS_FAILED,
                         STATUS_PAUSED,
+                        STATUS_ARCHIVED_PAUSED,
                     ),
                 ).fetchone()
         return self._row_to_job(row) if row else None
@@ -557,7 +615,7 @@ class PipelineStore:
             row = self._conn.execute(
                 """
                 SELECT * FROM pipeline_jobs
-                WHERE status IN (?, ?, ?, ?, ?)
+                WHERE status IN (?, ?, ?, ?, ?, ?)
                 ORDER BY started_at DESC LIMIT 1
                 """,
                 (
@@ -566,6 +624,7 @@ class PipelineStore:
                     STATUS_WAIT_INPUT,
                     STATUS_STOPPING,
                     STATUS_PAUSED,
+                    STATUS_ARCHIVED_PAUSED,
                 ),
             ).fetchone()
         return self._row_to_job(row) if row else None
@@ -781,6 +840,51 @@ class PipelineStore:
             )
         self._notify_status(job_id, STATUS_STOPPED)
 
+    def mark_archived_paused(self, job_id: str, phase: str = "G4") -> bool:
+        """FIX-37：终验无回应或 Supervisor 选择暂停 → 归档暂停（记录所处阶段，恢复时据此续跑）。"""
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE pipeline_jobs SET status = ?, current_phase = ?, updated_at = ?, last_error = ? "
+                "WHERE job_id = ? AND status IN (?, ?)",
+                (STATUS_ARCHIVED_PAUSED, phase, _now(), "g4_confirm_archived", job_id,
+                 STATUS_WAIT_HC, STATUS_RUNNING),
+            )
+        if cur.rowcount:
+            self._notify_status(job_id, STATUS_ARCHIVED_PAUSED)
+        return cur.rowcount == 1
+
+    def restore_from_archive(self, job_id: str) -> bool:
+        """用户回复后恢复为等待人工（文档与 revision 由 n21 重新校验）；阶段保持归档前的值。"""
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE pipeline_jobs SET status = ?, updated_at = ?, last_error = '' "
+                "WHERE job_id = ? AND status = ?",
+                (STATUS_WAIT_HC, _now(), job_id, STATUS_ARCHIVED_PAUSED),
+            )
+        if cur.rowcount:
+            self._notify_status(job_id, STATUS_WAIT_HC)
+        return cur.rowcount == 1
+
+    def list_g4_archive_due(self, now: Optional[int] = None) -> list[HcEvent]:
+        """已升级 Supervisor、自 G4 发出累计满 5 个工作日仍未处理的事件。"""
+        now = now or _now()
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT e.* FROM pipeline_hc_events e JOIN pipeline_jobs j ON j.job_id = e.job_id
+                WHERE e.hc_kind = 'G4' AND j.status = ?
+                  AND j.current_phase IN ('G4', 'USER_ESCALATE')
+                ORDER BY e.created_at ASC, e.id ASC
+                """,
+                (STATUS_WAIT_HC,),
+            ).fetchall()
+        events = [self._row_to_hc(row) for row in rows]
+        latest: dict[str, HcEvent] = {}
+        for event in events:
+            latest[event.job_id] = event
+        return [e for e in latest.values()
+                if _add_business_days(e.created_at, G4_ARCHIVE_BUSINESS_DAYS) <= now]
+
     def mark_paused(self, job_id: str, reason: str = "user_interrupt") -> None:
         now = _now()
         with self._lock:
@@ -835,10 +939,23 @@ class PipelineStore:
             )
         return cursor.rowcount == 1
 
+    def claim_collect_source(
+        self, job_id: str, file_id: str, file_name: str, mount_path: str
+    ) -> bool:
+        """FIX-04：采集授权等待中改为上传活动明细。"""
+        with self._lock:
+            cursor = self._conn.execute(
+                "UPDATE pipeline_jobs SET source_file_id = ?, source_file_name = ?, "
+                "source_file_mount_path = ?, updated_at = ? WHERE job_id = ? AND status = ? "
+                "AND current_phase = 'HC_COLLECT'",
+                (file_id, file_name, mount_path, _now(), job_id, STATUS_WAIT_HC),
+            )
+        return cursor.rowcount == 1
+
     def claim_source_replacement(
         self, job_id: str, file_id: str, file_name: str, mount_path: str
     ) -> bool:
-        """Atomically install a replacement source and claim its n04 retry."""
+        """Atomically install a replacement source and claim its n04 / n03b retry."""
         with self._lock:
             cursor = self._conn.execute(
                 """
@@ -846,10 +963,11 @@ class PipelineStore:
                 SET source_file_id = ?, source_file_name = ?,
                     source_file_mount_path = ?, status = ?, finished_at = NULL,
                     updated_at = ?
-                WHERE job_id = ? AND status = ? AND current_phase = ?
+                WHERE job_id = ? AND status = ?
                   AND failure_scope IN ('', ?)
                   AND retry_strategy = ?
-                  AND last_error LIKE '%excel_source:%'
+                  AND ((current_phase = 'n04_run_init' AND last_error LIKE '%excel_source:%')
+                       OR (current_phase = 'n03b_activity_pull' AND last_error LIKE '%activity_pull:%'))
                 """,
                 (
                     file_id or "",
@@ -859,7 +977,6 @@ class PipelineStore:
                     _now(),
                     job_id,
                     STATUS_FAILED,
-                    "n04_run_init",
                     FAILURE_SCOPE_RECOVERABLE,
                     RETRY_STRATEGY_NODE,
                 ),

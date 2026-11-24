@@ -30,9 +30,15 @@ import report_contract
 import label_review
 import platforms
 import lift  # FIX-15 活动拉升（日均口径）
-import campaign_type_inference  # FIX-10 信号矩阵
+import propagation_features  # 缺陷清单 Q1：旧6类改为传播特征参考
 import annotation_structure as annotation_structure_mod  # FIX-29 结构预检
 import review_plan as review_plan_mod  # FIX-30 标注抽检计划
+import mention_funnel  # FIX-18 提及漏斗
+import overview  # FIX-47 传播概况结构结论与高点话术
+import hot_formula  # FIX-49 热帖成功配方
+import noise_review  # FIX-05 Step5.5 去噪
+import module_scope  # FIX-61 逐模块范围记录
+import social_task  # FIX-04 活动原帖自动采集
 
 # ── 业务口径常量（源：飞书 wiki 活动复盘口径 + knowledge/_字段速查.md）────────
 # 指标命名白名单：活动层只允许这些指标名；禁用“人均/转化率/性价比”等无数据支撑说法。
@@ -71,8 +77,12 @@ RULES_VERSION = str(getattr(_POLICY, "RULES_VERSION", "") or "topic5-validator-q
 CONTENT_MODE_BY_SCOPE = {"all": "ALL", "ugc": "UGC", "pgc": "PGC"}
 # 内容类型规整：SSJH content_mode 的“未知”归一为 UKN。
 _CONTENT_TYPE = {"UGC": "UGC", "PGC": "PGC", "未知": "UKN", "UKN": "UKN"}
-# 周期过滤后被剔除比例超过此阈值 → 置 needs_sampling_review，供人工抽查。
-_REMOVE_RATIO_REVIEW = 0.10
+# FIX-23：活动相关行 AI 情感缺失/非法比例上限（原版 aggregate --sentiment-missing-max 0.05）。
+AI_SENTIMENT_MISSING_MAX = 0.05
+# FIX-21：AI 判「不相关」占比超过此值 → 告警并要求复核（原版 aggregate --exclude-warn 0.10）。
+AI_IRRELEVANT_WARN = 0.10
+# 被判「不相关」的内容建议抽查条数（原版告警原文「建议随机 30 条」），计入轮次一审核额度。
+AI_IRRELEVANT_REVIEW_SAMPLE = 30
 # demo 只对清洗后的活动明细做稳定抽样；full 始终保留全量。
 _DEMO_SAMPLE_LIMIT = 500
 # SSJH publish_time 为 epoch 毫秒（CST）；统一按 UTC+8 转 YYYYMMDD（与声量趋势键对齐）。
@@ -227,11 +237,14 @@ def _publish_ymd(row: dict) -> str | None:
 
 
 def _dedup_key(row: dict) -> str:
-    """去重键：优先 fingerprint，回退 id / item_id / url。"""
+    """去重键：优先 fingerprint，回退 id / item_id / url；
+    无 ID 按「作者+发布时间+正文前50字」（KS_Exception_Handling 常见异常表）。"""
     for k in ("fingerprint", "id", "item_id", "url"):
         v = row.get(k)
         if v:
             return str(v)
+    if row.get("author") and row.get("publish_time"):
+        return f"{row['author']}|{row['publish_time']}|{str(row.get('content') or '')[:50]}"
     return repr(sorted(row.items()))
 
 
@@ -306,11 +319,15 @@ def clean_campaign(node, state, ctx):
       - 去重：按 fingerprint（回退 id/item_id/url）。
       - 派生：规整平台 slug、KOL 层级、发表日 YYYYMMDD。
       - demo：清洗后超过 500 条时做稳定哈希抽样；full 保留全量。
-      - 剔除比例 > 10% → 置 needs_sampling_review，供人工抽查（不阻断）。
+      - 剔除比例只做留痕；需要抽查的是 AI 判「不相关」占比（FIX-21，见 aggregate.stats_scope
+        与 review_plan 定向抽查），周期外数据在 excel_source 已报错，原阈值永不触发。
       - 全部缺发表时间 → 直接报错（日期口径无法建立）。
     """
     plan = state.read_artifact("confirmed_plan") or {}
-    excel_data = excel_source.load_activity_rows(plan)
+    try:
+        excel_data = excel_source.load_activity_rows(plan)
+    except excel_source.SheetMergeRequired as merge:
+        raise HumanPause(prompt=str(merge), expect=["data_exception_ack"]) from merge
     if excel_data is None:
         raise ValueError(
             "clean_campaign: confirmed_plan 缺少 G2 冻结的活动明细 source_file"
@@ -363,11 +380,17 @@ def clean_campaign(node, state, ctx):
             "_dedup_key": key,
         })
 
+    suspect_duplicates = _zero_fan_duplicates(cleaned)
     eligible_out = len(cleaned)
     run_mode = str(state.params.get("run_mode") or "full").lower()
     sample_applied = run_mode == "demo" and eligible_out > _DEMO_SAMPLE_LIMIT
     if sample_applied:
         cleaned = _stable_sample(cleaned, _DEMO_SAMPLE_LIMIT)
+    # FIX-58：数据异常分级。严重项（有效量 <100）暂停告知用户，用户确认继续后带 ack 重跑。
+    data_profile = excel_source.profile(cleaned, meta, run_mode)
+    ack = state.read_artifact("data_exception_ack") or {}
+    if data_profile["severe"] and ack.get("decision") != "continue":
+        raise HumanPause(prompt="；".join(data_profile["severe"]), expect=["data_exception_ack"])
     total_out = len(cleaned)
     removed_total = sum(removed.values())
     remove_ratio = (removed_total / total_in) if total_in else 0.0
@@ -379,9 +402,13 @@ def clean_campaign(node, state, ctx):
             "total_in": total_in,
             "eligible_out": eligible_out,
             "total_out": total_out,
-            "removed": removed,
+            "removed": {**removed, "date_error": int(meta.get("date_error_rows") or 0)},
             "remove_ratio": round(remove_ratio, 4),
-            "needs_sampling_review": remove_ratio > _REMOVE_RATIO_REVIEW,
+            "profile": data_profile,
+            # FIX-26：零粉丝且同文案重复 ≥5 次 → 只标记待人工决定，不自动剔除。
+            "uncertain_zero_fan_duplicates": suspect_duplicates,
+            # FIX-21：多活动时按活动周期剔除的条数，供 stats_scope 计算该活动的原始量。
+            "period_dropped_by_campaign": dict(meta.get("period_dropped_by_campaign") or {}),
             "period": {"start": period_start, "end": period_end},
             "platforms": sorted({c["_platform"] for c in cleaned}),
             "sampling": {
@@ -405,11 +432,13 @@ def clean_campaign(node, state, ctx):
 
 
 def _row_sentiment(row: dict) -> int | None:
-    """取 AI 情感（优先标注 ai_sentiment，回退 SSJH sentiment）→ {1,0,-1}；缺失返回 None。
+    """取 AI 情感 ai_sentiment → {1,0,-1}；缺失或非法返回 None。
 
-    口径：以 AI 标注为准；缺 AI 情感由调用方直接报错，不在此兜底。
+    FIX-23：活动层情感只认轮次一 AI 标注，不回退监测平台原始 sentiment
+    （原版 aggregate.py:76「不回退到监测平台的原始『情感』列」）。
+    缺失比例的容忍与报错由 aggregate 统一处理。
     """
-    v = row.get("ai_sentiment") if "ai_sentiment" in row else row.get("sentiment")
+    v = row.get("ai_sentiment")
     if v is None:
         return None
     if isinstance(v, str):
@@ -439,7 +468,10 @@ def _is_relevant(row: dict) -> bool | None:
 
 
 def _mentions(row: dict, words: list[str]) -> bool:
-    """文本提及判定：标题/正文/关键词命中任一词。"""
+    """活动过滤词命中：标题/正文/话题任一命中（仅用于无 analysis_object 时切分活动）。
+
+    提及漏斗不走这里，见 mention_funnel（主品牌名、大小写不敏感，FIX-18）。
+    """
     if not words:
         return False
     hay = " ".join(str(row.get(k) or "") for k in ("title", "content"))
@@ -449,40 +481,53 @@ def _mentions(row: dict, words: list[str]) -> bool:
     return any(w and w in hay for w in words)
 
 
-def _campaign_stats(rows: list[dict], brand_words: list[str], product_words: list[str],
-                    brand_avg_interaction: float | None = None) -> dict:
-    """单活动指标：只统计传入的活动相关行；指标名走白名单。"""
+def _campaign_stats(rows: list[dict], brand_name: str, product_words: list[str],
+                    brand_avg_interaction: float | None = None,
+                    funnel_method: str = mention_funnel.KEYWORD_MENTION,
+                    content_scope: str = "all") -> dict:
+    """单活动指标：只统计传入的活动相关行；指标名走白名单。
+
+    brand_name 为主品牌名（漏斗 Tier2 只匹配主品牌名，原版 aggregate.py:51）。
+    情感缺失行不计入情感分布与 NSR（容忍比例由 aggregate 校验，FIX-23）。
+    """
     n = len(rows)
-    interaction = sum(int(r.get("interaction_cnt") or 0) for r in rows)
+    # Q2：供应商互动量；缺失帖不计入总量/条均分母，单独披露 interaction_missing。
+    inter = report_contract.interaction_stats(rows)
+    interaction = inter["total"]
     pos = sum(1 for r in rows if _row_sentiment(r) == 1)
     neu = sum(1 for r in rows if _row_sentiment(r) == 0)
     neg = sum(1 for r in rows if _row_sentiment(r) == -1)
     # NSR 分母恒为「正面+负面」，不含中性（客户 KS_Metrics_Calculation v0.12 /
     # 错误案例 #13：含中性会把 NSR 严重稀释，历史事故 +57.6% 被算成 +15.2%）。
     nsr_denom = pos + neg
-    # 提及漏斗（嵌套）：产品提及只在品牌提及行中计，保证次层 ≤ 首层。
-    # 原版口径（aggregate.py:187-193）：只有提供品牌词时才输出 Tier2 及以上，
-    # 没有品牌词时仅输出 Tier1，不输出 0% 的品牌提及率。
-    brand_rows = [r for r in rows if _mentions(r, brand_words)]
-    brand_hits = len(brand_rows)
-    product_hits = sum(1 for r in brand_rows if _mentions(r, product_words))
+    # 提及漏斗（FIX-18）：Tier2=主品牌名、Tier3 嵌套于 Tier2、≥95% 退化，见 mention_funnel。
+    funnel = mention_funnel.build(rows, method=funnel_method, brand_name=brand_name,
+                                  product_words=product_words)
 
     trend: dict[str, int] = {}
     interaction_trend: dict[str, int] = {}
     platform_dist: dict[str, int] = {}
     kol_dist: dict[str, int] = {}
     kol_interactions: dict[str, int] = {}
+    kol_interaction_n: dict[str, int] = {}
     all_level_dist: dict[str, int] = {}
     content_dist: dict[str, int] = {}
     ugc_dist: dict[str, int] = {}
     dimension_rows: dict[str, list[dict]] = {}
+    trend_by_platform_type: dict[str, dict[str, dict[str, int]]] = {}
+    interaction_by_platform_type: dict[str, dict[str, int]] = {}
     for r in rows:
         ymd = r.get("_publish_ymd")
+        platform = r.get("_platform", "unknown")
+        ctype = _CONTENT_TYPE.get(str(r.get("content_mode") or ""), "UKN")
+        value = report_contract.interaction_value(r) or 0
+        cell = interaction_by_platform_type.setdefault(platform, {})
+        cell[ctype] = cell.get(ctype, 0) + value
         if ymd:
             trend[ymd] = trend.get(ymd, 0) + 1
-            interaction_trend[ymd] = interaction_trend.get(ymd, 0) + int(
-                r.get("interaction_cnt") or 0
-            )
+            interaction_trend[ymd] = interaction_trend.get(ymd, 0) + value
+            day = trend_by_platform_type.setdefault(ymd, {}).setdefault(platform, {})
+            day[ctype] = day.get(ctype, 0) + 1
         platform_dist[r.get("_platform", "unknown")] = platform_dist.get(r.get("_platform", "unknown"), 0) + 1
         level = r.get("_kol_level", "unknown")
         all_level_dist[level] = all_level_dist.get(level, 0) + 1
@@ -491,10 +536,10 @@ def _campaign_stats(rows: list[dict], brand_words: list[str], product_words: lis
         if (level in KOL_EFFECTIVE_LEVELS
                 and _CONTENT_TYPE.get(str(r.get("content_mode") or ""), "UKN") == "PGC"):
             kol_dist[level] = kol_dist.get(level, 0) + 1
-            kol_interactions[level] = (
-                kol_interactions.get(level, 0)
-                + int(r.get("interaction_cnt") or 0)
-            )
+            if report_contract.interaction_value(r) is not None:
+                kol_interactions[level] = (kol_interactions.get(level, 0)
+                                           + report_contract.interaction_value(r))
+                kol_interaction_n[level] = kol_interaction_n.get(level, 0) + 1
         ct = _CONTENT_TYPE.get(str(r.get("content_mode") or ""), "UKN")
         content_dist[ct] = content_dist.get(ct, 0) + 1
         category = str(r.get("ugc_category") or "").strip()
@@ -544,17 +589,15 @@ def _campaign_stats(rows: list[dict], brand_words: list[str], product_words: lis
         "活动相关条数": n,
         "互动量": interaction,
         # 白名单指标：条均互动量 = 互动量 ÷ 活动相关条数（替代“人均”）
-        "条均互动量": round(interaction / n, 2) if n else None,
-        # 品牌提及率 = 品牌提及条数 ÷ 活动相关条数；
-        # 无品牌词时不输出（原版 aggregate.py:187 无 --brand-name 时仅 Tier1）。
-        "品牌提及率": (round(brand_hits / n, 4) if n and brand_words else None),
-        # 产品提及占比 = 产品提及条数 ÷ 品牌提及条数（有产品关键词时）
-        "产品提及占比": (round(product_hits / brand_hits, 4) if brand_hits and product_words else None),
+        "条均互动量": inter["avg"],
+        # 品牌提及率 = Tier2/Tier1；产品提及占比 = Tier3/Tier2。无主品牌名、
+        # 退化（Tier2 ≥95%）或主对象方法时不输出（原版 aggregate.py:187-199）。
+        **mention_funnel.headline_metrics(funnel),
         # 条均互动倍数 = 活动条均互动量 ÷ 品牌条均互动量（KS_Metrics_Calculation:207）。
         # 分母取品牌期同一份数据的 互动量÷条数；品牌条均缺失或为 0 时不输出。
         "条均互动倍数": (
-            round((interaction / n) / brand_avg_interaction, 2)
-            if n and brand_avg_interaction else None
+            round(inter["avg"] / brand_avg_interaction, 2)
+            if inter["avg"] is not None and brand_avg_interaction else None
         ),
         # 品牌主导讨论占比 = 品牌主对象帖数 ÷ 活动相关总帖数（:204）。
         # 用 AI 主讨论对象口径，不是品牌名出现率（品牌提及率另列）。
@@ -564,6 +607,7 @@ def _campaign_stats(rows: list[dict], brand_words: list[str], product_words: lis
         # NSR = (正面-负面) ÷ (正面+负面)
         "NSR": (round((pos - neg) / nsr_denom, 4) if nsr_denom else None),
     }
+    top_content = {kind.lower(): _top_rows(rows, kind) for kind in ("PGC", "UGC")}
     # 指标命名白名单硬校验：禁止出现“人均/转化/性价比”等措辞键。
     for key in metrics:
         for bad in FORBIDDEN_METRIC_TERMS:
@@ -573,11 +617,25 @@ def _campaign_stats(rows: list[dict], brand_words: list[str], product_words: lis
         "row_count": n,
         "metrics": metrics,
         "sentiment_dist": {"positive": pos, "neutral": neu, "negative": neg},
+        # FIX-34 / 检查清单 2.11：缺 AI 情感的行（≤5% 剔出分母）单独计数，供总数核对。
+        "sentiment_missing": len(rows) - (pos + neu + neg),
+        # 2.12：讨论对象分组计数（含未判定），加总须回到活动相关全量。
+        "dimension_counts": {
+            **{key: len(group) for key, group in dimension_rows.items()},
+            "未判定": sum(1 for r in rows
+                       if str(r.get("discussion_dimension") or "").strip() in ("", "N/A")),
+        },
         "nsr_denominator": "正面+负面（不含中性）",
-        "mention_funnel": {"brand_hits": brand_hits, "product_hits": product_hits,
-                           "has_product_keywords": bool(product_words)},
+        "mention_funnel": funnel,
         "trend": dict(sorted(trend.items())),
         "interaction_trend": dict(sorted(interaction_trend.items())),
+        # FIX-23：日期×平台×内容类型 / 平台×内容类型（也供 FIX-47 平台互动结构）。
+        "trend_by_platform_type": dict(sorted(trend_by_platform_type.items())),
+        # FIX-06：声量/互动高点及主要贡献帖，交独立 Validator 做高点相关性核查。
+        "peak_evidence": noise_review.peak_evidence(rows),
+        # FIX-47：2.N.1 结构结论与高点话术（确定性填空）。
+        "overview": overview.campaign_overview(rows, content_scope),
+        "interaction_by_platform_type": interaction_by_platform_type,
         "platform_dist": platform_dist,
         # 全量层级分布（含素人/未知/不适用）保留用于说明占比，不参与效能分母。
         "kol_level_dist": all_level_dist,
@@ -589,12 +647,14 @@ def _campaign_stats(rows: list[dict], brand_words: list[str], product_words: lis
                 "volume_share": round(count / kol_effective_total, 6)
                 if kol_effective_total else None,
                 "avg_interaction": round(
-                    kol_interactions.get(level, 0) / count, 2
-                ) if count else None,
+                    kol_interactions[level] / kol_interaction_n[level], 2
+                ) if kol_interaction_n.get(level) else None,
             }
             for level, count in kol_dist.items()
         },
         "kol_effective_total": kol_effective_total,
+        # Q2：供应商未返回互动量的帖数（不补零、不进互动 Top、不进条均分母）。
+        "interaction_missing": inter["missing"],
         "kol_notes": {
             # UGC 内容以素人为主（占 XX%）—— 原版说明要求
             "ugc_amateur_share": (
@@ -610,9 +670,11 @@ def _campaign_stats(rows: list[dict], brand_words: list[str], product_words: lis
             "ugc_total": ugc_total,
         },
         "content_type_dist": content_dist,
+        # FIX-26：带广告/推广标识的内容单列，区分自然声量；无标识列时 unknown 计数。
+        "natural_vs_ad": _natural_vs_ad(rows),
         "ugc_category_dist": ugc_dist,
         "opinion_analysis": report_contract.opinion_analysis(rows, _row_sentiment),
-        "ugc_analysis": report_contract.ugc_analysis(rows),
+        "ugc_analysis": report_contract.ugc_analysis(rows, _is_relevant),
         "dimension_nsr": dimension_nsr,
         # 主讨论对象三分类的覆盖情况（FIX-14）：三组 row_count 之和 vs 活动相关条数。
         "dimension_coverage": {
@@ -626,27 +688,184 @@ def _campaign_stats(rows: list[dict], brand_words: list[str], product_words: lis
                 "缺失/非法，分维度覆盖声量将偏低——请先补标再使用分组 NSR"
             ) if dimension_missing else None,
         },
-        "top_content": {
-            "pgc": sorted(
-                [
-                    row for row in rows
-                    if _CONTENT_TYPE.get(str(row.get("content_mode") or ""), "UKN")
-                    == "PGC"
-                ],
-                key=lambda row: int(row.get("interaction_cnt") or 0),
-                reverse=True,
-            )[:10],
-            "ugc": sorted(
-                [
-                    row for row in rows
-                    if _CONTENT_TYPE.get(str(row.get("content_mode") or ""), "UKN")
-                    == "UGC"
-                ],
-                key=lambda row: int(row.get("interaction_cnt") or 0),
-                reverse=True,
-            )[:10],
-        },
+        "top_content": top_content,
+        # FIX-23 / FIX-49：热帖配方解构的输入就是热门榜单本身（原版 content_stats.py:5）。
+        "content_formula_input": [
+            {"content_mode": kind.upper(), **report_contract.formula_row(row)}
+            for kind in ("pgc", "ugc") for row in top_content[kind]
+        ],
     }
+
+
+def _check_sentiment_coverage(relevant_rows: list[dict], warnings: list[str]) -> None:
+    """活动相关行 AI 情感缺失/非法：≤5% 剔出情感分母并告警，>5% 报错（原版 aggregate.py:77-88）。
+
+    不回退监测平台 sentiment；缺失行仍计入声量、互动等非情感指标。
+    """
+    total = len(relevant_rows)
+    if not total:
+        return
+    missing = sum(1 for row in relevant_rows if _row_sentiment(row) is None)
+    if not missing:
+        return
+    ratio = missing / total
+    message = (f"活动相关内容中 {missing}/{total} 条（{ratio * 100:.1f}%）"
+               "AI 情感缺失或不是 正面/中性/负面")
+    if ratio > AI_SENTIMENT_MISSING_MAX:
+        raise ValueError(f"aggregate: {message}，超过允许的 {AI_SENTIMENT_MISSING_MAX:.0%}；"
+                         "请先完成/补跑轮次一情感标注（不使用监测平台原始情感）")
+    warnings.append(message + "，这部分不计入情感分布与 NSR")
+
+
+def _campaign_partitions(plan: dict, analysis_objects: list[str]) -> list[dict]:
+    """活动切分：优先 Excel 权威字段 analysis_object；多活动禁止混池（原版 pick_campaign）。"""
+    if analysis_objects:
+        return [{"id": value, "analysis_object": value} for value in analysis_objects]
+    campaigns = plan.get("campaigns") or []
+    if len(campaigns) > 1 and not all(camp.get("filter_words") for camp in campaigns):
+        raise ValueError("aggregate: 数据含多个活动但缺少『分析对象』或活动过滤词，"
+                         "无法逐活动切分；不允许混池统计")
+    return campaigns or [{"id": plan.get("activity_name") or "default", "filter_words": []}]
+
+
+def _stats_scope(rows: list[dict], kept: list[dict], analysis_object: str | None,
+                 filter_words: list[str], cleaned: dict) -> dict:
+    """统计范围披露（FIX-21，原版 aggregate.py:89-92 stats_scope）。
+
+    raw=监测检索原始（清洗输入）、noise_removed=清洗剔除、ai_irrelevant=轮次一判「否」、
+    unlabeled=轮次一未标注、kept=活动相关（本报告统计口径）。
+    """
+    if analysis_object:
+        scoped = [r for r in rows if str(r.get("analysis_object") or "").strip() == analysis_object]
+    elif filter_words:
+        scoped = [r for r in rows if _mentions(r, filter_words)]
+    else:
+        scoped = list(rows)
+    record = (cleaned or {}).get("clean_record") or {}
+    removed = record.get("removed") or {}
+    if analysis_object:
+        # 多活动：只有按该活动周期剔除的条数能归属到本活动（去重/过滤词按全表计）。
+        noise_removed = int((record.get("period_dropped_by_campaign") or {}).get(analysis_object) or 0)
+    elif filter_words:
+        noise_removed = None
+    else:
+        noise_removed = sum(int(v or 0) for v in removed.values())
+    ai_irrelevant = sum(1 for r in scoped if _is_relevant(r) is False)
+    unlabeled = sum(1 for r in scoped if _is_relevant(r) is None) if any(
+        _is_relevant(r) is not None for r in scoped) else 0
+    # FIX-05：去噪剔除（Step5.5）与清洗剔除、AI 判否分开计数（KS_Noise_Review 出口核对）。
+    campaign_key = analysis_object or "default"
+    denoise_removed = int((((cleaned or {}).get("noise_by_campaign") or {}).get(campaign_key)) or 0)
+    raw = len(scoped) + (noise_removed or 0) + denoise_removed
+    ratio = ai_irrelevant / len(scoped) if scoped else 0.0
+    return {
+        "raw": raw,
+        "noise_removed": noise_removed,
+        "denoise_removed": denoise_removed,
+        "ai_irrelevant": ai_irrelevant,
+        "unlabeled": unlabeled,
+        "kept": len(kept),
+        "excluded": raw - len(kept),
+        "ai_irrelevant_ratio": round(ratio, 4),
+        # 原版告警：AI 判否占比 >10% 时先抽查被判否的内容（建议 30 条）再出报告。
+        "irrelevant_review_required": ratio > AI_IRRELEVANT_WARN,
+        "irrelevant_review_sample": AI_IRRELEVANT_REVIEW_SAMPLE,
+    }
+
+
+# FIX-24：赞助型活动（播客/节目/IP 合作）—— campaign_type 命中任一关键词即按赞助型处理
+# （G1 选项「赛事赞助或合作」；KS_Classification_Rules 2.N.2「赞助型活动（播客/节目/IP合作）」）。
+SPONSOR_TYPE_MARKERS = ("赞助", "播客", "节目")
+
+
+def _is_sponsor_type(plan: dict) -> bool:
+    """只看需求阶段已确认的 campaign_type（Q1：不从数据推断活动类型）。"""
+    declared = str(plan.get("campaign_type") or "").strip()
+    return any(marker in declared for marker in SPONSOR_TYPE_MARKERS)
+
+
+def _sponsor_share(wordcloud_campaign: dict | None) -> dict:
+    """品牌声量占比 B/A、产品声量占比 C/A（KS_Classification_Rules 2.N.2）。
+
+    A/B/C 取 n13 同一时间/平台范围的三次 SSJH 查询 total_volume：
+    overall=活动词、brand=活动词+品牌词、product=活动词+产品词。不额外取数。
+    """
+    dims = wordcloud_campaign or {}
+
+    def volume(dim: str):
+        source = (dims.get(dim) or {}).get("raw_source") or {}
+        value = source.get("total_volume")
+        return value if isinstance(value, (int, float)) and not source.get("degraded") else None
+
+    a, b, c = volume("overall"), volume("brand"), volume("product")
+    if not a:
+        return {"status": "unavailable", "reason": "活动总声量（A）不可用",
+                "activity_volume": a, "brand_volume": b, "product_volume": c,
+                "brand_share": None, "product_share": None}
+    return {"status": "available", "reason": None,
+            "activity_volume": a, "brand_volume": b, "product_volume": c,
+            "brand_share": round(b / a, 4) if b is not None else None,
+            "product_share": round(c / a, 4) if c is not None else None}
+
+
+# FIX-26：零粉丝重复内容的判定门槛（「零粉丝且大量重复」；FIX_PLAN 给定 ≥5 次）。
+ZERO_FAN_DUPLICATE_MIN = 5
+
+
+def _zero_fan_duplicates(rows: list[dict]) -> list[dict]:
+    """按（作者、文案 hash）找出零粉丝且重复 ≥5 次的组；只列出，不删除。"""
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for row in rows:
+        if row.get("fans") != 0:
+            continue
+        text = re.sub(r"\s+", "", f"{row.get('title') or ''}{row.get('content') or ''}")
+        if not text:
+            continue
+        key = (str(row.get("author") or ""), hashlib.sha256(text.encode("utf-8")).hexdigest()[:16])
+        groups.setdefault(key, []).append(row)
+    return [{"author": author, "text_hash": digest, "count": len(items),
+             "ids": [str(r.get("id") or r.get("_dedup_key") or "") for r in items],
+             "status": "uncertain"}
+            for (author, digest), items in groups.items()
+            if len(items) >= ZERO_FAN_DUPLICATE_MIN]
+
+
+def _merge_cloud_words(cloud_word: dict) -> tuple[dict, str | None]:
+    """SSJH cloud_word {platform: {term: freq}} → 综合词表，按频次降序（同频保持首见顺序）。"""
+    total = cloud_word.get("_total") if isinstance(cloud_word, dict) else None
+    if isinstance(total, dict) and total:
+        return dict(total), "ssjh_total"
+    merged: dict[str, int] = {}
+    for platform, words in (cloud_word or {}).items():
+        if platform == "_total" or not isinstance(words, dict):
+            continue
+        for term, value in words.items():
+            if isinstance(value, (int, float)):
+                merged[term] = merged.get(term, 0) + value
+    if not merged:
+        return {}, None
+    ordered = sorted(merged.items(), key=lambda kv: -kv[1])
+    return dict(ordered), "sum_by_term_across_platforms"
+
+
+def _natural_vs_ad(rows: list[dict]) -> dict:
+    """FIX-26：自然/广告/未知计数。is_ad 兼容 Excel 布尔与 SSJH 的 0/1。"""
+    counts = {"natural": 0, "ad": 0, "unknown": 0}
+    for row in rows:
+        flag = row.get("is_ad")
+        if isinstance(flag, bool) or flag in (0, 1):
+            counts["ad" if flag else "natural"] += 1
+        else:
+            counts["unknown"] += 1
+    return counts
+
+
+def _top_rows(rows: list[dict], kind: str, limit: int = 10) -> list[dict]:
+    """某内容类型按总互动量降序的 Top N（原版 content_stats.top_content）。"""
+    pool = [row for row in rows
+            if _CONTENT_TYPE.get(str(row.get("content_mode") or ""), "UKN") == kind]
+    pool = [row for row in pool if report_contract.interaction_value(row) is not None]
+    return sorted(pool, key=report_contract.interaction_value, reverse=True)[:limit]
 
 
 def _voice_share(activity_n: int, brand_period: dict, start, end,
@@ -686,7 +905,6 @@ def _voice_share(activity_n: int, brand_period: dict, start, end,
     return out
 
 
-@handler("aggregate")
 def _structure_config(
     opinion_labels: list[str] | None = None,
     ugc_categories: list[str] | None = None,
@@ -775,6 +993,105 @@ def _rerun_scope(state, stage: str, review_key: str, rows: list[dict]):
     return rerun_ids, _calibration_samples(review, rows)
 
 
+# ── Step5.5 去噪审核（FIX-05，原版 KS_Noise_Review）─────────────────────────
+NOISE_BATCH = 15
+NOISE_EXPANSION_ROUNDS = 2
+NOISE_SYSTEM = (
+    "你是营销活动去噪审核员。只判断内容是否属于本次活动分析范围，不做情感或相关性标注。\n"
+    "先读给出的「前一句+关键词当句+后一句」窗口，不足时再读标题、全文与识别文本。\n"
+    "判定表：同名、词义撞车，正文讨论其他对象→noise；正文与本次活动无关、只为引流挂活动话题→noise；"
+    "其他期次、其他活动或只有品牌日常内容且不在本次活动范围→noise；属于用户已明确排除的范围→noise；"
+    "真实参与、介绍、评价本次活动（包括投诉、差评）→keep；赞助型活动中讨论被赞助节目/IP且符合范围→keep；"
+    "仅标签可见、正文缺失或纯图片、证据不足→uncertain（证据不足不等于噪音）。\n"
+    "噪音指无关传播，不指负面情绪。识别文本可能错字或误识别，与正文冲突时不单凭识别文本判噪音。\n"
+    '只输出 JSON：{"decisions":[{"id":"…","verdict":"keep|noise|uncertain","branch":"命中分支或词",'
+    '"evidence_field":"title|content|video_cover_text|audio_text|video_text","reason":"一句理由"}]}'
+)
+
+
+def _noise_judge(rows: list[dict], context: dict, terms: list[str]) -> list[dict]:
+    decisions: list[dict] = []
+    for start in range(0, len(rows), NOISE_BATCH):
+        batch = rows[start:start + NOISE_BATCH]
+        payload = [{"id": noise_review.row_id(r), "title": r.get("title") or "",
+                    "content": r.get("content") or "",
+                    "windows": noise_review.windows(r, terms),
+                    **{f: r.get(f) for f in ("video_cover_text", "audio_text", "video_text") if r.get(f)}}
+                   for r in batch]
+        expected = {item["id"] for item in payload}
+        user = (f"活动：{context['campaign_name']}\n活动边界：{context['campaign_context']}\n"
+                f"活动取数关键词：{context['activity_keywords']}\n待审内容：\n"
+                + json.dumps(payload, ensure_ascii=False))
+        for _ in range(semantic.CHAT_JSON_ATTEMPTS):
+            data = semantic.chat_json(NOISE_SYSTEM, user)
+            got = [d for d in (data or {}).get("decisions") or []
+                   if isinstance(d, dict) and d.get("id") in expected and d.get("verdict") in noise_review.VERDICTS]
+            if {d["id"] for d in got} == expected:
+                window_of = {item["id"]: item["windows"] for item in payload}
+                decisions += [{**d, "windows": window_of[d["id"]], "source": "producer"} for d in got]
+                break
+            user += "\n上一轮漏判或结论无效，请对全部 id 给出 keep/noise/uncertain。"
+        else:
+            raise RuntimeError("noise_review: 去噪判定连续三次未覆盖全部待审内容")
+    return decisions
+
+
+@handler("noise_review")
+def noise_review_step(node, state, ctx):
+    """逐活动去噪：选样→窗口→语义判定→扩查→剔除→出口核查。噪音默认剔除，不新增 HC。"""
+    if not semantic.llm_available():
+        raise RuntimeError("noise_review: 缺少语义能力，禁止跳过去噪")
+    cleaned = state.read_artifact("cleaned_data") or {}
+    rows = list(cleaned.get("rows") or [])
+    plan = state.read_artifact("confirmed_plan") or {}
+    context = _r1_context_from_plan(plan)
+    if not context["campaign_name"] or not context["activity_keywords"]:
+        raise RuntimeError("noise_review: 缺活动名或活动取数关键词，无法定位命中句")
+    terms = [t for t in re.split(r"[|+()（）\s]+", context["activity_keywords"]) if t]
+    validator_noise = set(map(str, (state.params.get("qc_noise_ids") or [])))
+    previous = {d["id"]: d for d in ((state.read_artifact("noise_review") or {}).get("decisions") or [])}
+    by_id = {noise_review.row_id(r): r for r in rows}
+    review = {"campaigns": {}, "decisions": [], "removed_ids": [], "uncertain_ids": []}
+    for cid, group in _rows_by_campaign(rows).items():
+        sample = noise_review.select_sample(group)
+        pending = list(dict.fromkeys(i for ids in sample.values() for i in ids))
+        decided: dict[str, dict] = {}
+        for _ in range(NOISE_EXPANSION_ROUNDS + 1):
+            todo = [i for i in pending if i not in decided]
+            fresh = []
+            for rid in todo:
+                if rid in validator_noise:          # FIX-06：Validator 高点核查确认的噪音
+                    decided[rid] = {"id": rid, "verdict": "noise", "source": "validator",
+                                    "reason": "独立 Validator 高点核查判定为噪音"}
+                elif rid in previous:               # 增量：沿用上次结论，不重复调用模型
+                    decided[rid] = previous[rid]
+                else:
+                    fresh.append(by_id[rid])
+            for decision in _noise_judge(fresh, context, terms):
+                decided[decision["id"]] = decision
+            noise = [d for d in decided.values() if d["verdict"] == "noise"]
+            extra = noise_review.expansion(group, noise, set(decided))
+            if not extra:
+                break
+            pending += extra
+        removed = [rid for rid, d in decided.items() if d["verdict"] == "noise"]
+        review["campaigns"][cid] = {"sampled": sample, "reviewed": len(decided),
+                                    "removed": len(removed),
+                                    "removed_interaction": sum(report_contract.interaction_value(by_id[r]) or 0
+                                                               for r in removed)}
+        review["decisions"] += list(decided.values())
+        review["removed_ids"] += removed
+        review["uncertain_ids"] += [rid for rid, d in decided.items() if d["verdict"] == "uncertain"]
+    removed_set = set(review["removed_ids"])
+    kept = [r for r in rows if noise_review.row_id(r) not in removed_set]
+    noise_review.exit_check({d["id"] for d in review["decisions"]}, review["decisions"],
+                            {noise_review.row_id(r) for r in kept})
+    denoised = {**cleaned, "rows": kept,
+                "noise_record": {"cleaned": len(rows), "removed": len(removed_set), "kept": len(kept)},
+                "noise_by_campaign": {cid: info["removed"] for cid, info in review["campaigns"].items()}}
+    return {"artifacts": {"denoised_data": denoised, "noise_review": review}}
+
+
 def _r1_context_from_plan(plan: dict) -> dict:
     """从 confirmed_plan 构造轮次一标注上下文（FIX-27）。
 
@@ -814,6 +1131,7 @@ def _r1_context_from_plan(plan: dict) -> dict:
     }
 
 
+@handler("aggregate")
 def aggregate(node, state, ctx):
     """分对象统计聚合（本地确定性，无副作用）。
 
@@ -826,43 +1144,40 @@ def aggregate(node, state, ctx):
       - 情感以 AI 标注为准；活动相关行缺 AI 情感 → 直接报错，不兜底。
     """
     annotated = state.read_artifact("annotated_data") or {}
-    cleaned = state.read_artifact("cleaned_data") or {}
+    cleaned = state.read_artifact("denoised_data") or {}
     plan = state.read_artifact("confirmed_plan") or {}
     brand_period = state.read_artifact("brand_stats") or {}
     baseline = state.read_artifact("brand_stats_baseline") or {}
 
-    # 行源：优先标注产物 rows，回退清洗产物 rows（标注接真前允许本地跑通）。
-    rows = annotated.get("rows") if isinstance(annotated, dict) and annotated.get("rows") else None
-    if rows is None:
-        rows = cleaned.get("rows") if isinstance(cleaned, dict) else None
-    rows = rows or []
+    # 行源只认标注产物（FIX-23 / FIX_PLAN 0.3：新产物缺失 fail-closed，不回退清洗 rows）。
+    rows = list((annotated or {}).get("rows") or []) if isinstance(annotated, dict) else []
 
-    # 活动相关过滤：有 relevance 标注时按标注筛；全未标注时用全部并标记 relevance_missing。
+    # 活动相关过滤（原版 aggregate.py:62-74）：只统计 relevance=是；未标注行排除并告警；
+    # 活动相关为 0 条时无法统计，直接报错。
     relevance_vals = [_is_relevant(r) for r in rows]
-    relevance_missing = all(v is None for v in relevance_vals)
-    if relevance_missing:
-        relevant_rows = list(rows)
-    else:
-        relevant_rows = [r for r, v in zip(rows, relevance_vals) if v]
+    relevant_rows = [r for r, v in zip(rows, relevance_vals) if v]
+    if not relevant_rows:
+        raise ValueError("aggregate: 活动相关内容为 0 条，无法统计"
+                         "（检查轮次一『是否活动相关』是否已标注）")
+    warnings: list[str] = []
+    unlabeled = sum(1 for v in relevance_vals if v is None)
+    if unlabeled:
+        warnings.append(f"{unlabeled}/{len(rows)} 行『是否活动相关』缺失（轮次一未标注？），"
+                        "已排除出统计")
+    _check_sentiment_coverage(relevant_rows, warnings)
 
-    # 缺 AI 情感不兜底：任一活动相关行取不到情感 → 报错。
-    for r in relevant_rows:
-        if _row_sentiment(r) is None:
-            raise ValueError("aggregate: 活动相关内容缺 AI 情感标注，按口径直接报错（不兜底平台口径）")
-
-    # 活动切分优先采用 Excel 权威字段 analysis_object，避免多活动混入 default。
     analysis_objects = sorted({
         str(row.get("analysis_object") or "").strip()
         for row in relevant_rows
         if str(row.get("analysis_object") or "").strip()
     })
-    campaigns = (
-        [{"id": value, "analysis_object": value} for value in analysis_objects]
-        or plan.get("campaigns")
-        or [{"id": plan.get("activity_name") or "default", "filter_words": []}]
-    )
-    brand_words = plan.get("brand_words") or ([brand] if (brand := plan.get("brand")) else [])
+    campaigns = _campaign_partitions(plan, analysis_objects)
+    # 漏斗 Tier2 只匹配主品牌名（G1 必填 brand），不用 brand_words 别名集合（原版 aggregate.py:51）。
+    brand_name = str(plan.get("brand") or "").strip()
     product_words = plan.get("product_words") or []
+    funnel_method = str(plan.get("funnel_method") or mention_funnel.KEYWORD_MENTION)
+    if funnel_method not in mention_funnel.METHODS:
+        raise ValueError(f"aggregate: 未知的提及漏斗方法 {funnel_method!r}")
 
     # 品牌条均互动量：同一份 brand_stats 的 互动量 ÷ 条数（FIX-04 / :207 分母口径）。
     _bp_volume = brand_period.get("total_volume") if isinstance(brand_period, dict) else None
@@ -885,7 +1200,10 @@ def aggregate(node, state, ctx):
         else:
             crows = [r for r in relevant_rows if _mentions(r, fw)] if fw else list(relevant_rows)
         per_campaign[cid] = _campaign_stats(
-            crows, brand_words, product_words, brand_avg_interaction)
+            crows, brand_name, product_words, brand_avg_interaction, funnel_method,
+            str(plan.get("content_scope") or "all").lower())
+        per_campaign[cid]["stats_scope"] = _stats_scope(
+            rows, crows, analysis_object, fw, cleaned)
         per_campaign[cid]["voice_share"] = _voice_share(
             len(crows), brand_period,
             camp.get("period_start") or plan.get("period_start"),
@@ -893,6 +1211,13 @@ def aggregate(node, state, ctx):
             plan.get("coverage_warnings") or [],
         )
         per_campaign[cid]["metrics"]["声量贡献参考"] = per_campaign[cid]["voice_share"]["value"]
+        # FIX-61：逐模块范围记录（需求指纹/对象/周期/平台/方法/分母/数据源）。
+        module_scope.attach(
+            per_campaign[cid], campaign=cid, plan=plan,
+            requirement=state.read_artifact("requirement_confirmed") or {},
+            period=(camp.get("period_start") or plan.get("period_start"),
+                    camp.get("period_end") or plan.get("period_end")),
+            source_refs=[state.artifact_ref("denoised_data"), state.artifact_ref("annotated_data")])
 
     baseline_meta = baseline.get("meta") if isinstance(baseline, dict) else {}
     baseline_unavailable = bool(
@@ -911,6 +1236,22 @@ def aggregate(node, state, ctx):
             "action": "suppress baseline comparison and disclose limitation",
         })
 
+    # Q1：不再按旧6类矩阵推断 campaign_type；只给传播特征参考（不改变已确认活动类型）。
+    propagation = propagation_features.propagation_features(
+        relevant_rows, plan.get("brand_words") or ([brand_name] if brand_name else []))
+    if _is_sponsor_type(plan):
+        wordcloud = state.read_artifact("wordcloud_data") or {}
+        for cid, bundle in per_campaign.items():
+            bundle["sponsor_share"] = _sponsor_share((wordcloud.get("campaigns") or {}).get(cid))
+            if bundle["sponsor_share"]["status"] != "available":
+                data_issues.append({
+                    "id": f"sponsor-share-unavailable-{cid}-{state.run_id}",
+                    "source": "controlled-stat-tool", "affected_module": "sponsor_share",
+                    "severity": "module_degraded",
+                    "reason": bundle["sponsor_share"]["reason"],
+                    "action": "omit sponsor share table and disclose limitation",
+                })
+
     stats_bundle = {
         "schema_version": "1.1",
         # Preserve the controlled-stat-tool brand aggregate verbatim. It contains
@@ -925,21 +1266,26 @@ def aggregate(node, state, ctx):
             "content_type_dist": brand_period.get("volume_type") or {},
             "trend": brand_period.get("volume_trend") or {},
             "interaction_trend": brand_period.get("interaction_trend") or {},
+            # FIX-48：1.1 趋势图连续展示基准期+活动期。
+            "trend_two_period": charts.two_period_trend(
+                brand_period, baseline if isinstance(baseline, dict) else None),
             "wordcloud": brand_period.get("cloud_word") or {},
             "wordcloud_rows": brand_period.get("_wordcloud_tables") or {},
             "hot_content": brand_period.get("articles") or {},
             "top_content": report_contract.top_content(_iter_ssjh_rows(brand_period)),
+            "peak_evidence": noise_review.peak_evidence(
+                [{**r, "_publish_ymd": _publish_ymd(r)} for r in _iter_ssjh_rows(brand_period)]),
+            "overview": overview.brand_overview(
+                brand_period, charts.daily_totals, str(plan.get("content_scope") or "all").lower(),
+                _publish_ymd),
             "degraded": bool(brand_period.get("degraded")),
         },
         "campaigns": per_campaign,
-        # FIX-10：campaign_type=待数据推断 时按信号矩阵推断；用户已给类型时不推断。
-        "inferred_campaign_type": (
-            campaign_type_inference.infer_campaign_type(relevant_rows, brand_words)
-            if str(plan.get("campaign_type") or "待数据推断").strip() == "待数据推断"
-            else None
-        ),
+        # Q1：活动主类型沿用需求确认结果；传播特征仅作解释参考（待核实，不判类型）。
+        "campaign_type": str(plan.get("campaign_type") or "").strip(),
+        "propagation_features": propagation,
         "campaign_goal": list(plan.get("campaign_goal") or ["待数据推断"]),
-        "relevance_missing": relevance_missing,
+        "warnings": warnings,
         "metric_whitelist": list(METRIC_WHITELIST),
         "baseline": (
             {"status": "unavailable", "total_volume": None,
@@ -969,6 +1315,15 @@ def aggregate(node, state, ctx):
         "stats_bundle": stats_bundle,
         "data_issues": {"issues": data_issues},
     }}
+
+
+def merge_amendments(fix: dict, revision_id, report_version, validated: bool) -> list[dict]:
+    """把进行中的交接后修正（pending）落为一条 amendment，接在历史记录之后。"""
+    amendments = list((fix or {}).get("history") or [])
+    if (fix or {}).get("pending"):
+        amendments.append({**fix["pending"], "to_revision_id": revision_id,
+                           "to_report_version": report_version, "validated": validated})
+    return amendments
 
 
 @handler("handoff")
@@ -1054,6 +1409,11 @@ def handoff(node, state, ctx):
         "degraded": degraded,
         "terminal_accepted": validated,
     }
+    # FIX-38：交接后修正——沿用原文档，追加 amendments[]（修正前后 revision 可追溯）。
+    fix = state.read_artifact("post_handoff_fix") or {}
+    amendments = merge_amendments(fix, bound_rev, report_version, validated)
+    if amendments:
+        handoff_payload["amendments"] = amendments
     # 落 handoff.json 到 run_dir/delivery（闭环证据，供 Gateway/Supervisor 复核）。
     try:
         hp = state.run_dir / "delivery" / "handoff.json"
@@ -1062,7 +1422,10 @@ def handoff(node, state, ctx):
                       encoding="utf-8")
     except Exception:
         pass
-    return {"artifacts": {"handoff": handoff_payload}}
+    out = {"handoff": handoff_payload}
+    if fix.get("pending"):
+        out["post_handoff_fix"] = {"pending": None, "history": amendments}
+    return {"artifacts": out}
 
 
 # ── tool 节点（外部副作用，接真：SSJH 取数 + 确定性降级）──────────
@@ -1150,10 +1513,15 @@ def ssjh_pull(node, state, ctx):
                     result = ssjh.fallback(scoped_plan, baseline=False)
                 degraded = bool(result.get("degraded"))
                 degraded_any = degraded_any or degraded
+                # FIX-54：第二章活动词云综合已选平台——优先用 SSJH 的 _total，
+                # 否则对各平台同词频次求和（对 SSJH 返回值的确定性合并，不本地重计）。
+                merged_words, merge_method = _merge_cloud_words(result.get("cloud_word") or {})
                 campaign_result[dimension] = {
                     "query": query,
-                    "platforms": result.get("cloud_word") or {},
-                    "word_rows": result.get("_wordcloud_tables") or {},
+                    "platforms": {"all": merged_words} if merged_words else {},
+                    "platforms_by_source": result.get("cloud_word") or {},
+                    "merge": merge_method,
+                    "word_rows": {},
                     "raw_source": result,
                     "evidence_rows": [
                         {
@@ -1219,7 +1587,7 @@ def ssjh_pull(node, state, ctx):
     arts: dict[str, Any] = {}
     for k in out:
         if k == "wordcloud_data":
-            # 词云出口：逐平台词表（{platform: {word: freq}}），各平台独立不合并。
+            # 品牌词云出口：逐平台词表（{platform: {word: freq}}）；1.3 按平台分组（KS）。
             arts[k] = {
                 "platforms": payload.get("cloud_word") or {},
                 "meta": payload.get("meta"),
@@ -1235,7 +1603,7 @@ def ssjh_pull(node, state, ctx):
 def annotate(node, state, ctx):
     """AI 标注（轮次一 n09 / 轮次二 n11），按 node.outputs 分流。
 
-      - outputs 含 annotated_round1 → 轮次一：情感 + 活动相关（消费 cleaned_data.rows）。
+      - outputs 含 annotated_round1 → 轮次一：情感 + 活动相关（消费 denoised_data.rows）。
       - outputs 含 annotated_data   → 轮次二：观点/UGC方式/讨论维度 三独立任务 + 覆盖检查
         （消费 annotated_round1.rows，注入 confirmed_opinion_labels + ugc_category_list）。
 
@@ -1248,7 +1616,7 @@ def annotate(node, state, ctx):
     threshold = int(state.params.get("annotation_routing_threshold", 1000))
 
     if "annotated_round1" in out:
-        cleaned = state.read_artifact("cleaned_data") or {}
+        cleaned = state.read_artifact("denoised_data") or {}
         src_rows = cleaned.get("rows") if isinstance(cleaned, dict) else None
         rows = [dict(r) for r in (src_rows or [])]
         plan = state.read_artifact("confirmed_plan") or {}
@@ -1290,7 +1658,7 @@ def annotate(node, state, ctx):
         r1 = state.read_artifact("annotated_round1") or {}
         src_rows = r1.get("rows") if isinstance(r1, dict) else None
         if not src_rows:
-            cleaned = state.read_artifact("cleaned_data") or {}
+            cleaned = state.read_artifact("denoised_data") or {}
             src_rows = cleaned.get("rows") if isinstance(cleaned, dict) else None
         rows = [dict(r) for r in (src_rows or [])]
 
@@ -1361,7 +1729,8 @@ def charts_render(node, state, ctx):
 
     project = str(plan.get("project") or plan.get("brand") or "topic5")
     report_name = str(plan.get("report_name") or f"{project}营销活动复盘")
-    version = f"v0.{state.counters.get('report_patch', 0)}"
+    # n14 在 n16 之前运行：封面标注即将写出的版本（下一次整篇写作 minor+1，patch=0）。
+    version = f"v{state.counters.get('report_minor', 0) + 1}.0"
     outdir = str(state.run_dir / "charts")
 
     def _build() -> dict:
@@ -1400,10 +1769,6 @@ def feishu_export(node, state, ctx):
 
 
 # ── agent 节点（语义，接真：Ark Chat + 确定性降级）─────────────
-# 旧固定四类仅作为显式兼容选项；默认按真实UGC动态发现。
-# FIX-32：「自发安利」含倾向词「安利」。FIX_PLAN 建议的「推荐分享」同样命中原版
-# SENTIMENT_WORDS 的「推荐」，改用原版 UGC prompt 的示例名「晒单分享」。
-_UGC_FIXED_FOUR = ["模仿打卡", "创意改编", "测评分享", "晒单分享"]
 
 
 def _sample_texts(rows: list[dict], limit: int = 40, maxlen: int = 120) -> list[str]:
@@ -1471,7 +1836,7 @@ def _discover(pool: list[dict], *, key: str, kind: str, size: int,
     samples, catalog, sampling = label_review.source_catalog(pool, size)
     data = semantic.chat_json(
         label_review.discovery_prompt(key, kind=kind, campaign_name=campaign_name),
-        json.dumps(samples, ensure_ascii=False), max_tokens=6144,
+        json.dumps(samples, ensure_ascii=False), max_tokens=6144, lm_scope="discovery",
     )
     review = label_review.ground_candidates(data, key, catalog, max_items)
     review["sampling"].update(sampling)
@@ -1487,7 +1852,7 @@ def ugc_discovery(node, state, ctx):
 
     口径（knowledge/_字段速查 + params）：
       - dynamic（默认）→ 从UGC内容样本发现参与方式；经标签关卡确认。
-      - fixed_four 为显式兼容选项；无语义能力直接报错，不生成固定类别兜底。
+      - 无语义能力直接报错，不生成固定类别兜底（D5：固定四类已删除）。
     保留 categories[]；review_items 包含定义、边界、按 quote_id 核验的原帖引用。
     """
     plan = state.read_artifact("confirmed_plan") or {}
@@ -1508,13 +1873,8 @@ def ugc_discovery(node, state, ctx):
             "reason": "content_scope=pgc; UGC participation module disabled",
         }}}
 
-    mode = state.params.get("ugc_category_mode", "dynamic")
-    if mode == "fixed_four":
-        return {"artifacts": {"ugc_category_list": {
-            "mode": mode, "categories": list(_UGC_FIXED_FOUR), "source": "fixed",
-            # FIX-32：客户已废弃固定四类，保留仅为显式兼容
-            "warnings": ["fixed_four 已废弃（客户口径改为 dynamic 发现），仅作兼容保留"],
-        }}}
+    # 缺陷清单 D5：UGC 参与方式只按本活动真实样本动态发现（R5-16/R5-18），固定四类已删除。
+    mode = "dynamic"
 
     # FIX-31：样本取「活动相关 且 UGC」（原版 phase-ugc-discovery run.py:155-157），
     # 因此依赖轮次一的相关性判定。
@@ -1726,7 +2086,7 @@ def opinion_policy_gate(node, state, ctx):
             ugc.get("degraded")
             or not ugc_categories
             or len(set(ugc_categories)) != len(ugc_categories)
-            or ugc.get("mode") not in ("fixed_four", "dynamic")
+            or ugc.get("mode") != "dynamic"
         )
     ):
         reasons.append("UGC 类别不完整或不稳定")
@@ -1789,7 +2149,9 @@ def wordcloud_insight(node, state, ctx):
     if not semantic.llm_available():
         raise RuntimeError("wordcloud_insight: 缺少语义能力")
     expected = {
-        spec["chart_id"]: spec for spec in charts.build_chart_specs(stats, wc, state.read_artifact("confirmed_plan") or {})
+        spec["chart_id"]: spec for spec in charts.build_chart_specs(
+            stats, wc, state.read_artifact("confirmed_plan") or {},
+            state.read_artifact("requirement_confirmed") or {})
         if spec["chart_type"] == "wordcloud"
     }
     rendered = {
@@ -1807,14 +2169,20 @@ def wordcloud_insight(node, state, ctx):
         cid, dimension, platform = (scope.get("campaign"), scope.get("dimension"), scope.get("platform"))
         if not all((cid, dimension, platform)):
             raise RuntimeError("wordcloud_insight: 缺少 n14 新 Skill 范围记录")
+        # FIX-55：call-brief 以当前已保存需求为准（不信任 n14 记录里的旧 brief）。
+        chart = {**chart, "call_brief": expected[chart["chart_id"]]["call_brief"]}
         result = wordcloud_adapter.analyze(state, chart, charts.WORDCLOUD_DIR, FORBIDDEN_METRIC_TERMS)
         out.setdefault(cid, {}).setdefault(dimension, {"platforms": {}})["platforms"][platform] = result
     for cid, dimensions in (wc.get("campaigns") or {}).items():
         for dimension, bundle in dimensions.items():
             if bundle.get("not_applicable"):
                 out.setdefault(cid, {})[dimension] = {"not_applicable": True, "platforms": {}}
+    # FIX-49：热帖成功配方（2.N.4④），输入为 2.N.5 同一份热门榜单。
+    formulas = {cid: hot_formula.analyze(cid, bundle.get("content_formula_input") or [],
+                                         FORBIDDEN_METRIC_TERMS)
+                for cid, bundle in (stats.get("campaigns") or {}).items()}
     return {"artifacts": {"wordcloud_insight": {
-        "brand": out.pop("brand", {}), "campaigns": out,
+        "brand": out.pop("brand", {}), "campaigns": out, "hot_post_formula": formulas,
         "source": "wordcloud-insight-v0.2.6", "complete": True}}}
 
 
@@ -1851,15 +2219,18 @@ def write_report(node, state, ctx):
     """报告内容层撰写（MD，不含飞书布局）。
 
     口径（knowledge/04 报告结构 v2.6）：
-      - 五章结构（report_chapters=five 默认）：篇头/品牌传播/活动传播/综合定位/经验总结(+总结建议)。
+      - 固定四章（FIX-42，结构常量见 policy.REPORT_*）：一品牌/二活动（末节 2.{N+1} 拉升）/
+        三经验总结/四总结与建议。
       - 指标白名单（条均互动量/品牌提及率/产品提及占比/NSR），禁用“人均/转化/性价比”。
       - 活动层只讲“提及”不讲“转化”；多活动逐个处理不相加；竞品章已下线。
     消费 stats_bundle + chart_urls + wordcloud_insight。无凭据降级到确定性模板 MD。
     输出 schema：{markdown, chapters, version, source, degraded?}
     """
-    ver = state.counters.get("report_patch", 0)
-    version = f"0.{ver}"
-    chapters = state.params.get("report_chapters", "five")
+    # FIX-45：每次整篇（重）写报告 minor+1、patch 归零；首版即 1.0。
+    state.counters["report_minor"] = state.counters.get("report_minor", 0) + 1
+    state.counters["report_patch"] = 0
+    version = _report_version(state)
+    chapters = REPORT_CHAPTERS_MODE
     stats = state.read_artifact("stats_bundle") or {}
     charts = state.read_artifact("chart_urls") or {}
     wc_insight = state.read_artifact("wordcloud_insight") or {}
@@ -1873,33 +2244,36 @@ def write_report(node, state, ctx):
         "1) 指标只用【条均互动量/品牌提及率/产品提及占比/NSR】，禁用“人均/转化/转化率/性价比”等无数据支撑说法；\n"
         "2) 活动层指标只统计活动相关内容，多活动逐个处理、不相加为合计声量；\n"
         "3) 提及漏斗只讲“提及”不讲“转化”；竞品分析已下线，不要写竞品章；\n"
-        f"4) 报告结构={chapters}，必须包含：数据说明、整体洞察、1.1传播概况、1.2口碑分析、"
-        "1.3内容分析、1.4热门内容；每个活动独立包含传播概况/活动声量渗透分析/口碑分析/"
-        "内容分析/热门内容；以及 3.1 基准期对比、经验总结中的成功经验/待改进问题/行动计划、"
-        "总结与建议；不得生成已下线的竞品章节；\n"
+        "4) " + _report_structure_rule(len(stats.get("campaigns") or {})) + "\n"
         "5) 所有数字必须来自给定数据，不得编造；证据不足就说明，不凑根因；\n"
         "6) 需插图时用 Markdown 图片语法 `![标题](local_path)`，local_path 取 chart_urls 中每张图的"
         "`local_path` 字段（本地 PNG 路径，交付时会上传进飞书文档）；local_path 为空的图跳过不插。\n"
-        "7) 五个大章必须原样命名：`## 01 品牌传播表现`、`## 02 活动传播表现`、"
-        "`## 03 综合表现定位`、`## 04 经验总结`、`## 05 总结与建议`；"
-        "活动标题为 `### 2.N 活动 {活动名}`，五个分节用 `#### 2.N.1` 至 `#### 2.N.5`。"
+        "7) 标题层级：四章用 `## 一、品牌传播表现` 等；1.N、2.N、2.{N+1}、3.N 用 `###`；"
+        "活动标题为 `### 2.N 活动 {活动名}`，其五个分节用 `#### 2.N.1` 至 `#### 2.N.5`。"
         "每节顺序为分析文字→对应图→数据表；图必须放在对应章节，不能集中堆在热门内容后。\n"
-        "8) 整体洞察必须含具体发现和数字，成功经验、待改进问题、行动计划逐条回指章节和数字；"
+        "8) " + _POLICY.CALLOUT_RULES + "成功经验、待改进问题、行动计划逐条回指章节和数字；"
         "有负面样本必须分析，不能用泛泛的证据不足代替；小样本<30标明样本不足，不下确定性结论。\n"
         "9) 不输出内部字段名、版本、模板生成说明、布局指令或原始 JSON；UGC 个人账号必须匿名，"
         "公开 PGC 机构或 KOL 作者仅可在热门内容表展示；词云解读必须为连贯叙事。\n"
         "10) 基准期30天和活动期长度不同，必须同时比较日均声量并披露假期影响；"
         "不把总量差异直接解释为活动效果；所有推导数值需写清分子、分母或计算方式。\n"
-        "11) 若 stats_bundle.clean_record.sampling.applied=true，必须在“00 篇头 · 数据说明”"
-        "明确写出总体量、实际样本量、demo 抽样及“仅供参考、不代表全量结论”，不得把样本统计"
-        "外推成全量活动结论。\n"
+        "11) 篇头顺序：`# 标题` → `### 数据说明` → `## 整体洞察` → `## 一、品牌传播表现`；"
+        "数据说明由系统按取数配置生成，你只需保留该标题，不要写方法论、口径、清洗或抽样说明。"
+        "若 stats_bundle.clean_record.sampling.applied=true，系统会在整体洞察后插入抽样提示，"
+        "正文不得把样本统计外推成全量活动结论。\n"
         "只输出 Markdown 正文。")
     sys_p += (
         "\n必需证据规范：品牌和活动分别使用自己的词云，不得混用。活动口碑依据 opinion_analysis "
         "给出正负观点TOP5、各自情感方向全部内容为分母的占比、每观点2-3条代表原文；"
         "UGC依据 ugc_analysis 逐类写占比、代表内容与基于样本的质量解读。"
         "PGC和UGC热门内容分别Top10，不得截短或丢无标题正文，字段以给定top_content为准。"
-        "数据说明列出平台、周期、分析对象、关键词、过滤词，区分品牌监测聚合和活动Excel来源。"
+        "品牌口碑（1.2）与活动口碑（2.N.3）的情感来源不同，在对应小节用一句说明区分，不写在数据说明区。"
+        "1.1/2.N.1 的平台与内容结构结论、声量/互动高点句由系统按统计数据生成并插在节首，"
+        "你不要重复这些数字，只可在其后补充有帖子证据的归因。"
+        "互动量口径：" + report_contract.INTERACTION_NOTE
+        + "不写「点赞+评论+转发」等加总公式；按发布时间排序的内容不得称为互动量Top；"
+        "metrics.互动量/条均互动量为 null 时写「不可得」。"
+        "权威媒体：" + report_contract.AUTHORITY_MEDIA_RULE
     )
     sys_p += "\n\n" + (Path(__file__).parent / "REPORT_CONTRACT.md").read_text(encoding="utf-8")
     user_p = ("统计数据(stats_bundle)：\n" + json.dumps(_report_evidence(stats), ensure_ascii=False)
@@ -1910,7 +2284,7 @@ def write_report(node, state, ctx):
               + "\n\n冻结需求：\n"
               + json.dumps(state.read_artifact("confirmed_plan") or {}, ensure_ascii=False))
     try:
-        md = semantic.chat(sys_p, user_p, max_tokens=16384)
+        md = semantic.chat(sys_p, user_p, max_tokens=16384, lm_scope="write_report")
         if not md.strip():
             raise ValueError("模型返回空报告")
         # FIX-20：命中禁用措辞不再删除整句（删除会连带删掉数据与原文，且掩盖问题）。
@@ -1924,6 +2298,8 @@ def write_report(node, state, ctx):
             )
         except ValueError as error:
             raise ValueError(f"write_report: 报告未达结构或口径要求，禁止整篇降级替换: {error}") from error
+        # FIX-44：全文写完后，按客户「经验总结合成 Prompt」单独重写三章 3.1~3.3。
+        md = _synthesize_experience(md, state.read_artifact("confirmed_plan") or {}, stats)
         md = report_contract.assemble(
             md, plan=state.read_artifact("confirmed_plan") or {}, stats=stats,
             charts=charts, insight=wc_insight,
@@ -1948,19 +2324,26 @@ def write_report(node, state, ctx):
 @handler("fix_report")
 def fix_report(node, state, ctx):
     """修订完整报告；代码重建证据模块，结构/P0错误最多返修三次。"""
-    state.counters["qc_rounds"] = state.counters.get("qc_rounds", 0) + 1
-    state.counters["report_patch"] = state.counters.get("report_patch", 0) + 1
-    version = f"0.{state.counters['report_patch']}"
+    # FIX-36：G4 内容返工只累加 user_rework_rounds（在 HB 中），qc_rounds 只计 G3 返修循环。
+    qc_now = state.read_artifact("qc_report") or {}
+    user_rework = any(isinstance(i, dict)
+                      and (i.get("id") == "P0-g4-user-reject"
+                           or str(i.get("id") or "").startswith("P0-postfix-"))   # FIX-38 交接后修正
+                      and i.get("status") != "resolved" for i in qc_now.get("issues") or [])
+    if not user_rework:
+        state.counters["qc_rounds"] = state.counters.get("qc_rounds", 0) + 1
+    state.counters["report_patch"] = state.counters.get("report_patch", 0) + 1   # FIX-45：P0 修复只加 patch
+    version = _report_version(state)
     rnd = state.counters["qc_rounds"]
     qc = state.read_artifact("qc_report") or {}
     prev = state.read_artifact("report_md") or {}
-    chapters = (prev.get("chapters") if isinstance(prev, dict) else None) \
-        or state.params.get("report_chapters", "five")
+    chapters = REPORT_CHAPTERS_MODE
     prev_md = prev.get("markdown", "") if isinstance(prev, dict) else ""
     issues = qc.get("issues") or []
 
     def _issue_text(items) -> str:
-        parts = [str(i.get("msg", i)) if isinstance(i, dict) else str(i) for i in items]
+        parts = [str(i.get("msg") or i.get("evidence") or i) if isinstance(i, dict) else str(i)
+                 for i in items]
         return "；".join(parts) or "按质检意见修订"
 
     if not semantic.llm_available() or not prev_md:
@@ -1984,6 +2367,7 @@ def fix_report(node, state, ctx):
         "返修节点继续要求修改。口径不变：指标白名单、只讲提及不讲转化、数字不得编造。"
         "小样本披露可使用“样本不足”“样本量不足”“样本数不足”“样本量<30”等明确措辞，"
         "并且必须靠近对应维度名称，同时不得输出确定性结论。只输出修订后的完整 Markdown。"
+        "\n" + _POLICY.CALLOUT_RULES
     )
     sys_p += "\n\n" + (Path(__file__).parent / "REPORT_CONTRACT.md").read_text(encoding="utf-8")
 
@@ -2011,7 +2395,7 @@ def fix_report(node, state, ctx):
             md = semantic.chat(
                 sys_p,
                 build_user_prompt(current_md, current_issues),
-                max_tokens=16384,
+                max_tokens=16384, lm_scope="fix_report",
             )
             try:
                 if not md.strip():
@@ -2046,6 +2430,12 @@ def fix_report(node, state, ctx):
                 stats=stats,
                 charts=charts_payload,
             )
+            # FIX-39：返修改动的数字须来自 stats；否则视为编造（P0「数字与统计不符」）。
+            fix_record = report_contract.number_diff(canonical_previous, md, stats, charts_payload)
+            if fix_record["unknown"]:
+                last_preflight = {**last_preflight, "issues": list(last_preflight.get("issues") or []) + [{
+                    "id": "P0-fix-number-mismatch", "severity": "P0", "title": "数字与统计不符",
+                    "evidence": "、".join(fix_record["unknown"][:10]), "locus": "report_md"}]}
             remaining_p0 = [
                 item
                 for item in (last_preflight.get("issues") or [])
@@ -2053,6 +2443,7 @@ def fix_report(node, state, ctx):
             ]
             if not remaining_p0:
                 return {"artifacts": {"report_md": {
+                    "fix_record": fix_record["records"],
                     "markdown": md, "chapters": chapters, "version": version,
                     "fixed_round": rnd,
                     "source": "llm",
@@ -2127,20 +2518,101 @@ def _assert_no_forbidden_terms(md: str) -> None:
         )
 
 
+def _report_version(state) -> str:
+    """报告版本号 {minor}.{patch}（原版：P0 修复递增 patch，重写递增 minor；只写在元数据/文件名）。"""
+    return f"{state.counters.get('report_minor', 0)}.{state.counters.get('report_patch', 0)}"
+
+
+# FIX-42：报告结构固定四章（KS_Report_Template §一「固定，不可调整」），不再随参数切换。
+REPORT_CHAPTERS_MODE = "four"
+
+
+# FIX-44：客户 KS_Content_Analysis_Prompt「经验总结合成 Prompt」（质量红线与输出格式原文）。
+EXPERIENCE_SYSTEM = (
+    "## 角色\n你是一位资深营销复盘分析师，擅长从数据中提炼可操作的战略结论。\n\n"
+    "## 质量红线（P0，必须遵守）\n"
+    "- 每条成功经验和待改进问题，必须显式标注来源章节和具体数值\n"
+    "- 禁止空泛表述，如「达人策略效果良好，建议继续优化达人组合」\n"
+    "- 行动计划项必须具体可执行，不允许「持续优化X」「加强Y」等模糊表述\n"
+    "- 待改进问题只针对活动执行层问题（达人策略/活动机制/运营体验/内容形式等），"
+    "不包含品牌外部负面事件\n"
+    "- 禁止引用无来源的行业对比数据，所有比较基准必须来自报告输入数据\n"
+    "- 活动目标含「（基于数据推断）」时，涉及「是否达成目标」的表述须同步加注「基于数据推断」\n"
+    "- 指标只用条均互动量/品牌提及率/产品提及占比/NSR，禁用人均/转化/性价比\n"
+    "- 没有成本数据时，不给预算配比、合作比例调整（如「某层级合作比例从X%提升至Y%」）或性价比/ROI结论；"
+    "改为写数据支持的表现说明和可验证的建议（如「下次活动对比X与Y层级的条均互动量再定投放」）\n\n"
+    "## 输出格式\n严格只输出以下三个小节（不要输出其他章节）：\n"
+    "### 3.1 成功经验\n\n**经验 1：{策略/机制描述，10字以内}**\n"
+    "数据支撑：{来源章节} 显示，{具体数值/比例/变化量}。\n可复制建议：{1句话}\n"
+    "（共 3 条）\n\n### 3.2 待改进问题\n\n**问题 1：{短板描述，10字以内}**\n"
+    "根因定位：{来源章节} 数据显示，{具体数值}。\n改进方向：{1-2句}\n（共 3 条）\n\n"
+    "### 3.3 后续行动计划\n\n**立即行动**（下次活动前必须落实）\n· {具体事项}\n\n"
+    "**短期优化**（1-2 个活动周期内改进）\n· {具体事项}\n\n**长期策略**\n· {方向性调整，1条}\n"
+)
+
+
+def _campaign_goal_text(plan: dict, stats: dict) -> str:
+    """活动目标：用户填写直接引用；未填写时标注「基于数据推断」（客户 Prompt 输入说明）。"""
+    goals = [g for g in (plan.get("campaign_goal") or []) if g and g != "待数据推断"]
+    if goals:
+        return "、".join(goals)
+    # Q1：不再用数据推断的活动类型冒充活动目标。
+    return "未填写（基于数据推断，须在相关表述中注明）"
+
+
+def _synthesize_experience(md: str, plan: dict, stats: dict) -> str:
+    """第二段生成：以第一段全文为洞察输入，重写「三、经验总结」的 3.1~3.3。"""
+    names = "、".join((stats.get("campaigns") or {}).keys()) or str(plan.get("activity_name") or "")
+    user = (f"品牌名：{plan.get('brand') or ''}\n活动名：{names}\n"
+            f"活动目标：{_campaign_goal_text(plan, stats)}\n\n"
+            "[全报告 Insight 内容]\n" + _chapter_text(md, 0, 2))
+    summary = semantic.chat(EXPERIENCE_SYSTEM, user, max_tokens=4096, lm_scope="write_report")
+    for number, title in _POLICY.SUMMARY_SECTIONS:
+        if not re.search(rf"(?m)^#{{1,4}}\s+{re.escape(number)}\s+{re.escape(title)}", summary or ""):
+            raise ValueError(f"write_report: 经验总结合成缺少「{number} {title}」")
+    chapter = re.search(rf"(?m)^#{{1,2}}\s+{re.escape(_POLICY.REPORT_CHAPTERS[2])}[^\n]*\n", md)
+    nxt = re.search(rf"(?m)^#{{1,2}}\s+{re.escape(_POLICY.REPORT_CHAPTERS[3])}", md)
+    if not chapter or not nxt:
+        raise ValueError("write_report: 找不到三、四章边界，无法写入经验总结")
+    body = re.sub(r"(?m)^#{1,6}\s+(3\.\d)", r"### \1", summary.strip())
+    return md[:chapter.end()] + "\n" + body + "\n\n" + md[nxt.start():]
+
+
+def _chapter_text(md: str, first: int, last: int) -> str:
+    """取第 first..last 章（含）的正文，作为经验总结的洞察输入。"""
+    start = re.search(rf"(?m)^#{{1,2}}\s+{re.escape(_POLICY.REPORT_CHAPTERS[first])}", md)
+    end = re.search(rf"(?m)^#{{1,2}}\s+{re.escape(_POLICY.REPORT_CHAPTERS[last])}", md)
+    return md[start.start() if start else 0:end.start() if end else len(md)]
+
+
+def _report_structure_rule(campaign_count: int) -> str:
+    """由 policy 结构常量渲染写作约束，避免 prompt 与质检各写一份。"""
+    n = max(campaign_count, 1)
+    campaign = "、".join(f"2.N.{k} {t}" for k, t in _POLICY.CAMPAIGN_SECTIONS)
+    brand = "、".join(f"{k} {t}" for k, t in _POLICY.BRAND_SECTIONS)
+    summary = "、".join(f"{k} {t}" for k, t in _POLICY.SUMMARY_SECTIONS)
+    return (f"报告固定四章（{'、'.join(_POLICY.REPORT_CHAPTERS)}），标题后依次为数据说明与整体洞察；"
+            f"品牌章含 {brand}；每个活动独立包含 {campaign}；"
+            f"二章最后一节为「{_POLICY.lift_prefix(n)} {_POLICY.LIFT_SECTION_TITLE}」"
+            "（与 2.N 同级，品牌整体口径，节首一句说明，基准不可用也保留标题并说明原因）；"
+            f"三章含 {summary}（只写标题占位，系统在全文完成后单独合成）；"
+            "四章只写 3-5 条有数据支撑的待改善方向（核心成果表由系统生成），不设下次活动建议；"
+            "不得生成已下线的竞品章节或「综合表现定位」章；")
+
+
 def _assert_report_structure(md: str, campaign_ids: list[str]) -> None:
-    required = [
-        "数据说明", "整体洞察", "品牌传播表现", "1.1", "1.2", "1.3", "1.4",
-        "活动传播表现", "传播概况", "活动声量渗透", "口碑分析", "内容分析",
-        "热门内容", "综合表现定位", "经验总结", "总结与建议",
-    ]
-    missing = [item for item in required if item not in md]
-    missing.extend(
-        f"活动:{campaign_id}"
-        for campaign_id in campaign_ids
-        if campaign_id not in md
-    )
-    if missing:
-        raise ValueError("report: 缺少必需章节或活动分节: " + ", ".join(missing))
+    """节点内结构硬校验：直接复用质检的 _structure_issues（同一份 policy 常量与匹配规则）。
+
+    另外要求数据说明与整体洞察存在（装配前后都会调用）。
+    """
+    scan = validator_mod._load_scan()
+    if not scan or not hasattr(scan, "_structure_issues"):
+        raise RuntimeError("report: 无法加载 topic5-validator 结构检查")
+    problems = [issue["title"] for issue in scan._structure_issues(md, list(campaign_ids))
+                if issue["severity"] == "P0"]
+    problems += [f"缺「{name}」" for name in ("数据说明", "整体洞察") if name not in md]
+    if problems:
+        raise ValueError("report: 缺少必需章节或活动分节: " + "；".join(problems))
 
 
 _REPORT_LABELS = {
@@ -2242,10 +2714,10 @@ def _format_hot_content(value: object, *, limit_per_group: int = 3) -> list[str]
 
 
 def _fallback_report_md(stats, charts, wc_insight, chapters, version) -> str:
-    """确定性降级报告：用真数据渲染五章骨架 MD，供下游质检/交付消费。
+    """确定性降级报告：用真数据渲染四章骨架 MD（FIX-42），供下游质检/交付消费。
 
     嵌入 n14 产出的图表/封面（chart_urls={charts:[...], cover:{local_path}}）：封面置顶，
-    各活动章节下嵌入该活动的情感/平台/趋势/内容图，词云派生图置综合定位章。图片以本地
+    各活动章节下嵌入该活动的情感/平台/趋势/内容图，词云派生图置 2.{N+1} 之后。图片以本地
     PNG 路径嵌入（`![](local_path)`），由 feishu.md_to_blocks 上传 media 进飞书文档；
     local_path 为空（降级无图）则跳过，不塞死链。
     """
@@ -2288,11 +2760,11 @@ def _fallback_report_md(stats, charts, wc_insight, chapters, version) -> str:
                 )
             )
         )
-    lines += ["## 00 篇头 · 数据说明", "", *data_notes, ""]
+    lines += ["### 数据说明", "", *data_notes, ""]
     lines += ["## 整体洞察", "",
               "以下结论仅基于已确认统计产物与证据链。", ""]
     brand = (stats or {}).get("brand") or {}
-    lines += ["## 01 品牌传播表现", "",
+    lines += ["## 一、品牌传播表现", "",
               "### 1.1 传播概况",
               f"- 品牌声量：{brand.get('total_volume')}",
               f"- 品牌互动量：{brand.get('total_interaction')}", "",
@@ -2304,7 +2776,7 @@ def _fallback_report_md(stats, charts, wc_insight, chapters, version) -> str:
               "### 1.4 热门内容"]
     lines.extend(_format_hot_content(brand.get("hot_content")))
     lines.append("")
-    lines += ["## 02 活动传播表现", ""]
+    lines += ["## 二、活动传播表现", ""]
     for index, (cid, s) in enumerate(camps.items(), 1):
         m = (s or {}).get("metrics", {})
         lines.append(f"### 2.{index} 活动 {cid}")
@@ -2315,7 +2787,7 @@ def _fallback_report_md(stats, charts, wc_insight, chapters, version) -> str:
         mult = m.get("条均互动倍数")
         if mult is not None:
             lines.append(f"- 条均互动倍数：{mult}（活动条均互动量 ÷ 品牌条均互动量）")
-        lines.append(f"#### 2.{index}.2 活动声量渗透分析")
+        lines.append(f"#### 2.{index}.2 提及漏斗分析")
         lines.append(f"- 品牌提及率：{_fmt_ratio(m.get('品牌提及率'))}")
         lines.append(f"- 产品提及占比：{_fmt_ratio(m.get('产品提及占比'))}")
         # 品牌主导讨论占比：AI 主对象口径，与品牌提及率是两种方法，须分别记录。
@@ -2341,7 +2813,9 @@ def _fallback_report_md(stats, charts, wc_insight, chapters, version) -> str:
             lines.append(f"![{c.get('title')}]({_img_src(c)})")
         if imgs:
             lines.append("")
-    lines += ["## 03 综合表现定位", "", "### 3.1 活动期与基准期对比", ""]
+    lift = _POLICY.lift_prefix(len(camps))
+    lines += [f"### {lift} {_POLICY.LIFT_SECTION_TITLE}", "",
+              "*以下为品牌整体口径（合并窗口），不是单个活动的 2.N 指标。*", ""]
     baseline = (stats or {}).get("baseline_lift") or {}
     if baseline.get("status") == "available":
         days = baseline.get("days") or {}
@@ -2374,19 +2848,33 @@ def _fallback_report_md(stats, charts, wc_insight, chapters, version) -> str:
     if derived_imgs:
         lines.append("")
     lines += [
-        "## 04 经验总结", "",
-        "### 4.1 成功经验", "",
+        "## 三、经验总结", "",
+        "### 3.1 成功经验", "",
         "- 证据不足，暂不形成确定性成功经验；后续结论需回指来源章节与数值。", "",
-        "### 4.2 待改进问题", "",
+        "### 3.2 待改进问题", "",
         "- 证据不足，暂不形成确定性问题归因。", "",
-        "### 4.3 行动计划", "",
-        "- 补齐证据后再制定可验证的行动计划。", "",
+        "### 3.3 后续行动计划", "",
+        "- 证据补齐后按「立即行动 / 短期优化 / 长期策略」制定。", "",
     ]
-    lines += ["## 05 总结与建议", "", "（事实/机制/建议分开，不越过数据边界。）", ""]
+    lines += ["## 四、总结与建议", "", "- 核心成果与待改善方向见上文各节数据。", ""]
     return "\n".join(lines)
 
 
 # ── decision 节点 ───────────────────────────────────────────
+# FIX-06：Validator 高点核查发现明确噪音 → 退回 Step5.5 去噪并全链重算，最多 2 次后走 HC7。
+NOISE_ROLLBACK_MAX = 2
+NOISE_ROLLBACK_INVALIDATE = [
+    "denoised_data", "annotated_round1", "r1_review", "opinion_candidates", "confirmed_opinion_labels",
+    "ugc_category_list", "annotated_data", "r2_review", "stats_bundle", "chart_urls",
+    "wordcloud_insight", "report_md", "qc_report", "delivery_draft",
+]
+
+
+def qc_noise_ids(qc: dict) -> list[str]:
+    return sorted({str(i) for issue in (qc.get("issues") or []) if isinstance(issue, dict)
+                   for i in (issue.get("noise_ids") or [])})
+
+
 @handler("qc_decision")
 def qc_decision(node, state, ctx):
     qc = state.read_artifact("qc_report") or {}
@@ -2394,9 +2882,28 @@ def qc_decision(node, state, ctx):
     rounds = state.counters.get("qc_rounds", 0)
     if not qc.get("has_p0"):
         return {"route": "no_p0"}
+    if qc_noise_ids(qc):
+        if state.counters.get("noise_rollbacks", 0) >= NOISE_ROLLBACK_MAX:
+            return {"route": "has_p0_maxed"}
+        return {"route": "noise_found"}
     if rounds >= max_rounds:
         return {"route": "has_p0_maxed"}
     return {"route": "has_p0_retry"}
+
+
+@handler("noise_rollback")
+def noise_rollback(node, state, ctx):
+    """把 Validator 判定的噪音 ID 交给 n07b 增量去噪，失效去噪及其下游全部产物（KS_Noise_Review 退回入口）。"""
+    ids = qc_noise_ids(state.read_artifact("qc_report") or {})
+    if not ids:
+        raise RuntimeError("noise_rollback: qc_report 无 noise_ids")
+    state.counters["noise_rollbacks"] = state.counters.get("noise_rollbacks", 0) + 1
+    state.counters["rerun_epoch"] = state.counters.get("rerun_epoch", 0) + 1
+    state.params["qc_noise_ids"] = sorted(set(map(str, state.params.get("qc_noise_ids") or [])) | set(ids))
+    state.invalidate_artifacts(NOISE_ROLLBACK_INVALIDATE)
+    return {"artifacts": {"noise_rollback_record": {
+        "noise_ids": ids, "rollback": state.counters["noise_rollbacks"],
+        "rerun_epoch": state.counters["rerun_epoch"], "invalidated": NOISE_ROLLBACK_INVALIDATE}}}
 
 
 @handler("delivery_draft_decision")
@@ -2429,6 +2936,16 @@ def delivery_draft_decision(node, state, ctx):
 
 
 # ── v0.2 新增：方案 / Run 初始化 / 交付 draft·commit / 终验路由 ──────────
+CAMPAIGN_TYPE_UNRESOLVED = ("", "待数据推断", "待确认")
+CAMPAIGN_TYPE_PENDING_NOTE = ("活动类型尚未确认：视为未解决需求项，不由数据推断；依赖活动类型的"
+                              "赞助型声量占比模块暂不执行。请在需求单选择类型（可参考关键词能力初判），"
+                              "复合或表外类型选「其他」并写明。")
+
+
+def unresolved_campaign_type(requirement: dict) -> bool:
+    return str((requirement or {}).get("campaign_type") or "").strip() in CAMPAIGN_TYPE_UNRESOLVED
+
+
 @handler("plan_compile")
 def plan_compile(node, state, ctx):
     """Compile the complete G2 review contract from the confirmed requirement."""
@@ -2478,7 +2995,7 @@ def plan_compile(node, state, ctx):
     reasons = {
         "baseline_lift": "对比活动期与前置基准期，判断相对变化",
         "sentiment_opinion": "输出情感结构、观点标签与讨论维度",
-        "wordcloud_topics": "按平台提炼高频议题，不跨平台合并",
+        "wordcloud_topics": "品牌词云按平台提炼议题；活动词云综合已选平台（同词频次求和）",
         "top_content": "保留代表性内容作为结论证据",
         "kol_effectiveness": "按可用粉丝量派生达人层级，缺失时不强行出图",
     }
@@ -2683,10 +3200,17 @@ def plan_compile(node, state, ctx):
             "period_end": requirement.get("period_end"),
             "platforms": plan_platforms,
             "content_scope": content_scope,
-            # FIX-10：业务属性字段。值为「待数据推断」时由 aggregate 按信号矩阵推断
-            # （KS_Classification_Rules.md:194-213），结果写 stats_bundle.inferred_campaign_type。
+            # 业务属性字段。Q1：campaign_type 沿用需求阶段/关键词 Skill 确认结果，
+            # 不由数据推断；「待数据推断」在 G2 前须回需求阶段澄清。
             "product_category": requirement.get("product_category") or "待数据推断",
             "campaign_type": requirement.get("campaign_type") or "待数据推断",
+            # Q3：基准期沿用需求确认单的已确认起止（默认值也已在需求阶段写入）。
+            "baseline_start": requirement.get("baseline_start"),
+            "baseline_end": requirement.get("baseline_end"),
+            "baseline_source": requirement.get("baseline_source"),
+            # Q1：活动类型未确认 = 未解决需求项（G2 卡片展示，用户可打回需求阶段补充）。
+            "campaign_type_pending": (CAMPAIGN_TYPE_PENDING_NOTE
+                                      if unresolved_campaign_type(requirement) else ""),
             "campaign_goal": list(requirement.get("campaign_goal") or ["待数据推断"]),
             "activity_boundary": requirement.get("activity_boundary") or "",
             "actual_event_period": requirement.get("actual_event_period") or {},
@@ -2701,7 +3225,9 @@ def plan_compile(node, state, ctx):
         "delivery_expectation": requirement.get("delivery_expectation"),
         "allowed_actions": requirement.get("allowed_actions"),
         "metrics": [
-            {"name": "条均互动量", "definition": "活动相关内容互动量之和 / 活动相关内容数"},
+            {"name": "条均互动量",
+             "definition": "供应商互动量之和 / 有互动量的活动相关内容数（缺失不补零，单独披露）",
+             "source": report_contract.INTERACTION_NOTE},
             {"name": "条均互动倍数",
              "definition": "活动条均互动量 / 品牌条均互动量（活动内容单条互动相对品牌基线的倍数）"},
             {"name": "品牌提及率", "definition": "品牌提及内容数 / 活动相关内容数"},
@@ -2723,13 +3249,8 @@ def plan_compile(node, state, ctx):
             "活动期与前置 30 天不重叠基准期对比",
             "多活动逐个计算和比较，不汇总相加",
         ],
-        "report_structure": [
-            "品牌传播表现",
-            "活动传播表现",
-            "综合表现定位",
-            "经验总结",
-            "总结与建议",
-        ],
+        # FIX-42：固定四章，拉升效果位于二章末 2.{N+1}。
+        "report_structure": list(_POLICY.REPORT_CHAPTERS),
         "data_requirements": [
             {
                 "name": "activity_detail",
@@ -2764,7 +3285,7 @@ def plan_compile(node, state, ctx):
              "condition": "content_scope=all"},
             {"section": "口碑分析", "chart": "情感分布", "type": "donut",
              "condition": "AI sentiment coverage complete"},
-            {"section": "活动声量渗透", "chart": "品牌/产品提及漏斗", "type": "bar/funnel",
+            {"section": "提及漏斗分析", "chart": "品牌/产品提及漏斗", "type": "bar/funnel",
              "condition": "product query selects three-level funnel"},
             {"section": "内容分析", "chart": "逐平台词云/高频议题", "type": "wordcloud/rank",
              "condition": "platform data available"},
@@ -2790,7 +3311,7 @@ def plan_compile(node, state, ctx):
             {"name": "数据准备", "work": "校验上传明细，拉取品牌活动期、基准期与词云数据"},
             {"name": "清洗标注", "work": "按发表时间过滤去重，完成相关性、情感、观点和 UGC 标注"},
             {"name": "统计洞察", "work": "按活动和平台计算白名单指标，生成图表与议题洞察"},
-            {"name": "撰写质检", "work": "生成五部分报告，经独立 Validator 扫描并处理 P0 问题"},
+            {"name": "撰写质检", "work": "生成四章报告（拉升效果位于二章末 2.{N+1}），经独立 Validator 扫描并处理 P0 问题"},
             {"name": "发布交付", "work": "发布飞书文档，回读校验版本与内容后提交终验"},
         ],
         "human_gates": [
@@ -2894,6 +3415,95 @@ def _check_activity_filterwords(plan: dict, rows: list, state) -> dict:
         ),
         expect=["filterword_decision"],
     )
+
+
+# ── FIX-04 活动原帖自动采集（KS_Activity_Data_Acquisition，Step 2.5）────────────
+SOCIAL_TASK_WAIT_SECONDS = 3600     # 单次节点内有界等待；超时暂停，原任务保留可恢复
+
+
+def _campaign_list(plan: dict) -> list[dict]:
+    campaigns = [c for c in plan.get("campaigns") or [] if isinstance(c, dict) and c.get("id")]
+    return campaigns or [{"id": str(plan.get("activity_name") or "活动"),
+                          "name": plan.get("activity_name")}]
+
+
+@handler("activity_pull")
+def activity_pull(node, state, ctx):
+    """用户已提供活动明细 → 直接沿用；否则按活动调用 ssjh-social-task 抓原帖（只抓帖子）。
+
+    首次只做数量预检并暂停请求采集授权（取消上传 HC ≠ 授权计费采集）；授权后创建/恢复原任务，
+    下载后核验并适配 19 列工作簿，写入 confirmed_plan.source_file（transport=social_task）。
+    """
+    plan = dict(state.read_artifact("confirmed_plan") or {})
+    if plan.get("source_file"):
+        return {"artifacts": {"activity_detail": {"source": "user_uploaded_excel",
+                                                  "source_file": plan["source_file"]}}}
+    if not social_task.api_available():
+        raise RuntimeError(f"activity_pull: 自动采集不可用（{social_task.unavailable_reason()}），"
+                           "可在本话题上传活动明细 .xlsx 后重试")
+    auth = state.read_artifact("collection_authorization") or {}
+    workdir = state.run_dir / "activity_collection"
+    registry = Path(os.environ.get("TOPIC5_SOCIAL_TASK_REGISTRY") or (state.run_dir.parent / "social_task_registry.json"))
+    handoffs, all_rows, pending = [], [], []
+    for campaign in _campaign_list(plan):
+        cid = str(campaign["id"])
+        rid = social_task.request_id(state.task_id, cid, str(plan.get("version") or ""))
+        cdir = workdir / hashlib.sha256(cid.encode()).hexdigest()[:12]
+        cdir.mkdir(parents=True, exist_ok=True)
+        config = social_task.build_config(plan, campaign, rid=rid, output_file=str(cdir / "raw_export.xlsx"))
+        social_task.config_scope_check(config)
+        config_path = cdir / "task_config.json"
+        config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+        grant = (auth.get("campaigns") or {}).get(cid) if isinstance(auth, dict) else None
+        if not grant:
+            envelope = social_task.execute(config_path, cdir / "cache", registry)
+            if social_task.is_budget_block(envelope):
+                raise RuntimeError("activity_pull: " + str(envelope.get("message")))
+            if not envelope.get("ok"):
+                raise RuntimeError(f"activity_pull: 预检失败 {envelope.get('code')}")
+            if envelope.get("state") == "AWAITING_QUANTITY_CONFIRMATION":
+                data = envelope.get("data") or {}
+                pending.append({"campaign": cid, "estimated_volume": data.get("estimated_volume"),
+                                "estimate": data.get("estimate") or {}, "request_id": rid})
+                continue
+        else:
+            envelope = social_task.execute(config_path, cdir / "cache", registry,
+                                           max_records=int(grant["max_records"]),
+                                           confirmation_ref=str(grant["confirmation_ref"]))
+            if not envelope.get("ok"):
+                raise RuntimeError(f"activity_pull: 创建任务失败 {envelope.get('code')}")
+        if envelope.get("state") != "COMPLETED":
+            envelope = social_task.wait_completed(config_path, cdir / "cache", registry,
+                                                  SOCIAL_TASK_WAIT_SECONDS)
+        run_dir = Path((envelope.get("data") or {}).get("run_dir") or "")
+        scope = social_task.scope_check(run_dir)
+        if not scope["ok"]:
+            raise RuntimeError(f"activity_pull: 原任务范围不符（{scope['reason']}），已停止，不新建计费任务")
+        records = json.loads(Path((envelope.get("data") or {})["raw_data"]).read_text(encoding="utf-8"))
+        period = (campaign.get("period_start") or plan.get("period_start"),
+                  campaign.get("period_end") or plan.get("period_end"))
+        adapted = social_task.adapt(records, cid, period)
+        if not adapted["verification"]["ok"]:
+            raise RuntimeError("activity_pull: 下载核验未通过：" + "；".join(adapted["verification"]["issues"]))
+        all_rows += adapted["rows"]
+        handoffs.append({"campaign": cid, "request_id": rid, "job_id": envelope.get("job_id"),
+                         "posts_only": True, "msg_type": {k: v.get("msg_type") for k, v in config["search"].items()
+                                                          if isinstance(v, dict) and "msg_type" in v},
+                         "scope_check": scope, "verification": adapted["verification"],
+                         "retained_fields": adapted["retained_fields"], "missing_fields": adapted["missing_fields"],
+                         "quality": (envelope.get("data") or {}).get("quality") or {},
+                         "authorization_ref": (grant or {}).get("confirmation_ref", "")})
+    if pending:
+        raise HumanPause(prompt=json.dumps({"collection_authorization_required": pending}, ensure_ascii=False),
+                         expect=["collection_authorization"])
+    workbook = workdir / "activity_adapted.xlsx"
+    sha = social_task.write_workbook(all_rows, workbook)
+    source_file = {"name": "活动原帖（自动采集）.xlsx", "mount_path": workbook.name,
+                   "transport": "social_task", "path": str(workbook), "sha256": sha}
+    plan["source_file"] = source_file
+    handoff = {"source": "ssjh_social_task", "skill_version": social_task.VERSION, "campaigns": handoffs,
+               "workbook": str(workbook), "sha256": sha, "rows": len(all_rows), "status": "ready"}
+    return {"artifacts": {"activity_detail": handoff, "confirmed_plan": plan}}
 
 
 @handler("run_init")
@@ -3085,6 +3695,25 @@ def run_init(node, state, ctx):
     }}
 
 
+def _folder_issues(feishu_doc: dict) -> list[dict]:
+    """FIX-41：项目文件夹。未配置根目录→P1；文件夹转移与协作者降级均失败→P0（外部权限，走 HC7）。"""
+    if not feishu_doc.get("folder_configured"):
+        return [{"id": "P1-postpublish-no-folder", "severity": "P1", "title": "未配置项目文件夹",
+                 "evidence": "FEISHU_ROOT_FOLDER_TOKEN 未配置，文档建在应用空间", "locus": "feishu-docx"}]
+    access = feishu_doc.get("folder_access") or {}
+    if access.get("transferred"):
+        return []
+    if access.get("collaborator_added"):
+        return [{"id": "P1-postpublish-folder-owner-fallback", "severity": "P1",
+                 "title": "项目文件夹所有权转移失败，已降级为可管理协作者",
+                 "evidence": str(access.get("transfer_error")), "locus": "feishu-permission"}]
+    return [{"id": "P0-postpublish-owner", "severity": "P0",
+             "title": "项目文件夹所有权转移和协作者降级均失败",
+             "evidence": f"transfer_error={access.get('transfer_error')}; "
+                         f"collaborator_error={access.get('collaborator_error')}",
+             "locus": "feishu-permission"}]
+
+
 @handler("delivery_draft")
 def delivery_draft(node, state, ctx):
     """交付草稿（n20_delivery_draft，G4）：内容层 MD → 飞书文档 draft + 外部回执。
@@ -3100,6 +3729,8 @@ def delivery_draft(node, state, ctx):
     out = node.get("outputs", [])
     report = state.read_artifact("report_md") or {}
     report_md = report.get("markdown") if isinstance(report, dict) else ""
+    # FIX-35：HC7 放宽项在数据说明区下方留痕（灰色斜体）。
+    report_md = report_contract.waiver_note(report_md, (state.read_artifact("qc_report") or {}).get("waivers"))
     report_version = str(report.get("version") if isinstance(report, dict) else "") or "0.0"
     plan = state.read_artifact("confirmed_plan") or {}
     brand = str(plan.get("brand") or plan.get("project") or "立白")
@@ -3111,11 +3742,16 @@ def delivery_draft(node, state, ctx):
     reused = (prev_receipts.get("doc_token")
               if isinstance(prev_receipts, dict) else "") or ""
 
+    # FIX-38：返工时（交付产物已失效）在上次发布的文档上原位修正；基线为上次发布的 MD。
+    published = state.read_artifact("published_delivery") or {}
     if feishu.api_available():
         try:
             feishu_doc = feishu.create_delivery(
-                report_md, title=title, task_id=task_id,
-                report_version=report_version, reused_doc_token=reused)
+                report_md,
+                published=published if published.get("doc_token") else None, title=title, task_id=task_id,
+                report_version=report_version, reused_doc_token=reused,
+                key_numbers=report_contract.key_numbers(state.read_artifact("stats_bundle") or {}),
+                project_name=str(plan.get("project") or plan.get("activity_name") or brand))
         except Exception:
             raise
     else:
@@ -3143,6 +3779,14 @@ def delivery_draft(node, state, ctx):
                 f"expected={readback.get('expected_images')}, "
                 f"got={readback.get('got_images')}"
             ),
+            "locus": "feishu-docx",
+        })
+    numbers = readback.get("numbers_check") or {}
+    if numbers.get("missing"):
+        post_publish_issues.append({
+            "id": "P0-postpublish-numbers", "severity": "P0",
+            "title": "飞书文档回读关键数字与报告不一致",
+            "evidence": "；".join(f"{n.get('label')}={n.get('value_text')}" for n in numbers["missing"]),
             "locus": "feishu-docx",
         })
     if readback.get("layout_complete") is False:
@@ -3182,6 +3826,7 @@ def delivery_draft(node, state, ctx):
                 ),
                 "locus": "feishu-permission",
             })
+    post_publish_issues.extend(_folder_issues(feishu_doc))
     post_publish_p0_count = sum(
         1 for issue in post_publish_issues
         if issue.get("severity") == "P0"
@@ -3225,9 +3870,10 @@ def delivery_draft(node, state, ctx):
         if issue_id:
             seen_issue_ids.add(issue_id)
         merged_issues.append(issue)
+    # FIX-35：HC7 已豁免（waived）的 P0 不再计入。
     merged_p0_count = sum(
         1 for issue in merged_issues
-        if isinstance(issue, dict) and issue.get("severity") == "P0"
+        if isinstance(issue, dict) and issue.get("severity") == "P0" and issue.get("status") != "waived"
     )
     qc_report = {
         **(prior_qc if isinstance(prior_qc, dict) else {}),
@@ -3278,7 +3924,14 @@ def delivery_draft(node, state, ctx):
         "feishu_doc": feishu_doc,
         "qc_report": qc_report,
     }
-    return {"artifacts": {k: base.get(k, _stub_payload(node, "delivery")) for k in out}}
+    artifacts = {k: base.get(k, _stub_payload(node, "delivery")) for k in out}
+    # FIX-38：记录本次发布基线（不在返工失效列表中），下次返工在同一文档上原位修正。
+    if feishu_doc.get("doc_token") and not feishu_doc.get("degraded"):
+        artifacts["published_delivery"] = {
+            "doc_token": feishu_doc["doc_token"], "folder_token": feishu_doc.get("folder_token") or "",
+            "markdown": report_md, "report_version": report_version,
+            "revision_id": feishu_doc.get("revision_id")}
+    return {"artifacts": artifacts}
 
 
 @handler("delivery_commit")

@@ -59,10 +59,8 @@ _INTERNAL_FIELDS = (
     "ai_sentiment", "interaction_cnt", "discussion_dimension",
 )
 _RAW_JSON = re.compile(r"[\{\[]\s*\"[^\"\n]+\"\s*:")
-_CORE_CHAPTER_PATTERNS = {
-    "品牌传播": r"品牌传播", "活动传播": r"活动传播",
-    "综合定位": r"综合.{0,4}定位", "经验总结": r"经验总结",
-}
+# 内置兜底只查四个固定章节（FIX-42）；policy 可加载时以 policy.REPORT_CHAPTERS 为准。
+_FALLBACK_CHAPTERS = ("一、品牌传播表现", "二、活动传播表现", "三、经验总结", "四、总结与建议")
 
 _SCAN = None  # 惰性缓存已加载的 scan_report 模块
 
@@ -171,8 +169,10 @@ def _builtin_scan(md: str, *, degraded: bool) -> dict:
         issues.append({"id": "P0-empty", "severity": "P0", "title": "报告内容为空",
                        "evidence": "markdown 为空字符串", "locus": "structure"})
     else:
-        for name, pat in _CORE_CHAPTER_PATTERNS.items():
-            if not re.search(pat, md):
+        policy = load_policy()
+        chapters = getattr(policy, "REPORT_CHAPTERS", None) or _FALLBACK_CHAPTERS
+        for name in chapters:
+            if name not in md:
                 issues.append({"id": f"P0-missing-chapter-{name}", "severity": "P0",
                                "title": f"缺核心章节「{name}」",
                                "evidence": f"未检出「{name}」", "locus": "structure"})

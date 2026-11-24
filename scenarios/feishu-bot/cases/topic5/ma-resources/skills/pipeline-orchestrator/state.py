@@ -98,6 +98,10 @@ class RunState:
         for k, v in self.params.items():
             if isinstance(v, (str, int, float)):
                 fields[k] = v
+        # 重跑纪元（FIX-06 / FIX-30）：回退或重标后递增，令副作用节点生成新键而非被幂等重放。
+        for k in ("rerun_epoch", "annotation_rerun_epoch_round1", "annotation_rerun_epoch_round2",
+                  "user_rework_rounds"):   # FIX-36：版式返工报告不变，靠返工轮次生成新键
+            fields[k] = int(self.counters.get(k, 0))
         plan = self.read_artifact("confirmed_plan") or {}
         if isinstance(plan, dict) and "version" in plan:
             fields.setdefault("confirmed_plan_version", plan["version"])

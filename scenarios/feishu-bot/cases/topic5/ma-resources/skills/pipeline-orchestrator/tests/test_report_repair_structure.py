@@ -21,7 +21,7 @@ class TestReportRepairStructure(unittest.TestCase):
                "url": "https://example.com/post", "interaction_cnt": 123}
         self.stats = {"brand": {"top_content": {"pgc": [row], "ugc": [row]}},
                       "campaigns": {"campA": {}}}
-        self.base = handlers._fallback_report_md(self.stats, {}, {}, "five", "0.0")
+        self.base = handlers._fallback_report_md(self.stats, {}, {}, "four", "0.0")
         self.state.write_artifact("stats_bundle", self.stats)
         self.state.write_artifact("chart_urls", {"charts": []})
         self.state.write_artifact("qc_report", {
@@ -43,7 +43,7 @@ class TestReportRepairStructure(unittest.TestCase):
         self.assertIn(r"原始正文\|保留", assembled)
 
     def test_assemble_preserves_overall_insight_heading_variants(self):
-        brand = self.base.index("## 01")
+        brand = self.base.index("## 一、品牌传播表现")
         rest = self.base[brand:]
         for heading in ("**整体洞察**", "### 整体洞察", "##### 整体洞察",
                         "## 数据说明与整体洞察"):
@@ -150,8 +150,8 @@ class TestReportRepairStructure(unittest.TestCase):
         canonical = contract.assemble(changed, plan={}, stats=self.stats, charts={}, insight={})
         self.assertIn("### 1.4 热门榜单", canonical)
         self.assertNotIn("**1.4", canonical)
-        changed = assembled.replace("### 4.2 待改进问题", "待改进问题")
-        with self.assertRaisesRegex(ValueError, "section:4.2"):
+        changed = assembled.replace("### 3.2 待改进问题", "待改进问题")
+        with self.assertRaisesRegex(ValueError, "section:3.2"):
             contract.assert_preserved_structure(assembled, changed)
 
 

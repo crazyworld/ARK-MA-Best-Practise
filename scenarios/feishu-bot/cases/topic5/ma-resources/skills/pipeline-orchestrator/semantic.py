@@ -90,10 +90,52 @@ def parse_json(text: str) -> Any:
     raise ValueError("无法解析模型输出为 JSON")
 
 
+# FIX-56：客户 LM「错误案例与修正」按节点注入（原版 Producer Step2 必读）。
+LM_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lm")
+LM_HEADING = "历史错误与修正（必须遵守）"
+_CASE_RE = re.compile(r"^## 错误案例 #(\d+)(.*?)$(.*?)(?=^## |\Z)", re.M | re.S)
+_FIELD_RE = re.compile(r"\*\*(错误表现|预防规则)\*\*[：:](.*?)(?=\n\*\*|\n---|\Z)", re.S)
+
+
+def lm_text(scope: str) -> str:
+    """返回该节点适用的错误案例（错误表现 + 预防规则），按 lm_index 优先级截断到 max_chars。"""
+    with open(os.path.join(LM_DIR, "lm_index.json"), encoding="utf-8") as f:
+        index = json.load(f)
+    ids = index["scopes"].get(scope)
+    if ids is None:
+        raise KeyError(f"lm_scope 未登记：{scope}")
+    with open(os.path.join(LM_DIR, "lm_error_cases.md"), encoding="utf-8") as f:
+        text = f.read()
+    cases = {}
+    for number, title, body in _CASE_RE.findall(text):
+        fields = {k: " ".join(v.split()) for k, v in _FIELD_RE.findall(body)}
+        cases[int(number)] = (f"#{number}{title.strip()}："
+                              f"错误表现——{fields.get('错误表现', '')}；预防规则——{fields.get('预防规则', '')}")
+    limit = int(index.get("max_chars") or 4000)
+    out, used = [], len(LM_HEADING) + 4
+    for case_id in ids:
+        entry = cases.get(case_id)
+        if not entry:
+            continue
+        if used + len(entry) + 1 > limit:
+            remaining = limit - used - 1
+            if remaining > 80:
+                out.append(entry[:remaining - 1] + "…")
+            break
+        out.append(entry)
+        used += len(entry) + 1
+    return f"## {LM_HEADING}\n" + "\n".join(out) if out else ""
+
+
+def with_lm(system: str, lm_scope: str | None) -> str:
+    return system + "\n\n" + lm_text(lm_scope) if lm_scope else system
+
+
 def chat(system: str, user: str, *, max_tokens: int = 4096,
          temperature: float = 0.2, timeout: int = 180, retries: int = 2,
-         thinking: str | None = None) -> str:
+         thinking: str | None = None, lm_scope: str | None = None) -> str:
     """方舟 OpenAI 兼容 chat/completions（流式）。无凭据直接抛错，由调用方降级。"""
+    system = with_lm(system, lm_scope)
     base, key = _base_key()
     if not base or not key:
         raise RuntimeError("缺少 Ark 凭据（ARK_BASE_URL/ARK_API_KEY）")

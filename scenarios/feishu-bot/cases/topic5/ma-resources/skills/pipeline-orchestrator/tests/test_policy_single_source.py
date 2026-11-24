@@ -42,11 +42,11 @@ class VoiceShareScanTest(unittest.TestCase):
         return [i["id"] for i in self.scan.scan_markdown(md)["issues"]]
 
     def test_over_hundred_percent_is_p0(self):
-        md = "## 2.1.2 活动声量渗透分析\n声量贡献参考：120.0%（活动相关 1200 / 品牌同期 1000）\n"
+        md = "## 2.1.2 提及漏斗分析\n声量贡献参考：120.0%（活动相关 1200 / 品牌同期 1000）\n"
         self.assertTrue(any(i.startswith("P0-voice-share-overflow") for i in self._ids(md)))
 
     def test_normal_percent_passes(self):
-        md = "## 2.1.2 活动声量渗透分析\n声量贡献参考：12.0%（活动相关 120 / 品牌同期 1000）\n"
+        md = "## 2.1.2 提及漏斗分析\n声量贡献参考：12.0%（活动相关 120 / 品牌同期 1000）\n"
         self.assertFalse(any(i.startswith("P0-voice-share-overflow") for i in self._ids(md)))
 
     def test_calling_it_penetration_is_p0(self):

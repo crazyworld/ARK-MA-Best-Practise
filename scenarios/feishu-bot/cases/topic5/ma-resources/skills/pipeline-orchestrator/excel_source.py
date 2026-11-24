@@ -37,6 +37,15 @@ def normalize_source_file(source: dict) -> dict:
     transport = source.get("transport")
     if transport in (None, "", "ark_files"):
         return result
+    if transport == "social_task":
+        # FIX-04：自动采集适配工作簿（run 目录内的绝对路径 + 哈希）。
+        path = str(source.get("path") or "")
+        sha = source.get("sha256")
+        if not Path(path).is_absolute() or Path(path).name != mount:
+            raise ValueError("excel_source: 采集工作簿路径非法")
+        if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{64}", sha):
+            raise ValueError("excel_source: 采集工作簿 sha256 无效")
+        return {**result, "transport": transport, "path": path, "sha256": sha}
     if transport != "feishu_resource":
         raise ValueError("excel_source: 不支持的文件传输方式")
     for key, pattern in (("message_id", r"om_[A-Za-z0-9_]+"),
@@ -110,6 +119,24 @@ def _integer_or_none(value: Any) -> int | None:
         return None
 
 
+# FIX-26：「是否广告 / 推广标识」列（SSJH 导出列名「是否广告」）；无此列时为 None，不推定为自然声量。
+AD_COLUMNS = ("是否广告", "推广标识")
+_AD_TRUE = {"是", "1", "true", "广告", "推广", "y", "yes"}
+_AD_FALSE = {"否", "0", "false", "n", "no", "非广告"}
+
+
+def _ad_flag(row: dict[str, Any]) -> bool | None:
+    for column in AD_COLUMNS:
+        if column not in row:
+            continue
+        text = _text(row.get(column)).lower()
+        if text in _AD_TRUE:
+            return True
+        if text in _AD_FALSE:
+            return False
+    return None
+
+
 def _integer(value: Any) -> int:
     if value in (None, "", "-", "--"):
         return 0
@@ -164,12 +191,9 @@ def normalize_excel_row(row: dict[str, Any]) -> dict:
     source_content_mode = _text(row.get("内容类型"))
     content_mode = _CONTENT_MODE.get(source_content_mode.upper(), "UKN")
     site_name = _text(row.get("站点名称"))
-    interaction = _integer(row.get("总互动量"))
-    if not interaction:
-        interaction = sum(
-            _integer(row.get(key))
-            for key in ("转发数", "评论数", "点赞数", "收藏数")
-        )
+    # 缺陷清单 Q2：总互动量直接采用供应商返回字段，不用点赞/评论/转发/收藏重新加总；
+    # 缺失记 None（不可得），不补零。
+    interaction = _integer_or_none(row.get("总互动量"))
     item_id = _text(row.get("id"))
     return {
         "id": item_id,
@@ -198,6 +222,7 @@ def normalize_excel_row(row: dict[str, Any]) -> dict:
         "read_count": _integer(row.get("阅读数")),
         "collect_count": _integer(row.get("收藏数")),
         "fans": _integer_or_none(row.get("粉丝数")),
+        "is_ad": _ad_flag(row),
         "_source": "user_uploaded_excel",
     }
 
@@ -212,6 +237,11 @@ def resolve_activity_xlsx(plan: dict) -> Optional[Path]:
         return None
     source = normalize_source_file(source)
     mount_path = source["mount_path"]
+    if source.get("transport") == "social_task":
+        path = Path(source["path"])
+        if path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest() != source["sha256"]:
+            raise ValueError("excel_source: 采集工作簿哈希与交接记录不一致")
+        return path
     if source.get("transport") == "feishu_resource":
         uploads_dir = Path(os.environ.get("TOPIC5_SESSION_UPLOADS_DIR", "/workspace/topic5_repro_inputs"))
         path = uploads_dir / mount_path
@@ -285,6 +315,35 @@ def merge_filterword_impact(brand_total: int, filtered_total: int) -> dict:
     }
 
 
+# FIX-58 / KS_Exception_Handling A：多 Sheet 优先名单；结构相同的多 Sheet 需用户合并后再提供。
+PREFERRED_SHEETS = ("数据", "监测数据", "Sheet1", "活动数据")
+VALID_ROWS_MIN = 100          # 数据质量下限：有效数据量 < 100 → 告知用户，建议扩大采集范围
+PLATFORM_ROWS_MIN = 50        # 某平台 < 50 条 → 备注「样本量有限」
+_INTERACTION_COLUMNS = ("总互动量",)   # Q2：只认供应商互动量字段
+
+
+class SheetMergeRequired(ValueError):
+    """多个 Sheet 结构相同（如按月拆分）：告知用户合并后再提供，暂停处理。"""
+
+
+def select_sheet(workbook) -> tuple:
+    names = list(workbook.sheetnames)
+    if len(names) > 1:
+        headers = {}
+        for name in names:
+            first = next(workbook[name].iter_rows(values_only=True, max_row=1), None)
+            key = tuple(_text(v) for v in (first or ()) if _text(v))
+            if key:
+                headers.setdefault(key, []).append(name)
+        same = next((group for group in headers.values() if len(group) > 1), None)
+        if same:
+            raise SheetMergeRequired(
+                f"活动明细含 {len(same)} 个结构相同的 Sheet（{'、'.join(same)}），请合并为一个 Sheet 后重新提供")
+    chosen = next((n for n in PREFERRED_SHEETS if n in names), names[0])
+    note = f"已读取 Sheet：{chosen}，共 {len(names)} 个 Sheet，如数据不完整请手动核查" if len(names) > 1 else ""
+    return workbook[chosen], note
+
+
 def load_activity_rows(plan: dict) -> Optional[dict]:
     """读取活动明细；无 source_file 返回 None，声明后缺文件/坏文件则报错。"""
     path = resolve_activity_xlsx(plan)
@@ -300,7 +359,7 @@ def load_activity_rows(plan: dict) -> Optional[dict]:
 
     workbook = load_workbook(path, read_only=True, data_only=True)
     try:
-        sheet = workbook.active
+        sheet, sheet_note = select_sheet(workbook)
         rows = sheet.iter_rows(values_only=True)
         header_values = next(rows, None)
         if not header_values:
@@ -361,12 +420,16 @@ def load_activity_rows(plan: dict) -> Optional[dict]:
         seen_campaigns: set[str] = set()
         period_dropped: dict[str, int] = {}
         source_row_count = 0
+        date_errors = 0
+        interaction_seen = False
         unknown_sites: dict[str, int] = {}
         unknown_samples: list[str] = []
         for row_number, values in enumerate(rows, 2):
             source_row_count += 1
             raw = dict(zip(headers, values))
             row = normalize_excel_row(raw)
+            interaction_seen = interaction_seen or any(
+                raw.get(k) not in (None, "") for k in _INTERACTION_COLUMNS)
             if not any((row["id"], row["title"], row["content"], row["url"])):
                 continue
             site_matched = bool(row.pop("_platform_matched", True))
@@ -375,13 +438,16 @@ def load_activity_rows(plan: dict) -> Optional[dict]:
                 key for key, value in (
                     ("站点名称", raw_site_name),
                     ("标题/正文", row["title"] or row["content"]),
-                    ("发表时间", row["publish_time"]),
                     ("内容类型", row["_source_content_mode"]),
                     ("分析对象", row["analysis_object"] or auto_filled_object),
                     ("URL", row["url"]),
                 )
                 if not value or value == "unknown"
             ]
+            if not row["publish_time"]:
+                # KS_Exception_Handling：无法解析则标记「日期异常」并排除，不整单失败。
+                date_errors += 1
+                continue
             if missing_values:
                 raise ValueError(
                     f"excel_source: 第 {row_number} 行缺少或无法解析: "
@@ -429,6 +495,8 @@ def load_activity_rows(plan: dict) -> Optional[dict]:
         workbook.close()
 
     if not normalized:
+        if date_errors and date_errors == source_row_count:
+            raise ValueError("excel_source: 所有记录发表时间缺失或无法解析，日期口径无法建立")
         raise ValueError("excel_source: 按内容范围过滤后没有可用活动明细")
     invalid_content_modes: dict[str, int] = {}
     for row in normalized:
@@ -481,6 +549,9 @@ def load_activity_rows(plan: dict) -> Optional[dict]:
                 sum(unknown_sites.values()) / len(normalized), 4
             ) if normalized else 0.0,
             "source_row_count": source_row_count,
+            "date_error_rows": date_errors,
+            "sheet_note": sheet_note,
+            "interaction_available": interaction_seen,
             "accepted_row_count": len(normalized),
             "invalid_content_modes_mapped_to_unknown": invalid_content_modes,
             "campaigns": sorted({row["analysis_object"] for row in normalized}),
@@ -497,3 +568,30 @@ def load_activity_rows(plan: dict) -> Optional[dict]:
             "period_end": period_end,
         },
     }
+
+
+def profile(rows: list[dict], meta: dict, run_mode: str = "full") -> dict:
+    """数据异常分级（FIX-58，KS_Exception_Handling「数据质量下限」与常见异常表）。
+
+    severe：有效量 < 100（full 模式暂停告知；demo 降为记录）。
+    notes：某平台 < 50 条（样本量有限）、互动量全空（仅统计声量）、日期异常排除、Sheet 读取说明。
+    """
+    severe, notes = [], []
+    if len(rows) < VALID_ROWS_MIN:
+        item = (f"有效数据量 {len(rows)} 条，低于 {VALID_ROWS_MIN} 条下限；"
+                "建议扩大采集范围（关键词/周期/平台）后再出报告")
+        (severe if run_mode != "demo" else notes).append(item)
+    counts: dict[str, int] = {}
+    for row in rows:
+        counts[row.get("_platform") or "other"] = counts.get(row.get("_platform") or "other", 0) + 1
+    limited = {p: n for p, n in sorted(counts.items()) if n < PLATFORM_ROWS_MIN}
+    for platform, n in limited.items():
+        notes.append(f"{platforms.display(platform)}仅 {n} 条，样本量有限，结论权重降低")
+    if meta.get("interaction_available") is False:
+        notes.append("互动量字段全为空，仅统计声量，不输出互动量指标")
+    if meta.get("date_error_rows"):
+        notes.append(f"发表时间无法解析 {meta['date_error_rows']} 条，已标记「日期异常」并排除")
+    if meta.get("sheet_note"):
+        notes.append(meta["sheet_note"])
+    return {"severe": severe, "notes": notes, "limited_platforms": limited,
+            "interaction_available": meta.get("interaction_available", True)}

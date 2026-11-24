@@ -1,0 +1,168 @@
+# ================================================================
+# ssjh-social-task — 输出字段模板
+# 控制 xlsx/csv 的列顺序和字段白名单
+#
+# 使用方法:
+#   - columns 列表决定输出哪些字段、以什么顺序排列
+#   - 字段名需与数说聚合 ES 返回的原始字段名一致
+#   - 注释掉某行 = 该字段不输出
+#   - 数说返回的多余字段自动忽略（不在模板中的字段不输出）
+#   - rename: 可以给字段设置中文列名（可选）
+# ================================================================
+
+columns:
+
+  # ── 平台 & 来源 ──────────────────────────────────────────────
+  - field: site_name
+    rename: "平台"
+
+  - field: data_type
+    rename: "内容类型"         # 主帖/回帖/评论
+
+  # ── 帖子核心 ─────────────────────────────────────────────────
+  - field: id
+    rename: "内容ID"
+
+  - field: url
+    rename: "原文链接"
+
+  - field: title
+    rename: "标题"
+
+  - field: content
+    rename: "正文"
+
+  - field: publish_time
+    rename: "发布时间"
+
+  - field: crawl_time
+    rename: "抓取时间"
+
+  # ── 情感 ─────────────────────────────────────────────────────
+  - field: sentiment
+    rename: "情感"             # 1=正面 0=中性 -1=负面
+
+  # ── 互动量 ───────────────────────────────────────────────────
+  - field: reposts_cnt
+    rename: "转发数"
+
+  - field: review_cnt
+    rename: "评论数"
+
+  - field: like_cnt
+    rename: "点赞数"
+
+  - field: reads_count
+    rename: "阅读数"           # 当前微博样本未返回；保持缺失，不能用video_view_cnt替代
+
+  - field: interaction_cnt
+    rename: "互动量"           # 平台综合互动量
+
+  # ── 作者信息 ─────────────────────────────────────────────────
+  - field: author
+    rename: "作者昵称"
+
+  - field: author_url
+    rename: "作者主页"
+
+  - field: uid
+    rename: "作者ID"
+
+  - field: fans_cnt
+    rename: "粉丝数"
+
+  - field: gender
+    rename: "性别"
+
+  - field: province
+    rename: "省份"
+
+  - field: city
+    rename: "城市"
+
+  - field: verified_type
+    rename: "认证类型"
+
+  - field: verified_reason
+    rename: "认证说明"
+
+  - field: vtype
+    rename: "用户类型"         # 普通/黄V/蓝V
+
+  # ── 分析对象 ─────────────────────────────────────────────────
+  - field: profilers_name
+    rename: "分析对象"
+
+  - field: profilers_id
+    rename: "分析对象ID"
+
+  # ── 任务信息 ─────────────────────────────────────────────────
+  - field: update_time
+    rename: "数据更新时间"
+
+  # v0.11.2：新增平台原始指标；不猜测跨平台等价含义，不补零。
+  - field: site_id
+    rename: "站点ID"
+
+  - field: coin_cnt
+    rename: "coin_cnt（口径待核实）"
+
+  - field: barrage_cnt
+    rename: "barrage_cnt（口径待核实）"
+
+  - field: fav_cnt
+    rename: "fav_cnt（口径待核实）"
+
+  - field: favorite_cnt
+    rename: "favorite_cnt（口径待核实）"
+
+  - field: collection_cnt
+    rename: "collection_cnt（口径待核实）"
+
+  - field: collection_video_cnt
+    rename: "collection_video_cnt（口径待核实）"
+
+  - field: view_cnt
+    rename: "view_cnt（口径待核实）"
+
+  - field: video_view_cnt
+    rename: "待核实：视频观看相关字段"
+
+  - field: like_share_cnt
+    rename: "like_share_cnt（口径待核实）"
+
+  - field: display_cnt
+    rename: "display_cnt（口径待核实）"
+
+  - field: duration_seconds
+    rename: "duration_seconds（单位/口径待核实）"
+
+# ================================================================
+# 以下字段按需取消注释
+# ================================================================
+#
+#  - field: user_review_cnt
+#    rename: "用户评论数"
+#
+#  - field: user_reposts_cnt
+#    rename: "用户转发数"
+#
+# coin_cnt已在默认新增字段区，不重复添加。
+#
+#  - field: activeness
+#    rename: "活跃度"
+#
+#  - field: desc
+#    rename: "作者简介"
+#
+#  - field: city_level
+#    rename: "城市级别"
+#
+#  - field: user_type
+#    rename: "账号类型"
+#
+#  - field: wb_cnt
+#    rename: "发博数"           # 微博
+#
+#  - field: activeness
+#    rename: "活跃度"

@@ -77,7 +77,7 @@ class KolThresholdTest(unittest.TestCase):
             + [_row(mode="UGC", fans=None) for _ in range(10)]       # UGC 未知，排除
             + [_row(platform="news", fans=None) for _ in range(5)]   # 新闻，排除
         )
-        stats = H._campaign_stats(rows, ["瑞幸"], [])
+        stats = H._campaign_stats(rows, "瑞幸", [])
         self.assertEqual(stats["kol_effective_total"], 5)
         self.assertEqual(stats["kol_effectiveness"]["head"]["volume"], 2)
         self.assertEqual(stats["kol_effectiveness"]["head"]["volume_share"], 0.4)
@@ -91,7 +91,7 @@ class KolThresholdTest(unittest.TestCase):
 
     def test_all_unknown_suppresses_chart(self):
         rows = _prepare([_row(fans=None) for _ in range(3)])
-        stats = H._campaign_stats(rows, ["瑞幸"], [])
+        stats = H._campaign_stats(rows, "瑞幸", [])
         self.assertTrue(stats["kol_notes"]["all_unknown"])
         specs = charts.analysis_specs("c1", stats) if hasattr(charts, "analysis_specs") \
             else charts._analysis_specs("c1", stats)
@@ -114,7 +114,7 @@ class DiscussionDimensionTest(unittest.TestCase):
             rows.append(_row(dim="品牌", sentiment=-1))
         for _ in range(5):
             rows.append(_row(dim="产品", sentiment=1))
-        stats = H._campaign_stats(rows, ["瑞幸"], [])
+        stats = H._campaign_stats(rows, "瑞幸", [])
         self.assertEqual(list(stats["dimension_nsr"]),
                          ["品牌主导讨论", "产品主导讨论", "活动流程与获取主导讨论"])
         self.assertEqual(stats["dimension_nsr"]["品牌主导讨论"]["status"], "available")
@@ -130,13 +130,13 @@ class DiscussionDimensionTest(unittest.TestCase):
                             "sentiment": 1, "ai_sentiment": 1, "interaction_cnt": 1,
                             "publish_time": TS, "_publish_ymd": "20261001",
                             "_kol_level": "unknown"} for _ in range(2)])
-        stats = H._campaign_stats(rows, ["瑞幸"], [])
+        stats = H._campaign_stats(rows, "瑞幸", [])
         self.assertEqual(stats["dimension_coverage"]["missing"], 2)
         self.assertIn("分维度覆盖声量将偏低", stats["dimension_coverage"]["note"])
 
     def test_no_short_form_names(self):
         """禁止「品牌NSR / 产品NSR / 活动NSR」这类简称。"""
-        stats = H._campaign_stats(_prepare([_row()]), ["瑞幸"], [])
+        stats = H._campaign_stats(_prepare([_row()]), "瑞幸", [])
         for key in stats["dimension_nsr"]:
             self.assertNotIn("NSR", key)
 
@@ -144,34 +144,36 @@ class DiscussionDimensionTest(unittest.TestCase):
 class DerivedMetricTest(unittest.TestCase):
     def test_interaction_multiple(self):
         rows = _prepare([_row(interaction=100) for _ in range(4)])  # 条均 100
-        stats = H._campaign_stats(rows, ["瑞幸"], [], brand_avg_interaction=50.0)
+        stats = H._campaign_stats(rows, "瑞幸", [], brand_avg_interaction=50.0)
         self.assertEqual(stats["metrics"]["条均互动倍数"], 2.0)
 
     def test_interaction_multiple_none_without_brand_baseline(self):
-        stats = H._campaign_stats(_prepare([_row()]), ["瑞幸"], [],
+        stats = H._campaign_stats(_prepare([_row()]), "瑞幸", [],
                                   brand_avg_interaction=None)
         self.assertIsNone(stats["metrics"]["条均互动倍数"])
-        stats = H._campaign_stats(_prepare([_row()]), ["瑞幸"], [],
+        stats = H._campaign_stats(_prepare([_row()]), "瑞幸", [],
                                   brand_avg_interaction=0)
         self.assertIsNone(stats["metrics"]["条均互动倍数"])
 
     def test_brand_dominant_share_uses_main_object(self):
         rows = _prepare([_row(dim="品牌") for _ in range(3)]
                         + [_row(dim="产品") for _ in range(7)])
-        stats = H._campaign_stats(rows, ["瑞幸"], [])
+        stats = H._campaign_stats(rows, "瑞幸", [])
         self.assertEqual(stats["metrics"]["品牌主导讨论占比"], 0.3)
-        # 与品牌提及率是两种方法：品牌词命中的比例不受主对象影响
-        self.assertEqual(stats["metrics"]["品牌提及率"], 1.0)
+        # 与品牌提及率是两种方法：品牌词 10/10 命中 = 100% ≥ 95% → 提及漏斗退化，
+        # 不输出独立的品牌提及率（原版 aggregate.py:191-193）；主对象口径不受影响。
+        self.assertTrue(stats["mention_funnel"]["degraded"])
+        self.assertIsNone(stats["metrics"]["品牌提及率"])
 
     def test_no_brand_words_suppresses_mention_rate(self):
         """原版无 brand_name 时只输出 Tier1，品牌提及率不输出（不是 0%）。"""
-        stats = H._campaign_stats(_prepare([_row()]), [], [])
+        stats = H._campaign_stats(_prepare([_row()]), "", [])
         self.assertIsNone(stats["metrics"]["品牌提及率"])
         self.assertIsNone(stats["metrics"]["产品提及占比"])
 
     def test_brand_words_with_zero_hits_reports_zero(self):
         """给了品牌词但一条没命中 → 0%（原版 pct(0, t1) = '0.0%'）。"""
-        stats = H._campaign_stats(_prepare([_row()]), ["不存在的品牌"], [])
+        stats = H._campaign_stats(_prepare([_row()]), "不存在的品牌", [])
         self.assertEqual(stats["metrics"]["品牌提及率"], 0.0)
 
 

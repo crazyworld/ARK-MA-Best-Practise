@@ -8,7 +8,7 @@
 # 相对 v0.1 的改进：补回方案确认门 G2、保留操作级 HC 与 QC 循环、
 #   补终验超时升级边、交付 draft→commit 分离、具体幂等键、本地可跑（Blueflare 未上线以 stub 执行 control_plane 节点）。
 # 口径修订 2026-10-21（源：飞书 wiki）：竞品 competitor_sov 下线、轮次二拆三任务+覆盖检查、
-#   缺 AI 情感直接报错不兜底、活动层分母=活动相关内容、词云缺平台不再合并。详见 knowledge/ 与 registry/node_status.v0.2.csv。
+#   缺 AI 情感直接报错不兜底、活动层分母=活动相关内容、品牌词云按平台、活动词云综合已选平台。详见 knowledge/ 与 registry/node_status.v0.2.csv。
 
 version: "0.2"
 slug: marketing-activity-review
@@ -26,7 +26,7 @@ governance:
     - {id: G2, after: n03_hc_plan,        subject: ConfirmedPlan,       authority: user}
     - {id: G3, after: n17_validate,       subject: ReportArtifact,      authority: validator, pass_policy: "p0_count==0"}
     - {id: G4, after: n21_hc_user,        subject: DeliveryDraft,       authority: user}
-  operational_hcs: [n10_hc_opinion, n_hc7_escalate, n_user_escalate]   # n10 仅歧义时暂停；其余为异常升级
+  operational_hcs: [n03b_activity_pull, n10_hc_opinion, n_hc7_escalate, n_user_escalate]   # n03b：采集授权   # n10 仅歧义时暂停；其余为异常升级
 
   required_before_production:          # G2 之后、生产节点之前必须就绪
     - confirmed_plan_artifact_id
@@ -72,8 +72,6 @@ governance:
 # ─── 业务口径参数（真口径，模块引用；模块开关走 plan.selected_modules）────
 params:
   annotation_routing_threshold: 1000
-  ugc_category_mode: dynamic                 # 根据真实UGC发现类别，经标签关卡确认
-  report_chapters: five                      # 默认五部分
   qc_max_rounds: 3
   user_confirm_timeout_days: 2
   validator_rules_version: topic5-validator-qc-v1.9
@@ -126,6 +124,23 @@ nodes:
     handler: human_gate
     outputs: [confirmed_plan]
     success: 用户确认方案；冻结 confirmed_plan_artifact_id + version
+    next: n03b_activity_pull
+
+  # FIX-04：Step 2.5 活动原帖自动采集（ssjh-social-task v0.11.6，只抓帖子）；用户已上传则直接沿用
+  - id: n03b_activity_pull
+    name: 活动原帖获取与适配
+    owner: Topic5Agent
+    mode: tool
+    handler: activity_pull
+    inputs: [confirmed_plan]
+    outputs: [activity_detail]
+    success: 预检→采集授权→创建/恢复原任务→下载核验（唯一ID/无评论/日期）→19列适配工作簿+交接记录
+    side_effect: external-paid-task
+    idempotency: "social-task:{task_id}:{confirmed_plan_version}"
+    external_unknown_state: reconcile-before-retry
+    pause_capable: true
+    retry: {max: 1, on_fail: pause}
+    checkpoint: true
     next: n04_run_init
 
   - id: n04_run_init
@@ -184,8 +199,22 @@ nodes:
     handler: clean_campaign
     inputs: [brand_stats]
     outputs: [cleaned_data]
-    success: 只清洗 G2 确认并冻结的 activity_detail Excel；缺少 source_file 时阻断
+    success: 只清洗 G2 确认并冻结的 activity_detail Excel；缺少 source_file 时阻断；有效量<100 或多 Sheet 同构时暂停告知（FIX-58）
     side_effect: none
+    pause_capable: true
+    retry: {max: 1, on_fail: pause}
+    checkpoint: true
+    # FIX-05：清洗后先做 Step5.5 去噪，轮次一只接收 denoised_data
+    next: n07b_noise_review
+
+  - id: n07b_noise_review
+    name: 去噪审核（Step5.5）
+    owner: Topic5Agent
+    mode: agent
+    handler: noise_review
+    inputs: [cleaned_data]
+    outputs: [denoised_data, noise_review]
+    success: 高互动Top30/峰值日/分层抽查覆盖；噪音默认剔除不新增HC；保留集不含噪音
     retry: {max: 1, on_fail: pause}
     checkpoint: true
     # FIX-31：UGC 发现改吃轮次一的「相关且 UGC」行，移到 n09r 审核通过之后
@@ -209,14 +238,14 @@ nodes:
     owner: tool-gateway
     mode: tool
     handler: annotate
-    inputs: [cleaned_data]
+    inputs: [denoised_data]
     outputs: [annotated_round1]
     success: 全量两基础标签；按 annotation_routing_threshold 路由小引擎/DataHub
     # 口径修订 2026-10-21:情感以 AI 标注为准,缺 AI 情感直接报错,不再兜底
     # FIX-33：≥阈值且 DataHub 不可用/异常时暂停问用户，禁止自行降级
     pause_capable: true
     side_effect: annotation-batch
-    idempotency: "annot:r1:{task_id}:{resource_lock}"
+    idempotency: "annot:r1:{task_id}:{resource_lock}:e{rerun_epoch}.{annotation_rerun_epoch_round1}"
     retry: {max: 2, on_fail: pause}
     checkpoint: true
     next: n09r_review_r1
@@ -228,8 +257,8 @@ nodes:
     mode: agent
     handler: annotation_review
     pause_capable: true
-    # 待审行为 annotated_round1，清洗上下文为 cleaned_data（本流水线的清洗产物名）
-    inputs: [annotated_round1, cleaned_data]
+    # 待审行为 annotated_round1，清洗上下文为 denoised_data（FIX-05 去噪后保留集）
+    inputs: [annotated_round1, denoised_data]
     outputs: [r1_review]
     success: 分层抽检情感/相关性并给出逐帖判定与正确率；只输出结论，不改标注
     # 只读审核：不改数据、不改标注字段；抽样为确定性计划（seed=42）
@@ -294,7 +323,7 @@ nodes:
     outputs: [annotated_data]
     success: 小引擎与 DataHub 均消费确认的定义和边界，完成三任务及覆盖检查，缺口显式报错
     side_effect: annotation-batch
-    idempotency: "annot:r2:{task_id}:{resource_lock}"
+    idempotency: "annot:r2:{task_id}:{resource_lock}:e{rerun_epoch}.{annotation_rerun_epoch_round1}.{annotation_rerun_epoch_round2}"
     retry: {max: 2, on_fail: pause}
     checkpoint: true
     next: n11r_review_r2
@@ -344,7 +373,8 @@ nodes:
     module: activity_performance
     # r2_review 是聚合的前置条件：轮次二审核未完成不得进入统计（FIX-30）。
     # 该 artifact 由 n11r_review_r2 产出，缺失时 n12 不就绪，避免被 n06 提前入队后抢跑。
-    inputs: [annotated_data, r2_review, brand_stats, brand_stats_baseline]
+    # FIX-24：赞助型活动的品牌/产品声量占比复用 n13 的 overall/brand/product 三次查询总量。
+    inputs: [annotated_data, r2_review, brand_stats, brand_stats_baseline, wordcloud_data]
     outputs: [stats_bundle]
     success: 各活动独立统计（趋势/互动/情感/PGC与UGC各Top10/正负观点及代表原文/UGC占比及代表内容/分维NSR）
     # 口径修订 2026-10-21:活动层所有指标分母=活动相关内容条数;指标用条均互动量/品牌提及率/产品提及占比
@@ -361,10 +391,12 @@ nodes:
     module: wordcloud_topics
     inputs: [confirmed_plan]
     outputs: [wordcloud_data]
-    success: 逐活动拉整体/品牌/产品词云                # 竞品声量已下线;缺平台不再跨平台合并
+    success: 逐活动拉整体/品牌/产品词云                # 竞品声量已下线
     side_effect: external-stat-pull
     idempotency: "ssjh:wc:{task_id}:{resource_lock}"
-    retry: {max: 2, on_fail: exception_bypass}
+    # FIX-54 第 6 点：取数失败保持 fail-closed（handler 本身即 raise），暂停交人工；
+    # 旁路会让 n14/n15 缺输入卡死，且词云缺失须由 HC7 relax 后才能以 callout 说明代替。
+    retry: {max: 2, on_fail: pause}
     next: n14_charts
 
   # ⑤ 图表封面
@@ -377,7 +409,7 @@ nodes:
     outputs: [chart_urls]
     success: 产图表封面及客户词云双版 PNG/render.json，词表全量保留，报告默认引用透明图
     side_effect: chart-render
-    idempotency: "chart-render:wordcloud-v0.2.6:{task_id}:{resource_lock}"
+    idempotency: "chart-render:wordcloud-v0.2.6:{task_id}:{resource_lock}:e{rerun_epoch}.{annotation_rerun_epoch_round1}.{annotation_rerun_epoch_round2}"
     retry: {max: 2, on_fail: pause}
     checkpoint: true
     next: n15_wordcloud_insight
@@ -402,7 +434,7 @@ nodes:
     module: evidence_summary
     inputs: [stats_bundle, chart_urls, wordcloud_insight]
     outputs: [report_md]
-    success: 内容层 MD（report_chapters 参数控制结构），不含飞书布局
+    success: 内容层 MD（固定四章，结构常量见 topic5-validator policy.REPORT_*），不含飞书布局
     retry: {max: 1, on_fail: pause}
     checkpoint: true
     next: n17_validate                        # join: stats_bundle + chart_urls + wordcloud_insight 齐备后撰写
@@ -430,6 +462,19 @@ nodes:
       no_p0: n20_delivery_draft
       has_p0_retry: n19_fix
       has_p0_maxed: n_hc7_escalate
+      noise_found: n18b_noise_rollback        # FIX-06：高点核查发现噪音→退回去噪全链重算
+
+  - id: n18b_noise_rollback
+    name: 噪音回退（退回 Step5.5 并失效下游）
+    owner: Topic5Agent
+    mode: code
+    handler: noise_rollback
+    inputs: [qc_report]
+    outputs: [noise_rollback_record]
+    success: Validator noise_ids 写入增量去噪参数；失效去噪及下游产物；rerun_epoch 递增
+    side_effect: none
+    retry: {max: 0, on_fail: pause}
+    next: n07b_noise_review
 
   - id: n19_fix
     name: P0 修复（patch 递增）
@@ -460,9 +505,10 @@ nodes:
     handler: delivery_draft
     inputs: [report_md, chart_urls]
     outputs: [delivery_draft, external_receipts, feishu_doc, qc_report]
+    # FIX-38：另写 published_delivery（发布基线，不随返工失效），返工时在原文档原位修正
     success: 内容层→飞书布局层，创建文档并转移所有权；发布后机器检查结果合并回 qc_report
     side_effect: feishu-doc-create
-    idempotency: "feishu:{task_id}:{resource_lock}:{report_artifact_sha256}"
+    idempotency: "feishu:{task_id}:{resource_lock}:{report_artifact_sha256}:u{user_rework_rounds}"
     retry: {max: 2, on_fail: pause}
     checkpoint: true
     next: n20_delivery_gate

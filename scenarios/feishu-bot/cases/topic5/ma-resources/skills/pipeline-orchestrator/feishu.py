@@ -276,6 +276,11 @@ def _text_block(content: str) -> dict:
             "text": {"elements": _inline_elements(content)}}
 
 
+# 报告装配器用 `*{{muted}}…*` 标记说明类文字；飞书 text_color 7 = 灰色。
+MUTED_MARK = "{{muted}}"
+MUTED_TEXT_COLOR = 7
+
+
 def _inline_elements(content: str) -> list[dict]:
     """Translate common Markdown emphasis and hyperlinks into native text runs."""
     pattern = re.compile(r"\*\*(.+?)\*\*|\[([^\]]+)\]\(([^)]+)\)|\*([^*]+)\*")
@@ -294,7 +299,12 @@ def _inline_elements(content: str) -> list[dict]:
             url = match.group(3)
             add(match.group(2), {"link": {"url": url}} if url.startswith(("https://", "http://")) else None)
         else:
-            add(match.group(4), {"italic": True})
+            text = match.group(4)
+            if text.startswith(MUTED_MARK):
+                # 灰色斜体说明（KS_Feishu_Format：说明类文字 rgb(143,149,158) 斜体）。
+                add(text[len(MUTED_MARK):], {"italic": True, "text_color": MUTED_TEXT_COLOR})
+            else:
+                add(text, {"italic": True})
         position = match.end()
     add(content[position:])
     return elements or [{"text_run": {"content": ""}}]
@@ -348,6 +358,12 @@ def md_to_blocks(markdown: str) -> list[dict]:
         if not line.strip():
             i += 1
             continue
+        grid = re.fullmatch(r"<!--\s*grid:(50:50|column|end)\s*-->", line.strip())
+        if grid:
+            # FIX-50：报告装配器的双栏标记，交 layout_blocks 生成 grid。
+            blocks.append({"block_type": 0, "_grid_marker": grid.group(1)})
+            i += 1
+            continue
         if line.strip().startswith("<!--") and line.strip().endswith("-->"):
             i += 1
             continue
@@ -383,6 +399,17 @@ def md_to_blocks(markdown: str) -> list[dict]:
                 raise ValueError("报告引用的本地图片不存在，禁止改写为路径文字")
             i += 1
             continue
+        marker = re.match(r"^\s*>\s*\[!(insight|tip|warn)\]\s*(.*)", line)
+        if marker:
+            # FIX-46：显式 Callout 标记；后续连续 `>` 行并入同一个 Callout。
+            parts = [marker.group(2)]
+            while i + 1 < len(lines) and re.match(r"^\s*>", lines[i + 1]) \
+                    and not re.match(r"^\s*>\s*\[!", lines[i + 1]):
+                i += 1
+                parts.append(re.sub(r"^\s*>\s?", "", lines[i]))
+            blocks.append(_callout_block(marker.group(1), "".join(p.strip() for p in parts)))
+            i += 1
+            continue
         bullet = re.match(r"^\s*[-+*]\s+(.*)", line)
         ordered = re.match(r"^\s*\d+[.)]\s+(.*)", line)
         quote = re.match(r"^\s*>\s?(.*)", line)
@@ -394,6 +421,28 @@ def md_to_blocks(markdown: str) -> list[dict]:
             blocks.append(_text_block(line.strip()))
         i += 1
     return blocks
+
+
+# KS_Feishu_Format：整体洞察 📊 light-orange；各节 💡 orange。飞书 background_color 枚举。
+CALLOUT_STYLE = {
+    "insight": {"background_color": 2, "emoji_id": "bar_chart"},   # light-orange
+    "tip": {"background_color": 3, "emoji_id": "bulb"},            # orange
+    "warn": {"background_color": 4, "emoji_id": "warning"},        # light-yellow
+}
+
+
+def _chart_name(block: dict) -> str:
+    return str(block.get("_local_path") or "") + " " + str(block.get("_alt") or "")
+
+
+def _is_dist_pair(left: dict, right: dict) -> bool:
+    """平台分布饼图与内容类型饼图（KS 传播概况：多平台 50:50 并排）。"""
+    return ("_platform" in _chart_name(left) and "_content" in _chart_name(right))
+
+
+def _callout_block(kind: str, text: str) -> dict:
+    return {"block_type": 19, "callout": dict(CALLOUT_STYLE[kind]), "_explicit_callout": kind,
+            "_children": [_text_block(text)]}
 
 
 def _block_text(block):
@@ -411,6 +460,9 @@ def layout_blocks(blocks: list[dict]) -> list[dict]:
     result, i = [], 0
     first_paragraph = False
     description = False
+    # FIX-46：文档里有显式 Callout 标记时，不再把首段机械转成 Callout；
+    # 无标记的旧报告保留首段兜底（过渡期）。
+    explicit = any(block.get("_explicit_callout") for block in blocks)
     while i < len(blocks):
         block = blocks[i]
         bt, text = block.get("block_type"), _block_text(block)
@@ -420,6 +472,18 @@ def layout_blocks(blocks: list[dict]) -> list[dict]:
             result.append(block)
             i += 1
             continue
+        if block.get("_grid_marker") == "50:50":
+            column_at = next((j for j in range(i + 1, len(blocks))
+                              if blocks[j].get("_grid_marker") == "column"), None)
+            end_at = next((j for j in range(i + 1, len(blocks))
+                           if blocks[j].get("_grid_marker") == "end"), None)
+            if column_at is None or end_at is None or not column_at < end_at:
+                raise ValueError("报告双栏标记不完整（grid:50:50 / column / end）")
+            result.append(_grid(blocks[i + 1:column_at], blocks[column_at + 1:end_at]))
+            i = end_at + 1
+            continue
+        if block.get("_grid_marker"):
+            raise ValueError(f"报告双栏标记孤立：{block['_grid_marker']}")
         if text.startswith("正面观点 TOP5"):
             stop = i + 1
             while stop < len(blocks) and blocks[stop].get("block_type") not in (*_HEADING_BLOCK_TYPE.values(), 27):
@@ -439,18 +503,25 @@ def layout_blocks(blocks: list[dict]) -> list[dict]:
                     result.append(_grid([block], blocks[i + 1:stop]))
                     i = stop
                     continue
-            elif stop < len(blocks) and blocks[stop].get("block_type") in (27, 31):
+            elif stop < len(blocks) and (
+                    blocks[stop].get("block_type") == 31
+                    or (blocks[stop].get("block_type") == 27 and _is_dist_pair(block, blocks[stop]))):
+                # FIX-52：图+图只对「平台分布 + 内容类型」这一对并排；其他相邻图通栏。
                 right = [blocks[stop]]
                 stop += 1
-                if stop < len(blocks) and _block_text(blocks[stop]).startswith("活动整体 NSR"):
+                # FIX-51：2.N.3 右栏 = 情感数据表 + 活动整体 NSR + 灰色口径注。
+                if stop < len(blocks) and _block_text(blocks[stop]).startswith(("活动整体净情感度", "活动整体 NSR")):
                     right.append(blocks[stop])
                     stop += 1
+                    if stop < len(blocks) and _block_text(blocks[stop]).startswith("NSR ="):
+                        right.append(blocks[stop])
+                        stop += 1
                 image_name = str(block.get("_alt") or "") + " " + str(block.get("_local_path") or "")
                 ratios = (55, 45) if "漏斗" in image_name or "mention_funnel" in image_name else (50, 50)
                 result.append(_grid([block], right, ratios))
                 i = stop
                 continue
-        if first_paragraph and bt == 2:
+        if first_paragraph and bt == 2 and not explicit:
             result.append({"block_type": 19, "callout": {"background_color": 2, "emoji_id": "bulb"},
                            "_children": [block]})
             first_paragraph = False
@@ -485,10 +556,10 @@ def _strip_internal(block: dict) -> dict:
 
 # ── 真路径 ────────────────────────────────────────────────────
 def _create_children(token: str, doc_token: str, blocks: list[dict],
-                     batch: int = 50, parent_id: str = "") -> list[dict]:
+                     batch: int = 50, parent_id: str = "", start_index: int = 0) -> list[dict]:
     """批量创建子 block（docx 单次 children 上限 50），返回每个已建 block（含 block_id），顺序对齐。"""
     created: list[dict] = []
-    index = 0
+    index = start_index
     for i in range(0, len(blocks), batch):
         chunk = [_strip_internal(b) for b in blocks[i:i + batch]]
         data = _req(
@@ -502,8 +573,9 @@ def _create_children(token: str, doc_token: str, blocks: list[dict],
     return created
 
 
-def _publish_blocks(token, doc_token, blocks, parent_id="", available_width=_DOCUMENT_BODY_WIDTH):
-    created = _create_children(token, doc_token, blocks, parent_id=parent_id)
+def _publish_blocks(token, doc_token, blocks, parent_id="", available_width=_DOCUMENT_BODY_WIDTH,
+                    start_index: int = 0):
+    created = _create_children(token, doc_token, blocks, parent_id=parent_id, start_index=start_index)
     _fill_tables(token, doc_token, blocks, created, available_width=available_width)
     images = _fill_images(token, doc_token, blocks, created)
     for submitted, got in zip(blocks, created):
@@ -649,21 +721,93 @@ def _fill_tables(token: str, doc_token: str, blocks: list[dict],
     return filled
 
 
+def grant_access(token: str, obj_token: str, obj_type: str, owner: str | None) -> dict:
+    """转移所有权给操作人；失败降级为 full_access 协作者。obj_type=docx|folder。"""
+    result = {"transferred": False, "transfer_error": "", "collaborator_added": False,
+              "collaborator_error": ""}
+    if not owner:
+        result.update(transfer_error="owner_not_configured",
+                      collaborator_error="collaborator_target_not_configured")
+        return result
+    try:
+        _req("POST", f"/open-apis/drive/v1/permissions/{obj_token}/members/transfer_owner"
+             f"?type={obj_type}&need_notification=false&remove_old_owner=false"
+             "&old_owner_perm=full_access&stay_put=true", token,
+             {"member_type": "openid", "member_id": owner})
+        result["transferred"] = True
+        return result
+    except Exception as error:
+        result["transfer_error"] = f"{type(error).__name__}: {error}"
+    try:
+        _req("POST", f"/open-apis/drive/v1/permissions/{obj_token}/members"
+             f"?type={obj_type}&need_notification=false", token,
+             {"member_type": "openid", "member_id": owner, "perm": "full_access", "type": "user"})
+        result["collaborator_added"] = True
+    except Exception as error:
+        result["collaborator_error"] = f"{type(error).__name__}: {error}"
+    return result
+
+
+def ensure_project_folder(token: str, root_folder_token: str, project_name: str) -> str:
+    """FIX-41：在根目录下按项目名查找文件夹，没有就创建；同名复用（幂等）。"""
+    page_token = ""
+    while True:
+        query = f"?folder_token={root_folder_token}&page_size=200" + (
+            f"&page_token={page_token}" if page_token else "")
+        data = _req("GET", "/open-apis/drive/v1/files" + query, token)
+        for item in data.get("files") or []:
+            if item.get("type") == "folder" and item.get("name") == project_name:
+                return item["token"]
+        if not data.get("has_more"):
+            break
+        page_token = data.get("next_page_token") or ""
+    created = _req("POST", "/open-apis/drive/v1/files/create_folder", token,
+                   {"name": project_name, "folder_token": root_folder_token})
+    folder = created.get("token")
+    if not folder:
+        raise RuntimeError(f"创建项目文件夹失败：{created}")
+    return folder
+
+
 def create_delivery(report_md: str, *, title: str, task_id: str,
-                    report_version: str, reused_doc_token: str = "") -> dict:
+                    report_version: str, reused_doc_token: str = "",
+                    key_numbers: list | None = None, project_name: str = "",
+                    published: dict | None = None) -> dict:
     """新建飞书 docx（或复用已有回执），写入内容（图片上传 media 回填），转移所有权，回读核对。
 
     返回 feishu_doc：{doc_token, url, revision_id, report_version, images_filled,
                       readback, degraded:False}。
     """
     token = _tenant_token()
+    # FIX-41：配置了根目录时文档建在项目专属文件夹；未配置保持原行为并由上层记 P1。
+    root_folder = os.environ.get("FEISHU_ROOT_FOLDER_TOKEN", "").strip()
+    folder_token = (ensure_project_folder(token, root_folder, project_name or title)
+                    if root_folder else "")
 
+    # FIX-38：已发布过的文档在原文档上修正（链接、批注不变），不重新建文档。
+    rework = {"mode": "create"}
+    if published and published.get("doc_token") and not reused_doc_token:
+        doc_token = published["doc_token"]
+        plan = plan_patch(published.get("markdown") or "", report_md)
+        if plan["mode"] == "patch":
+            try:
+                rework = {"mode": "patch", "ops": len(plan["ops"]),
+                          "applied": patch_document(token, doc_token, plan["ops"])}
+            except Exception as error:
+                rework = {"mode": "rebuild", "reason": f"原位修正失败，退回重建：{type(error).__name__}: {error}"}
+        else:
+            rework = {"mode": "rebuild", "reason": plan["reason"]}
+        images_filled = 0
+        if rework["mode"] == "rebuild":
+            images_filled = _rebuild_in_place(token, doc_token, layout_blocks(md_to_blocks(report_md)))
+            rework["notice"] = "链接不变，内容重建"
+        folder_token = published.get("folder_token") or folder_token
     # 幂等复用：命中已有回执则不新建。
-    if reused_doc_token:
+    elif reused_doc_token:
         doc_token = reused_doc_token
     else:
         data = _req("POST", "/open-apis/docx/v1/documents", token,
-                    {"title": title})
+                    {"title": title, **({"folder_token": folder_token} if folder_token else {})})
         doc = data.get("document") or {}
         doc_token = doc.get("document_id") or doc.get("document", {}).get("document_id")
         if not doc_token:
@@ -671,50 +815,23 @@ def create_delivery(report_md: str, *, title: str, task_id: str,
 
     # 写入 block（批量 children），再对 image block 上传 media 回填。
     blocks = layout_blocks(md_to_blocks(report_md))
-    images_filled = 0
-    if blocks and not reused_doc_token:
-        images_filled = _publish_blocks(token, doc_token, blocks)
+    if rework["mode"] == "create":
+        images_filled = 0
+        if blocks and not reused_doc_token:
+            images_filled = _publish_blocks(token, doc_token, blocks)
 
-    # 优先转移所有权；失败时降级添加 full_access 协作者，保证发起人可管理文档。
+    # FIX-41：先转移项目文件夹，再转移文档；两者均按「转移所有权→降级 full_access 协作者」处理。
     owner = os.environ.get("FEISHU_USER_OPEN_ID")
-    ownership_transferred = False
-    ownership_error = ""
-    collaborator_added = False
-    collaborator_error = ""
-    if owner:
-        try:
-            _req("POST", f"/open-apis/drive/v1/permissions/{doc_token}/members/transfer_owner"
-                 "?type=docx&need_notification=false&remove_old_owner=false"
-                 "&old_owner_perm=full_access&stay_put=true", token,
-                 {"member_type": "openid", "member_id": owner})
-            ownership_transferred = True
-        except Exception as error:
-            ownership_transferred = False
-            ownership_error = f"{type(error).__name__}: {error}"
-            try:
-                _req(
-                    "POST",
-                    f"/open-apis/drive/v1/permissions/{doc_token}/members"
-                    "?type=docx&need_notification=false",
-                    token,
-                    {
-                        "member_type": "openid",
-                        "member_id": owner,
-                        "perm": "full_access",
-                        "type": "user",
-                    },
-                )
-                collaborator_added = True
-            except Exception as collaborator_exc:
-                collaborator_error = (
-                    f"{type(collaborator_exc).__name__}: {collaborator_exc}"
-                )
-    else:
-        ownership_error = "owner_not_configured"
-        collaborator_error = "collaborator_target_not_configured"
+    folder_access = (grant_access(token, folder_token, "folder", owner)
+                     if folder_token else {"skipped": True})
+    doc_access = grant_access(token, doc_token, "docx", owner)
+    ownership_transferred = doc_access["transferred"]
+    ownership_error = doc_access["transfer_error"]
+    collaborator_added = doc_access["collaborator_added"]
+    collaborator_error = doc_access["collaborator_error"]
 
     # 导出后回读核对：重新读回 blocks，核对章节齐全、图 block 生效、版本一致。
-    readback = _readback_check(token, doc_token, report_md, report_version)
+    readback = _readback_check(token, doc_token, report_md, report_version, key_numbers)
     revision_id = readback.get("revision_id") or 1
 
     return {
@@ -724,15 +841,96 @@ def create_delivery(report_md: str, *, title: str, task_id: str,
         "report_version": report_version,
         "ownership_transferred": ownership_transferred,
         "ownership_target": owner,
+        "folder_token": folder_token,
+        "folder_configured": bool(root_folder),
+        "folder_access": folder_access,
         "ownership_error": ownership_error,
         "collaborator_added": collaborator_added,
         "collaborator_perm": "full_access" if collaborator_added else "",
         "collaborator_error": collaborator_error,
         "delivery_access_granted": ownership_transferred or collaborator_added,
         "images_filled": images_filled,
+        "rework": rework,
         "readback": readback,
         "degraded": False,
     }
+
+
+# ── FIX-38 发布后原位修正（KS_Feishu_Format §十）─────────────────────────────
+# 文本：原 block 上 update_text_elements；图片：上传后 replace_image（block 不变）；
+# GRID/表格/Callout 等容器：整体删除后在原位置插入新块（不改 COLUMN）。
+_TEXTUAL = {_BLOCK_TEXT, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13}
+
+
+def _root_children(token: str, doc_token: str) -> list[str]:
+    data = _req("GET", f"/open-apis/docx/v1/documents/{doc_token}/blocks/{doc_token}", token)
+    return list((data.get("block") or data).get("children") or [])
+
+
+def _headings(blocks: list[dict]) -> list[str]:
+    return [_block_text(b).strip() for b in _flatten_blocks(blocks)
+            if b.get("block_type") in _HEADING_BLOCK_TYPE.values()]
+
+
+def _comparable(block: dict) -> str:
+    return json.dumps(block, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def plan_patch(old_md: str, new_md: str) -> dict:
+    """新旧 MD 的顶层 block 对比。章节增删或顶层块数变化 → rebuild；否则逐块生成 ops。"""
+    old_blocks = layout_blocks(md_to_blocks(old_md))
+    new_blocks = layout_blocks(md_to_blocks(new_md))
+    if _headings(old_blocks) != _headings(new_blocks) or len(old_blocks) != len(new_blocks):
+        return {"mode": "rebuild", "ops": [], "reason": "章节增删或结构变化"}
+    ops = []
+    for index, (old, new) in enumerate(zip(old_blocks, new_blocks)):
+        if _comparable(old) == _comparable(new):
+            continue
+        kind = new.get("block_type")
+        if kind == old.get("block_type") and kind in _TEXTUAL and not new.get("_children"):
+            ops.append({"op": "replace_text", "index": index, "block": new})
+        elif kind == old.get("block_type") == _BLOCK_IMAGE:
+            ops.append({"op": "replace_image", "index": index, "block": new})
+        else:
+            ops.append({"op": "replace_block", "index": index, "block": new})
+    return {"mode": "patch", "ops": ops, "reason": ""}
+
+
+def patch_document(token: str, doc_token: str, ops: list[dict]) -> int:
+    """按 ops 原位修正；任何 API 失败直接抛错（调用方退回重建，不静默失败）。返回执行条数。"""
+    children = _root_children(token, doc_token)
+    base = f"/open-apis/docx/v1/documents/{doc_token}/blocks"
+    for op in sorted(ops, key=lambda o: o["index"]):
+        index, block = op["index"], op["block"]
+        if index >= len(children):
+            raise RuntimeError("原位修正定位失败：线上文档顶层块少于预期")
+        block_id = children[index]
+        if op["op"] == "replace_text":
+            key = next(k for k in block if not k.startswith("_") and isinstance(block[k], dict)
+                       and "elements" in block[k])
+            _req("PATCH", f"{base}/{block_id}", token,
+                 {"update_text_elements": {"elements": block[key]["elements"]}})
+        elif op["op"] == "replace_image":
+            local_path = block.get("_local_path")
+            if not (local_path and os.path.isfile(local_path)):
+                raise RuntimeError("原位修正图片缺少本地 PNG")
+            file_token = _upload_media(token, local_path, parent_node=block_id)
+            _req("PATCH", f"{base}/{block_id}", token, {"replace_image": {"token": file_token}})
+        else:
+            _req("DELETE", f"{base}/{doc_token}/children/batch_delete", token,
+                 {"start_index": index, "end_index": index + 1})
+            _publish_blocks(token, doc_token, [block], start_index=index)
+            children = _root_children(token, doc_token)
+    return len(ops)
+
+
+def _rebuild_in_place(token: str, doc_token: str, blocks: list[dict]) -> int:
+    """链接不变、内容重建：清空根节点下全部块后重新发布。"""
+    count = len(_root_children(token, doc_token))
+    if count:
+        _req("DELETE", f"/open-apis/docx/v1/documents/{doc_token}/blocks/{doc_token}/children/batch_delete",
+             token, {"start_index": 0, "end_index": count})
+    return _publish_blocks(token, doc_token, blocks)
 
 
 def _expected_image_count(report_md: str) -> int:
@@ -799,9 +997,15 @@ def _table_layout_check(items: list[dict], source_blocks: list[dict]) -> dict:
             "invalid_cells": bad_cells}
 
 
+def numbers_check(text_all: str, key_numbers: list | None) -> dict:
+    """关键数字回读核对（FIX-40）：每个 value_text 须出现在回读全文中。"""
+    missing = [n for n in key_numbers or [] if str(n.get("value_text") or "") not in text_all]
+    return {"checked": len(key_numbers or []), "missing": missing, "ok": not missing}
+
+
 def _readback_check(token: str, doc_token: str, report_md: str,
-                    report_version: str) -> dict:
-    """导出后回读核对：章节齐全 / 图 block 生效 / 绑定版本一致。"""
+                    report_version: str, key_numbers: list | None = None) -> dict:
+    """导出后回读核对：章节齐全 / 图 block 生效 / 绑定版本一致 / 关键数字一致。"""
     data = _req("GET", f"/open-apis/docx/v1/documents/{doc_token}", token)
     doc = data.get("document") or {}
     revision_id = doc.get("revision_id")
@@ -829,7 +1033,11 @@ def _readback_check(token: str, doc_token: str, report_md: str,
     }
     layout_ok = all(count["got"] >= count["expected"] for count in layout_counts.values())
     table_layout = _table_layout_check(items, layout_blocks(source_blocks))
+    numbers = numbers_check(text_all, key_numbers)
     return {
+        "numbers_check": numbers,
+        # FIX-36：内容类返工以飞书回读文本为复检对象。
+        "readback_text": text_all,
         "revision_id": revision_id,
         "chapters_complete": not missing,
         "missing_chapters": missing,
@@ -840,7 +1048,7 @@ def _readback_check(token: str, doc_token: str, report_md: str,
         "layout_counts": layout_counts,
         "layout_complete": layout_ok,
         "table_layout": table_layout,
-        "ok": (not missing) and images_ok and layout_ok and table_layout["ok"],
+        "ok": (not missing) and images_ok and layout_ok and table_layout["ok"] and numbers["ok"],
     }
 
 

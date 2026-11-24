@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "currency": "CNY",
+  "stat_success": "0.5",
+  "record_rates": {
+    "weibo": "0.006",
+    "news": "0.006",
+    "forum": "0.006",
+    "xiaohongshu": "0.028",
+    "kuaishou": "0.01",
+    "shipinhao": "0.05",
+    "weixin": "0.006",
+    "douyin": "0.01",
+    "bilibili": "0.01",
+    "zhihu": "0.01",
+    "tencent_video": "0.01",
+    "iqiyi": "0.01",
+    "baidu_zhidao": "0.01"
+  }
+}

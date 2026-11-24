@@ -70,8 +70,9 @@ def _ymd_dash(s: Any) -> Optional[str]:
 def _plan_window(plan: dict, *, baseline: bool) -> tuple[Optional[str], Optional[str]]:
     """从 confirmed_plan 取窗口（YYYY-MM-DD）。
 
-    baseline=True 时取基准期（活动前 30 天且不重叠）：优先 plan 内显式字段，
-    否则由活动期起点回推 30 天[start-30, start-1]。缺窗口返回 (None, None)。
+    baseline=True 时取基准期（缺陷清单 Q3）：读取需求确认单已确认的 baseline_start/end
+    （用户指定或需求阶段写入的默认值）；仅旧需求单缺该字段时按同一默认规则
+    [参照开始日−30, −1] 兜底（plan.period_start 即合并窗口开始日）。缺窗口返回 (None, None)。
     """
     if baseline:
         bs = _ymd_dash(plan.get("baseline_start"))

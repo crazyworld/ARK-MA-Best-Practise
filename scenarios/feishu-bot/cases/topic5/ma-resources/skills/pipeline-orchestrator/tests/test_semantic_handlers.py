@@ -31,16 +31,7 @@ class TestSemanticDegradedContract(unittest.TestCase):
     def test_llm_unavailable_without_creds(self):
         self.assertFalse(semantic.llm_available())
 
-    def test_ugc_fixed_four_is_deterministic(self):
-        self.st.params["ugc_category_mode"] = "fixed_four"
-        out = handlers.ugc_discovery({"id": "n08", "name": "ugc"}, self.st, {})
-        art = out["artifacts"]["ugc_category_list"]
-        self.assertEqual(art["categories"], ["模仿打卡", "创意改编", "测评分享", "晒单分享"])
-        self.assertEqual(art["source"], "fixed")
-        self.assertNotIn("degraded", art)  # 固定四类不是降级，是正常口径路径
-
     def test_ugc_dynamic_rejects_missing_model(self):
-        self.st.params["ugc_category_mode"] = "dynamic"
         self.st.write_artifact("cleaned_data", {"rows": [{"title": "打卡", "content": "试用"}]})
         with self.assertRaisesRegex(RuntimeError, "能力不可用"):
             handlers.ugc_discovery({"id": "n08", "name": "ugc"}, self.st, {})
@@ -86,7 +77,7 @@ class TestSemanticDegradedContract(unittest.TestCase):
             "campA": {"metrics": {"活动相关条数": 120, "条均互动量": 33.5,
                                   "品牌提及率": 0.42, "产品提及占比": 0.31, "NSR": 0.18}},
         }}
-        md = handlers._fallback_report_md(stats, {}, {}, "five", "0.0")
+        md = handlers._fallback_report_md(stats, {}, {}, "four", "0.0")
         # 真数字进正文
         self.assertIn("33.5", md)
         self.assertIn("条均互动量", md)
@@ -120,7 +111,7 @@ class TestSemanticDegradedContract(unittest.TestCase):
                 },
             },
         }
-        md = handlers._fallback_report_md(stats, {}, {}, "five", "0.0")
+        md = handlers._fallback_report_md(stats, {}, {}, "four", "0.0")
         self.assertIn("正面 10 条；中性 3 条；负面 2 条", md)
         self.assertIn("PGC 2 条；UGC 12 条；未知 1 条", md)
         self.assertIn("[联名活动热门笔记]", md)
@@ -187,7 +178,7 @@ class TestSemanticDegradedContract(unittest.TestCase):
             )
 
     def test_fix_report_rejects_missing_model_and_increments_attempt(self):
-        self.st.write_artifact("report_md", {"markdown": "# 初稿", "chapters": "five",
+        self.st.write_artifact("report_md", {"markdown": "# 初稿", "chapters": "four",
                                              "version": "0.0"})
         self.st.write_artifact("qc_report", {"has_p0": True,
                                              "issues": [{"level": "P0", "msg": "数值与图表不一致"}]})
@@ -207,11 +198,11 @@ class TestSemanticDegradedContract(unittest.TestCase):
         stats = {"campaigns": {"campA": {}}}
         self.st.write_artifact("stats_bundle", stats)
         complete = handlers._fallback_report_md(
-            stats, {}, {}, "five", "0.0"
+            stats, {}, {}, "four", "0.0"
         )
         complete += "\n\n" + ("保留正文。" * 1200) + "\nTAIL_SENTINEL"
         self.st.write_artifact("report_md", {
-            "markdown": complete, "chapters": "five", "version": "0.0",
+            "markdown": complete, "chapters": "four", "version": "0.0",
         })
         self.st.write_artifact("qc_report", {
             "has_p0": True,
@@ -235,10 +226,10 @@ class TestSemanticDegradedContract(unittest.TestCase):
         self.st.write_artifact("chart_urls", {"charts": []})
         self.st.write_artifact("requirement_confirmed", {})
         complete = handlers._fallback_report_md(
-            stats, {}, {}, "five", "0.0"
+            stats, {}, {}, "four", "0.0"
         )
         self.st.write_artifact("report_md", {
-            "markdown": complete, "chapters": "five", "version": "0.0",
+            "markdown": complete, "chapters": "four", "version": "0.0",
         })
         self.st.write_artifact("qc_report", {
             "has_p0": True,
@@ -294,10 +285,10 @@ class TestSemanticDegradedContract(unittest.TestCase):
         self.st.write_artifact("stats_bundle", stats)
         self.st.write_artifact("chart_urls", {"charts": []})
         complete = handlers._fallback_report_md(
-            stats, {}, {}, "five", "0.0"
+            stats, {}, {}, "four", "0.0"
         )
         self.st.write_artifact("report_md", {
-            "markdown": complete, "chapters": "five", "version": "0.0",
+            "markdown": complete, "chapters": "four", "version": "0.0",
         })
         issue = {
             "id": "P0-still-open",

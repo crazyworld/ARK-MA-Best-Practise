@@ -2,7 +2,7 @@
 
 Topic 5 是一个运行在火山方舟 Managed Agents（MA）上的飞书 Bot 场景。用户在飞书中发送触发词后，系统会自动完成多平台社媒数据取数、清洗、AI 标注、指标聚合、图表渲染、报告撰写、质检和飞书文档交付。
 
-架构采用**薄 Agent + Durable Workflow**：飞书前台 Agent 只负责「启动 / 抛人工关卡 / 续跑 / 交终态」四件事，所有业务编排与 LLM 语义调用都沉淀到沙箱内的确定性编排器（`pipeline-orchestrator`），由它驱动 29 节点 DAG，天然支持幂等重放、局部重试和冷进程续跑。
+架构采用**薄 Agent + Durable Workflow**：飞书前台 Agent 只负责「启动 / 抛人工关卡 / 续跑 / 交终态」四件事，所有业务编排与 LLM 语义调用都沉淀到沙箱内的确定性编排器（`pipeline-orchestrator`），由它驱动 38 节点 DAG，天然支持幂等重放、局部重试和冷进程续跑。
 
 ## 保持Agent ID的资源更新
 
@@ -63,10 +63,13 @@ Regular/Bold 2.004R，词云使用 Noto Sans CJK Bold。字体只保存在仓库
 
 Bot 会基于触发消息创建独立话题，按以下顺序推进：
 
-1. 在 G1 卡片填写并提交品牌、活动周期、平台、取数关键词、产品关键词和内容范围；
+1. 在 G1 卡片填写并提交品牌、活动周期、平台、取数关键词、产品关键词、内容范围、活动类型和（可选）品牌基准期；
 2. 审核并通过 G2 分析与执行方案；
-3. 在同一话题发送活动明细 `.xlsx` 文件；
-4. 收到“数据文件已校验”回执后，任务自动进入生产 Run。
+3. 默认自动采集活动原帖（`ssjh-social-task`，只抓帖子）：先做数量预检，收到「采集授权」卡后填写数量上限并授权，
+   任务创建成功即计费、单次超 1000 元被门禁拦截；也可不授权，直接在本话题发送活动明细 `.xlsx`；
+4. 采集核验通过（或文件校验通过）后自动进入生产 Run。
+
+Gateway 设 `TOPIC5_ACTIVITY_DATA_MODE=upload` 可恢复「G2 后等待上传 Excel」的旧流程。
 
 活动 Excel 默认直接从飞书附件下载到 MA 沙箱，避免依赖方舟 Files 存储配额。
 Gateway 先下载并校验文件容器，持久化原消息引用与 SHA256；流水线再下载同一附件，
@@ -139,14 +142,15 @@ n15 由模型选择 `quote_id`，代码复制原字段片段；原词必须精�
 不能带无效证据进入报告。当前 Memory 仅三份记忆，客户业务知识统一迁移仍暂缓；
 Agent 通过 `memory_ls` / `memory_read` 读取，脚本语义调用不自动继承。
 
-## 29 节点 DAG 与人工关卡
+## 38 节点 DAG 与人工关卡
 
 ```
 A 意图    n00_intake → [G1] n01_hc_requirement
 B 方案    n02_plan → [G2] n03_hc_plan
+B' 原帖   n03b_activity_pull（自动采集；预检后 [HC_COLLECT] 采集授权；已上传 Excel 则直接沿用）
 C 初始化  n04_run_init
 D 取数    n05_brand_pull · n06_brand_baseline
-E 清洗    n07_clean
+E 清洗    n07_clean → n07b_noise_review（Step5.5 去噪：选样+窗口由程序，判定由模型；噪音默认剔除）
 F 标注一  n09_annotate_r1（≥阈值且 DataHub 不可用时暂停问用户）
           → n09r_review_r1 → n09r_gate →（不达标）n09r_rework → n09_annotate_r1
 G 发现    n09r_gate 通过 → n09b_opinion_candidates（逐活动×正/负）∥ n08_ugc_discovery（相关UGC）
@@ -154,13 +158,15 @@ G 发现    n09r_gate 通过 → n09b_opinion_candidates（逐活动×正/负）
 H 标注二  n11_annotate_r2 → n11r_review_r2 → n11r_gate →（不达标）n11r_rework → n11_annotate_r2
 I 聚合    n12_aggregate · n13_wordcloud_pull · n14_charts · n15_wordcloud_insight
 J 撰写    n16_report
-K 质检    n17_validate → n18_qc_gate →（不过）n19_fix / [HC7] n_hc7_escalate
+K 质检    n17_validate → n18_qc_gate →（不过）n19_fix / [HC7] n_hc7_escalate（放宽留痕/补数据重做/终止）
+          →（发现噪音）n18b_noise_rollback → n07b 增量重判（≤2 次）
 L 交付    n20_delivery_draft → n20_delivery_gate → [G4] n21_hc_user → n22_user_gate → n_user_escalate
 M 落定    n23_delivery_commit → n24_handoff
 ```
 
 固定人工门：`G1`（需求确认）· `G2`（方案确认）· `G4`（用户终验）。条件人工门：
-`N10`（标签歧义）· `HC7`（质检超限）· `USER_ESCALATE`（终验升级）。`G3` 是独立
+`HC_COLLECT`（采集授权）· `N10`（标签歧义）· `HC7`（质检超限）· `USER_ESCALATE`（终验超时升级 Supervisor、
+返工超 3 轮澄清；累计 5 个工作日无回应转「归档暂停」，用户回复即恢复）。`G3` 是独立
 Validator 自动门，不是用户人工门。
 
 ## 口径红线（不可违反）
@@ -170,6 +176,10 @@ Validator 自动门，不是用户人工门。
 - 提及漏斗嵌套：产品提及是品牌提及子集，占比 ≤ 1。
 - 日期取发表时间 `publish_time`（epoch ms，CST）；去重键 `fingerprint → id → item_id → url`。
 - 多活动逐个计算**不相加**；活动相关行缺 AI 情感**直接报错不兜底**。
+- 总互动量直接用数说供应商互动量字段，不按点赞/评论/转发/收藏重算；缺失为「不可得」，不补零、不进互动 Top 与条均分母。
+- 活动类型以需求阶段（含关键词 Skill 初判经用户确认）为准，不由数据推断；旧 6 类只作传播特征参考。
+- 品牌基准期写入需求确认单：用户指定优先，未指定默认参照开始日前 30 天（多活动以合并窗口开始日为参照）。
+- UGC 参与方式只用动态类别，固定四类与参与深度阈值已删除。
 
 ## 维护约定
 
@@ -177,7 +187,10 @@ Validator 自动门，不是用户人工门。
 - Skill/Prompt 改动使用打包→上传→原地更新 Agent；依赖变更使用 `tools/update_environment_in_place.py`。
   Gateway 宿主 Python 代码修改或全量重建改变资源 ID 后需重启统一 Gateway；
   仅 Skill/Prompt 原地更新不需要重启。
-- 真实凭证（`DATAHUB_API_KEY` / `SSJH_API_TOKEN` / `REPORT_COVER_API_KEY` 等）只写 `config.env`，入库文件一律 `${...}` 占位。
+- 真实凭证（`DATAHUB_API_KEY` / `SSJH_API_TOKEN` / `SSJH_USERNAME` / `SSJH_PASSWORD` / `SSJH_FIXED_TOKEN` /
+  `REPORT_COVER_API_KEY` 等）只写 `config.env`，入库文件一律 `${...}` 占位；`FEISHU_ROOT_FOLDER_TOKEN`（可选）
+  配置后报告建在按项目名查找/创建的文件夹内。
+- 打包的客户 Skill（`ssjh-social-task`、`SSJH-Social-Stat` 等）不改源码与默认值，差异在 topic5 调用层覆盖。
 - `demo` 仅让 G1 表单自动预填；进入流水线后与 `full` 使用完全相同的 fail-closed 标准，默认模式为 `full`。
 - 图表只在沙箱内渲染本地 PNG，n20 通过飞书 `medias/upload_all` 原生插图，不依赖外部对象存储。
 - topic5 **走飞书文档交付**，不走妙搭 Miaoda，故无用户 OAuth / artifact-sync / token keepalive。

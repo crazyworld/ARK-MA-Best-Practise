@@ -106,10 +106,10 @@ def test_clean_run():
         check(all("∅" not in c or c.count("∅") <= 1 for c in commits), "D2 幂等键渲染（resource_lock 已注入，缺字段回退 ∅）")
 
         ucat = st.read_artifact("ugc_category_list") or {}
-        check(ucat.get("mode") == "fixed_four" and len(ucat.get("categories", [])) == 4,
-              "G1 ugc_category_mode=fixed_four → 固定四类")
+        check(ucat.get("mode") == "dynamic" and bool(ucat.get("categories")),
+              "G1 UGC 参与方式为动态类别（D5：不使用固定四类）")
         rep = st.read_artifact("report_md") or {}
-        check(rep.get("chapters") == "five", "G2 report_chapters=five")
+        check(rep.get("chapters") == "four", "G2 报告固定四章（FIX-42）")
         oc = st.read_artifact("opinion_candidates") or {}
         check(len(oc.get("candidates", [])) >= 1, "G4 n09b 观点候选已生成供 HC 确认")
     finally:

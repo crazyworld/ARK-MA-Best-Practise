@@ -51,7 +51,7 @@ class TestReportContract(unittest.TestCase):
                  "ai_sentiment": 1, "content": str(i), "interaction_cnt": i}
                 for i in range(12)]
         rows[0]["opinion"] = "N/A"
-        bundle = handlers._campaign_stats(rows, [], [])
+        bundle = handlers._campaign_stats(rows, "", [])
         opinion = bundle["opinion_analysis"]["positive"]
         self.assertEqual(opinion["sample_size"], 12)
         self.assertEqual(opinion["top5"][0]["share"], 11 / 12)
@@ -69,20 +69,22 @@ class TestReportContract(unittest.TestCase):
                  "ai_sentiment": 1 if i < 12 else -1 if i < 23 else 0,
                  "opinion": "口味风味" if i < 12 else "门店体验", "ugc_category": "测评",
                  "discussion_dimension": "品牌"} for i in range(30)]
-        bundle = handlers._campaign_stats(rows, ["口味"], [])
+        bundle = handlers._campaign_stats(rows, "口味", [])
         stats = {"brand": {"trend": {"xiaohongshu": {"20261001": 5, "20261002": 7}},
                            "wordcloud": {"xiaohongshu": {"口味": 12}},
                            "top_content": contract.top_content(rows)},
                  "campaigns": {"测试": bundle}, "clean_record": {"total_in": 30, "total_out": 30}}
         plan = {"brand_query": "口味", "activity_query": "实测|活动", "activity_filter": "广告",
                 "platforms": ["xiaohongshu"], "period_start": "2026-10-01", "period_end": "2026-10-02"}
-        md = "# 测试复盘\n\n## 00 篇头 · 数据说明\n原数据说明\n\n## 整体洞察\n分析样本30条。\n\n## 01 品牌传播表现\n"
+        md = "# 测试复盘\n\n## 00 篇头 · 数据说明\n原数据说明\n\n## 整体洞察\n分析样本30条。\n\n## 一、品牌传播表现\n"
         for number, title in enumerate(("传播概况", "口碑分析", "内容分析", "热门内容"), 1):
             md += f"\n### 1.{number} {title}\n分析样本30条。\n"
-        md += "\n## 02 活动传播表现\n### 2.1 活动 测试\n"
-        for number, title in enumerate(("传播概况", "活动声量渗透分析", "口碑分析", "内容分析", "热门内容"), 1):
+        md += "\n## 二、活动传播表现\n### 2.1 活动 测试\n"
+        for number, title in enumerate(("传播概况", "提及漏斗分析", "口碑分析", "内容分析", "热门内容"), 1):
             md += f"\n#### 2.1.{number} {title}\n分析样本30条。\n"
-        md += "\n## 03 综合表现定位\n### 3.1 基准期对比\n基准不可用。\n## 04 经验总结\n成功经验；待改进问题；行动计划。\n## 05 总结与建议\n依据样本制定建议。\n"
+        md += ("\n### 2.2 活动拉升效果\n基准不可用。\n## 三、经验总结\n### 3.1 成功经验\n见2.1。\n"
+               "### 3.2 待改进问题\n见2.1。\n### 3.3 后续行动计划\n立即行动。\n"
+               "## 四、总结与建议\n依据样本制定建议。\n")
         insight = {"brand": {"overall": {"platforms": {"xiaohongshu": {"topics": [
             {"topic": "口味体验", "words": ["口味"], "insight": "用户关注口味体验。", "action": "跟踪体验反馈。"},
         ]}}}}}

@@ -6,7 +6,7 @@ description: Run the Topic5 durable report pipeline. Use for starting, resuming 
 # pipeline-orchestrator
 
 Topic5 复盘报告流水线的确定性执行引擎。读取包内 `contracts/pipeline.v0.2.yaml`
-（29 节点 + 治理层），按节点 `handler` 驱动执行、在人工关卡暂停、支持续跑、受限换源与状态查看。
+（38 节点 + 治理层），按节点 `handler` 驱动执行、在人工关卡暂停、支持续跑、受限换源与状态查看。
 该文件由打包脚本从源码树唯一权威契约注入。归属 **Topic5 专属**，由 coordinator 身份持有。
 
 ## 文件
@@ -18,7 +18,14 @@ Topic5 复盘报告流水线的确定性执行引擎。读取包内 `contracts/p
 | `report_contract.py` / `REPORT_CONTRACT.md` | 固定报告模块、数据说明、PGC/UGC Top10、观点与代表内容、正确图片装配及写作规范 |
 | `validator_scan.py` | 打包时注入独立Validator权威扫描器，供协调器内N19使用同一规则预检 |
 | `feishu.py` | N20 原生文档发布、表格扩容、图片回填及回读校验 |
-| `excel_source.py` | 按飞书附件引用下载、校验并缓存用户活动明细 `.xlsx`，兼容旧挂载输入，映射为 n07 `clean_campaign` 行结构 |
+| `excel_source.py` | 按飞书附件引用下载、校验并缓存用户活动明细 `.xlsx`，兼容旧挂载输入与自动采集工作簿（`transport=social_task`），映射为 n07 `clean_campaign` 行结构 |
+| `social_task.py` | n03b 活动原帖自动采集适配层：调用打包的 `ssjh-social-task` v0.11.6（不改其源码/默认值），只抓帖子、授权后创建、19 列适配 |
+| `noise_review.py` | n07b 去噪：确定性选样（高互动/高峰日/随机）+ 关键词窗口；n18b 噪音回退 |
+| `impact.py` | 补证/数据修订影响矩阵：按变更类型精确失效与行级重标，未知类型全量失效 |
+| `interaction.py` | 供应商互动量口径（缺失=不可得，不补零、不重算） |
+| `propagation_features.py` | 旧 6 类改为传播特征参考（待核实），不判定活动类型 |
+| `module_scope.py` | 逐模块范围记录与缩小范围的灰色披露 |
+| `lm/` | 客户错误案例库原文 + 按节点注入索引（`superseded` 中与现行规则冲突的案例不注入） |
 | `state.py` | Run 状态持久化（`RunState`，落 run 目录 `attempts/artifacts/...`） |
 | `run_pipeline.py` | CLI 入口 |
 | `contracts/pipeline.v0.2.yaml` | 部署包内 DAG；打包时从 `ma-resources/io/contracts/` 注入 |
@@ -45,18 +52,23 @@ python run_pipeline.py retry --dag contracts/pipeline.v0.2.yaml \
   --workspace <ws> --task <task_id> --run <run_id>
 # 查看状态
 python run_pipeline.py status --workspace <ws> --task <task_id> --run <run_id>
+# 交接后修正（仅 completed 且 handoff 通过）：n19 → n17 → n20 原位修正 → G4 → n23 → n24
+python run_pipeline.py post-handoff-fix --dag contracts/pipeline.v0.2.yaml \
+  --workspace <ws> --task <task_id> --run <run_id> --note "<修改内容>"
 ```
 
 遇 `mode: human` 节点（G1/G2/G3/G4 及操作级 HC）会 `awaiting_human` 暂停并打印待办；`resume` 继续。
-`replace-source` 不直接重试；它只在当前 Run 为 `failed`、当前失败节点为 `n04_run_init`
-且失败详情包含 `excel_source:` 时更新源引用并生成新版 `confirmed_plan`。随后必须显式执行
-`retry`。其他节点或其他失败原因禁止换源。
+`replace-source` 不直接重试；它只在当前 Run 为 `failed`，且失败节点为 `n04_run_init`（失败详情含 `excel_source:`）
+或 `n03b_activity_pull`（失败详情含 `activity_pull:`，用户改为上传活动明细）时更新源引用并生成新版
+`confirmed_plan`。随后必须显式执行 `retry`。其他节点或其他失败原因禁止换源。
 
 ## 依赖
 
-- Python 3.9+；`PyYAML`（解析 contract）、`openpyxl`（读取用户上传的活动明细 Excel）。
+- Python 3.9+；`PyYAML`（解析 contract）、`openpyxl`（读取/生成活动明细 Excel）。
+- n03b 自动采集依赖同 Session 挂载的 `ssjh-social-task` 与 `node`，凭据 `SSJH_USERNAME/SSJH_PASSWORD/SSJH_FIXED_TOKEN`
+  仅从环境读取；首次只做数量预检，拿到采集授权（数量上限 + 确认引用）后才创建计费任务。
 - 运行期事实写入 `--workspace` 指向的 `tasks/{task_id}/runs/{run_id}/`，**不写回本资源目录**。
-- G1 默认由 Gateway 传递完整 JSON，兼容旧的 Files 需求文件引用。G2 后 Gateway 校验
+- G1 默认由 Gateway 传递完整 JSON，兼容旧的 Files 需求文件引用。用户选择上传时，Gateway 校验
   飞书 Excel 并传递 `source_file`（`transport=feishu_resource`、`message_id`、
   `file_key`、`sha256`、`name`、`mount_path`），桥接层完整写入 `confirmed_plan`。
   n04/n07 的读取器用环境中的飞书凭据直接下载原附件，SHA256 校验通过后原子缓存至
@@ -79,6 +91,9 @@ python run_pipeline.py status --workspace <ws> --task <task_id> --run <run_id>
 
 ## N20 飞书发布约束与自动纠正
 
+- 配置 `FEISHU_ROOT_FOLDER_TOKEN` 时先按项目名查找/创建文件夹（同名复用），先转文件夹再转文档所有权；
+  返工时读取 `published_delivery` 基线在原文档原位修正（文本/图片原块替换，容器原位删插），
+  章节增删或原位修正失败则同文档清空重建（链接不变）。
 - 调用 `feishu.create_delivery` 发布原生文档；保持报告内容、表格数据和质检版本一致，
   不得为了绕过 API 限制删行、截断表格或退回 Markdown 表格。
 - `POST /docx/v1/documents/{document_id}/blocks/{block_id}/children` 创建原生表格时，

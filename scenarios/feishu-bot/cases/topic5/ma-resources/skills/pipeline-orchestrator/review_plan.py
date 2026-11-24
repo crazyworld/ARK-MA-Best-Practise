@@ -32,6 +32,10 @@ SPECIAL_WEIGHT = 3
 DEFAULT_SEED = 42
 DEFAULT_RESERVE = 100
 PLAN_STAGES = ("round1", "round2", "attributes")
+# FIX-21：轮次一 AI 判「不相关」占比超过 10% 时，从被判否的内容中定向抽查 ≤30 条，
+# 占用 reserve（原版 reserve 即为定向抽查预留），与分层抽样共享 500 条额度。
+IRRELEVANT_REVIEW_RATIO = 0.10
+IRRELEVANT_REVIEW_SAMPLE = 30
 # 观点与 UGC 的「其他」标记（特殊层）
 OTHER_LABEL = "其他"
 SPECIAL_PREFIX = "特殊:"
@@ -218,6 +222,9 @@ def plan_review(
         picked = rng.sample(sorted(groups[key]), quotas[key])
         samples.extend({"id": row_id, "stratum": key,
                         "sample_kind": "stratified_random"} for row_id in picked)
+    irrelevant_check = _irrelevant_check(rows, stage, reviewed, samples,
+                                         reserve_actual, rng)
+    samples.extend(irrelevant_check["samples"])
 
     return {
         "stage": stage,
@@ -240,8 +247,33 @@ def plan_review(
         "uncovered_strata": [key for key in sorted(populations)
                              if not quotas.get(key)],
         "samples": samples,
+        "irrelevant_check": {k: v for k, v in irrelevant_check.items() if k != "samples"},
         "llm_requests": 0,
     }
+
+
+def _irrelevant_check(rows: list[dict], stage: str, reviewed: set[str],
+                      samples: list[dict], reserve: int, rng: random.Random) -> dict:
+    """AI 判否占比 >10% 时的定向抽查（KS_Annotation_Review / 原版 aggregate 告警）。"""
+    result = {"required": False, "ratio": None, "planned": 0, "samples": []}
+    if stage != "round1" or not rows:
+        return result
+    by_id = {_row_id(r): r for r in rows if _row_view(r)["relevant"] == "否"}
+    irrelevant = list(by_id)
+    ratio = len(irrelevant) / len(rows)
+    result["ratio"] = round(ratio, 4)
+    if ratio <= IRRELEVANT_REVIEW_RATIO:
+        return result
+    result["required"] = True
+    taken = {item["id"] for item in samples} | reviewed
+    pool = sorted(row_id for row_id in irrelevant if row_id and row_id not in taken)
+    already = sum(1 for item in samples if item["id"] in by_id)
+    need = min(max(IRRELEVANT_REVIEW_SAMPLE - already, 0), reserve, len(pool))
+    result["planned"] = already + need
+    result["samples"] = [{"id": row_id, "stratum": stratum(by_id[row_id], stage),
+                          "sample_kind": "targeted_irrelevant"}
+                         for row_id in rng.sample(pool, need)]
+    return result
 
 
 def accuracy_from_verdicts(

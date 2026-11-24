@@ -85,8 +85,14 @@ class DataDescriptionScopeTest(unittest.TestCase):
     def test_scope_note_appears_when_not_all(self):
         plan = {"content_scope": "ugc", "period_start": "2026-09-28",
                 "period_end": "2026-10-07", "platforms": ["小红书"]}
-        text = report_contract.data_description(plan, {})
-        self.assertIn("本次仅分析 UGC 内容，不做 PGC/UGC 结构对比", text)
+        # FIX-43：口径说明属方法说明，移出数据说明区，放在 1.1 节首灰色斜体。
+        self.assertNotIn("不做 PGC/UGC 结构对比", report_contract.data_description(plan, {}))
+        md = report_contract.assemble(
+            "# 报告\n\n### 数据说明\n\n## 整体洞察\nx\n\n## 一、品牌传播表现\n\n"
+            "### 1.1 传播概况\n正文\n\n### 1.4 热门内容\n",
+            plan=plan, stats={"brand": {}}, charts={}, insight={})
+        body = md[report_contract.section(md, "1.1")[1]:]
+        self.assertTrue(body.lstrip().startswith("<!-- report-module:start -->\n*{{muted}}本次仅分析 UGC 内容"))
 
     def test_all_scope_has_no_scope_note(self):
         plan = {"content_scope": "all", "period_start": "2026-09-28",
@@ -101,8 +107,10 @@ class UgcTextScopeTest(unittest.TestCase):
         self.assertIn("不适用 UGC 参与方式分析", text)
 
     def test_all_scope_renders_normally(self):
+        # KS 2.N.4②：活动相关 UGC <10 条不做参与方式分类，保留标题并说明。
         text = report_contract.ugc_text({"ugc_analysis": {"sample_size": 3}}, "all")
-        self.assertIn("UGC样本 3 条", text)
+        self.assertIn("活动相关 UGC 仅 3 条，样本不足，暂不做参与方式分类", text)
+        self.assertIn("② UGC 参与方式分布", text)
 
 
 class ContentModeMappingTest(unittest.TestCase):

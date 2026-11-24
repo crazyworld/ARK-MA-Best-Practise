@@ -61,11 +61,13 @@ function parseArgs(argv) {
       case '--width':
       case '-w':
         result.width = Number(argv[i + 1]);
+        result.sizeExplicit = true;
         i += 1;
         break;
       case '--height':
       case '-h':
         result.height = Number(argv[i + 1]);
+        result.sizeExplicit = true;
         i += 1;
         break;
       case '--template':
@@ -125,6 +127,35 @@ function loadSpec(args) {
   }
 
   fail('bundle contains multiple charts, please provide --chart-id or --chart-index');
+}
+
+// spec.colors：数组（按序）或 {类别/系列名: 色值}；缺省时保持原色板（其他调用方行为不变）。
+function resolvePalette(spec, fallback) {
+  return Array.isArray(spec.colors) && spec.colors.length ? spec.colors : fallback;
+}
+
+function colorFor(spec, name, index, palette) {
+  if (spec.colors && !Array.isArray(spec.colors) && spec.colors[name]) {
+    return spec.colors[name];
+  }
+  return palette[index % palette.length];
+}
+
+// x_axis_policy：日级标签 6-12 个，≤92 天每 5 天一个，首末强制显示（KS_Chart_Spec）。
+function xAxisInterval(spec, count) {
+  const policy = spec.x_axis_policy;
+  if (!policy) {
+    return null;
+  }
+  return Math.max(1, Number(policy.step) || 1);
+}
+
+function xAxisIntervalCode(spec) {
+  const step = xAxisInterval(spec, spec.categories.length);
+  if (!step) {
+    return 'Math.max(0, Math.floor(categories.length / 10))';
+  }
+  return `(index) => index === 0 || index === categories.length - 1 || index % ${step} === 0`;
 }
 
 function getSeriesValues(series) {
@@ -309,11 +340,11 @@ function buildDonutOption(spec) {
   const series = spec.series[0];
   const values = getSeriesValues(series);
   const labelPolicy = getLabelPolicy(spec, 'outer_name_percent');
-  const palette = ['#1677FF', '#0FC6C2', '#00B96B', '#FF7D00', '#F53F3F', '#6236FF'];
+  const palette = resolvePalette(spec, ['#1677FF', '#0FC6C2', '#00B96B', '#FF7D00', '#F53F3F', '#6236FF']);
   const data = spec.categories.map((name, index) => ({
     name,
     value: values[index],
-    color: palette[index % palette.length]
+    color: colorFor(spec, name, index, palette)
   }));
 
   return `
@@ -534,12 +565,12 @@ const seriesData = ${JSON.stringify(
     null,
     2
   )};
-const palette = { "正面": "#00B96B", "中性": "#0FC6C2", "负面": "#F53F3F" };
+const palette = ${JSON.stringify(spec.colors && !Array.isArray(spec.colors) ? spec.colors : { "正面": "#00B96B", "中性": "#0FC6C2", "负面": "#F53F3F" })};
 
 var option = {
   backgroundColor: "#FFFFFF",
   animation: false,
-  color: ["#00B96B", "#0FC6C2", "#F53F3F"],
+  color: [palette["正面"], palette["中性"], palette["负面"]],
   tooltip: {
     trigger: "axis",
     axisPointer: { type: "shadow" },
@@ -620,7 +651,7 @@ const seriesData = ${JSON.stringify(
     null,
     2
   )};
-const palette = ["#1677FF", "#0FC6C2", "#00B96B", "#FF7D00", "#722ED1"];
+const palette = ${JSON.stringify(resolvePalette(spec, ["#1677FF", "#0FC6C2", "#00B96B", "#FF7D00", "#722ED1"]))};
 const isPercent = seriesData.every((item) => (item.unit || "").toLowerCase() === "percent");
 
 var option = {
@@ -729,7 +760,7 @@ var option = {
     axisLabel: {
       color: "#86909C",
       fontSize: FONT_MAIN,
-      interval: Math.max(0, Math.floor(categories.length / 10)),
+      interval: ${xAxisIntervalCode(spec)},
       margin: 16,
       formatter: (value) => value.length >= 5 && value.includes("-") ? value.slice(5) : value
     }
@@ -770,7 +801,19 @@ function buildDualAxisTrendOption(spec) {
   const labelPolicy = getLabelPolicy(spec, 'key_points_only');
   const barValues = getSeriesValues(barSeries);
   const lineValues = getSeriesValues(lineSeries);
-  const sorted = [...lineValues].map((value, index) => ({ value, index })).sort((a, b) => b.value - a.value);
+  const sorted = [...lineValues].map((value, index) => ({ value, index }))
+    .filter((item) => item.value !== null && item.value !== undefined)
+    .sort((a, b) => b.value - a.value);
+  // KS_Chart_Spec 1.1：两期浅色区间 + 峰值 markPoint；缺失日为 null 且不连线。
+  const markAreas = Array.isArray(spec.mark_areas) ? spec.mark_areas : [];
+  const markPoints = Array.isArray(spec.mark_points) ? spec.mark_points : [];
+  const connectNulls = spec.connect_nulls === undefined ? true : Boolean(spec.connect_nulls);
+  const markAreaData = markAreas.map((area, index) => [
+    { name: area.name, xAxis: area.start, itemStyle: { color: index % 2 ? "rgba(22,119,255,0.06)" : "rgba(134,144,156,0.10)" } },
+    { xAxis: area.end }
+  ]);
+  const markPointData = markPoints.map((type) => ({ type }));
+  const trendColors = resolvePalette(spec, ["#1677FF", "#0FC6C2"]);
   const keyIndexes = [];
   if (sorted[0]) keyIndexes.push(sorted[0].index);
   for (const item of sorted.slice(1)) {
@@ -780,6 +823,13 @@ function buildDualAxisTrendOption(spec) {
     }
   }
   keyIndexes.push(lineValues.length - 1);
+  const barExtras = `
+      connectNulls: ${JSON.stringify(connectNulls)},
+      markArea: ${JSON.stringify(markAreaData.length ? { silent: true, label: { color: "#4E5969" }, data: markAreaData } : undefined)},
+      markPoint: ${JSON.stringify(markPointData.length ? { data: markPointData } : undefined)},`;
+  const lineExtras = `
+      connectNulls: ${JSON.stringify(connectNulls)},
+      markPoint: ${JSON.stringify(markPointData.length ? { data: markPointData } : undefined)},`;
 
   return `
 const categories = ${JSON.stringify(spec.categories, null, 2)};
@@ -819,7 +869,7 @@ var option = {
     axisLabel: {
       color: "#86909C",
       fontSize: FONT_MAIN,
-      interval: Math.max(0, Math.floor(categories.length / 10)),
+      interval: ${xAxisIntervalCode(spec)},
       margin: 16,
       formatter: (value) => value.length >= 5 && value.includes("-") ? value.slice(5) : value
     }
@@ -844,17 +894,17 @@ var option = {
     {
       name: ${JSON.stringify(barSeries.name || '柱状值')},
       type: ${JSON.stringify(dualLines ? 'line' : 'bar')},
-      data: barValues,
+      data: barValues,${barExtras}
       smooth: false,
       symbol: "circle",
       symbolSize: 6,
-      lineStyle: {width: 3, color: "#1677FF"},
+      lineStyle: {width: 3, color: ${JSON.stringify(trendColors[0])}},
       barWidth: 18,
       itemStyle: {
         borderRadius: [9, 9, 0, 0],
-        color: ${dualLines ? '"#1677FF"' : `new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-          { offset: 0, color: "#1677FF" },
-          { offset: 1, color: mixWhite("#1677FF") }
+        color: ${dualLines ? JSON.stringify(trendColors[0]) : `new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+          { offset: 0, color: "${trendColors[0]}" },
+          { offset: 1, color: mixWhite("${trendColors[0]}") }
         ])`}
       }
     },
@@ -865,8 +915,8 @@ var option = {
       smooth: true,
       symbol: "circle",
       symbolSize: 8,
-      lineStyle: { width: 4, color: "#0FC6C2" },
-      itemStyle: { color: "#0FC6C2" },
+      lineStyle: { width: 4, color: ${JSON.stringify(trendColors[1])} },
+      itemStyle: { color: ${JSON.stringify(trendColors[1])} },${lineExtras}
 ${buildLineLabelSnippet(labelPolicy)},
       areaStyle: {
         color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
@@ -1056,6 +1106,10 @@ function main() {
   }
 
   const spec = loadSpec(args);
+  if (spec.width && spec.height && !args.sizeExplicit) {
+    args.width = spec.width;
+    args.height = spec.height;
+  }
   const jsCode = buildJsFromSpec(spec, args.width, args.height);
 
   if (args.jsOut) {

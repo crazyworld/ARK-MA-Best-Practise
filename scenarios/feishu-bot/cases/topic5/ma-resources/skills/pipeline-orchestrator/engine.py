@@ -134,7 +134,7 @@ def run(dag: Dag, st: RunState, ctx: dict[str, Any] | None = None) -> RunState:
     并发接缝：把"取第一个就绪"改为"取出全部就绪并发执行"即为真并发，DAG 与 handler 不变。
     """
     ctx = ctx or {}
-    if st.status in ("completed", "failed", "awaiting_human"):
+    if st.status in ("completed", "failed", "awaiting_human", "terminated"):
         return st
     st.status = "running"
 
@@ -244,6 +244,12 @@ def run(dag: Dag, st: RunState, ctx: dict[str, Any] | None = None) -> RunState:
             st.event(node["id"], "failed", f"{e} -> {on_fail}")
             if on_fail == "exception_bypass":
                 rec["status"] = "bypassed"
+                # 旁路节点必须给下游一个显式「不可用」产物：否则下游 inputs 永不就绪，
+                # Run 卡死在 stuck，下游写好的降级分支（DataIssue）根本到不了。
+                for key in node.get("outputs") or []:
+                    if key not in st.artifacts:
+                        rec["artifacts"].append(st.write_artifact(
+                            key, bypass_payload(node["id"], e)))
                 _advance(st, node.get("next"))
                 st.save()
                 continue
@@ -298,6 +304,17 @@ def run(dag: Dag, st: RunState, ctx: dict[str, Any] | None = None) -> RunState:
     return st
 
 
+def bypass_payload(node_id: str, error: Exception) -> dict:
+    """exception_bypass 节点的占位产物：显式标记不可用，供下游降级并披露。"""
+    return {
+        "unavailable": True,
+        "degraded": True,
+        "meta": {"unavailable": True,
+                 "data_issue": f"{node_id} bypassed: {type(error).__name__}: {error}"},
+        "bypassed_node": node_id,
+    }
+
+
 def resume(dag: Dag, st: RunState, human_outputs: dict[str, Any] | None = None,
            ctx: dict[str, Any] | None = None) -> RunState:
     """Resume a human gate using explicit outputs and optional rewind control."""
@@ -333,7 +350,33 @@ def resume(dag: Dag, st: RunState, human_outputs: dict[str, Any] | None = None,
     st.node_rec(node["id"])["status"] = gate_status
     st.event(node["id"], "human_resumed", f"{gate_status} -> {target}")
     st.human = None
+    if control.get("terminate"):
+        # FIX-35：HC7 终止项目——清空前沿，Run 以 terminated 结束（已建文档保留）。
+        st.frontier = []
+        st.status = "terminated"
+        st.save()
+        return st
     _advance(st, target)
+    st.status = "running"
+    st.save()
+    return run(dag, st, ctx)
+
+
+def reopen_completed(dag: Dag, st: RunState, *, entry: str, artifacts: dict[str, Any],
+                     invalidate: list[str], reason: str,
+                     ctx: dict[str, Any] | None = None) -> RunState:
+    """FIX-38 交接后修正：已完成的 Run 以新产物重新进入 entry 节点（版本链延续，不新建 Run）。"""
+    if st.status != "completed":
+        raise ValueError(f"run status is {st.status!r}, expected 'completed'")
+    if entry not in dag.nodes:
+        raise ValueError(f"unknown entry node {entry}")
+    for key, payload in artifacts.items():
+        st.write_artifact(key, payload)
+    if invalidate:
+        st.invalidate_artifacts(invalidate)
+    st.event(entry, "post_handoff_reopen", reason[:200])
+    st.frontier = []
+    _advance(st, entry)
     st.status = "running"
     st.save()
     return run(dag, st, ctx)
@@ -364,6 +407,10 @@ def retry_failed(dag: Dag, st: RunState,
     return run(dag, st, ctx)
 
 
+# 允许换源的失败节点 → 失败详情须包含的标记。
+SOURCE_REPLACEABLE = {"n04_run_init": "excel_source:", "n03b_activity_pull": "activity_pull:"}
+
+
 def replace_failed_source(
     st: RunState,
     *,
@@ -371,26 +418,29 @@ def replace_failed_source(
     source_mount_path: str,
     source_file: dict | None = None,
 ) -> RunState:
-    """Replace the source pointer for a failed n04 Excel validation only."""
+    """Replace the source pointer for a failed n04 Excel validation, or a failed
+    n03b automatic collection (FIX-04: user falls back to uploading the Excel)."""
     if st.status != "failed":
         raise ValueError(f"run status is {st.status!r}, expected 'failed'")
-    if st.current_node != "n04_run_init":
-        raise ValueError("source replacement is only allowed at n04_run_init")
-    rec = st.node_rec("n04_run_init")
+    node_id = str(st.current_node or "")
+    marker = SOURCE_REPLACEABLE.get(node_id)
+    if not marker:
+        raise ValueError("source replacement is only allowed at n04_run_init or n03b_activity_pull")
+    rec = st.node_rec(node_id)
     if rec.get("status") != "failed":
-        raise ValueError("n04_run_init is not failed")
+        raise ValueError(f"{node_id} is not failed")
     failure = next(
         (
             str(item.get("detail") or "")
             for item in reversed(st.log)
-            if item.get("node") == "n04_run_init"
+            if item.get("node") == node_id
             and item.get("event") == "failed"
         ),
         "",
     )
-    if "excel_source:" not in failure:
+    if marker not in failure:
         raise ValueError(
-            "source replacement requires an excel_source validation failure"
+            f"source replacement requires a {marker} failure at {node_id}"
         )
 
     mount_path = str(source_mount_path or "").strip()
@@ -420,7 +470,7 @@ def replace_failed_source(
     updated["version"] = f"plan-v{next_artifact_version}"
     ref = st.write_artifact("confirmed_plan", updated)
     st.event(
-        "n04_run_init",
+        node_id,
         "source_replaced",
         f"{ref} mount_path={mount_path}",
     )

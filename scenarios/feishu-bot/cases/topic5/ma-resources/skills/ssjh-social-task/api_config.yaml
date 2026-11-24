@@ -1,0 +1,51 @@
+# ================================================================
+# ssjh-social-task — API & 系统配置
+# 管理员维护，不随每次任务修改
+# ================================================================
+
+api:
+  base_url: "https://dc.datastory.com.cn"
+  # 2026-11-06 用户批准内部测试使用官方文档HTTP入口；固定token及原文在该段为明文。
+  # 登录/创建/状态保持HTTPS；禁止从TLS失败自动降级或扩展到其他HTTP域名。
+  count_base_url: "http://api.dc.datastory.com.cn/api"
+
+credentials:
+  # 登录账号由管理员提供
+  # 实际值通过环境变量注入，此处填 ${ENV_VAR} 占位
+  username: "${SSJH_USERNAME}"
+  password: "${SSJH_PASSWORD}"
+  # 计数/取数专用固定 token（管理员分配）
+  fixed_token: "${SSJH_FIXED_TOKEN}"
+
+es:
+  # ES 导出配置（由数说管理员提供，勿随意修改）
+  host: "n1.new-hermes.es.hdp:9241:9341,n2.new-hermes.es.hdp:9241:9341,n3.new-hermes.es.hdp:9241:9341"
+  cluster: "new-hermes_es_cluster"
+  index: "ds-hermes-bluefocus-voc-index-v1"
+
+runtime:
+  transport_profile: "official-http-internal"
+  # 仅 status/volume 自动重试，总尝试1-5次；创建/登录/游标只发一次
+  retry_attempts: 3
+  # 重试调度预算（秒，最大60）；网络超时不是硬墙钟中断
+  retry_budget_seconds: 45
+  # 任务轮询间隔（秒），数说建议最快 2 分钟
+  poll_interval: 120
+  # 最大等待时长（秒），1小时
+  timeout: 3600
+  # 请求页大小提示；实测供应商可忽略size并返回500条
+  page_size: 100
+  # 本地单页接收硬上限；累计仍不得超过已核对任务量和批准量
+  max_response_records: 500
+  # 默认凭证仅进程内使用；如运行环境另有明确授权才启用缓存
+  cache_token: false
+  # Token 缓存文件路径
+  token_cache_file: "~/.ssjh_token_cache.json"
+
+task:
+  # 任务所在文件夹（数说聚合前端可见）
+  sheet_name: "API任务"
+  # 任务完成通知邮箱（可为空）
+  email: ""
+  # 邮件通知模式: 0=成功&失败 1=成功 2=仅失败 -1=不通知
+  email_mode: -1

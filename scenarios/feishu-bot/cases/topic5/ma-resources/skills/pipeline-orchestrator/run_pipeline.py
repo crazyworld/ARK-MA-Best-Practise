@@ -29,6 +29,7 @@ from engine import (
     create_run,
     replace_failed_source,
     resume,
+    reopen_completed,
     retry_failed,
     run,
 )
@@ -55,6 +56,12 @@ def _print_state(st: RunState) -> None:
               f"需提供: {st.human['expect']}")
         print(f"    续跑: python run_pipeline.py resume --dag <dag> --workspace <ws> "
               f"--task {st.task_id} --run {st.run_id} --hc {hc_kind} --decision pass")
+    if st.status == "terminated":
+        # FIX-35：HC7 终止项目——Gateway 据此把 job 置 stopped；已建飞书文档保留。
+        doc = st.read_artifact("feishu_doc") or {}
+        print("FINAL_RESULT " + json.dumps(
+            {"status": "terminated", "run_id": st.run_id, "task_id": st.task_id,
+             "online_url": doc.get("url")}, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
     if st.status == "completed":
         print(f"  ✅ 交付 handoff: {st.artifacts.get('handoff', {}).get('path')}")
         handoff = st.read_artifact("handoff") or {}
@@ -85,7 +92,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument(
         "cmd",
-        choices=["start", "resume", "retry", "replace-source", "status"],
+        choices=["start", "resume", "retry", "replace-source", "status", "post-handoff-fix"],
     )
     ap.add_argument("--dag")
     ap.add_argument("--workspace", required=True)
@@ -94,7 +101,10 @@ def main() -> None:
     ap.add_argument("--mode", choices=["demo", "full"], default="full",
                     help="start：仅记录请求模式；demo 只由 Gateway 用于 G1 表单预填，流水线标准相同")
     ap.add_argument("--hc", help="resume：人工关卡种类（G1/G2/G3/G4/HC7/N10/...）")
-    ap.add_argument("--decision", choices=["pass", "reject", "remark"],
+    ap.add_argument("--decision",
+                    choices=["pass", "reject", "remark", "relax", "redo_with_data", "terminate",
+                             "requirement_change", "quality_issue", "wait", "switch_channel",
+                             "upload"],
                     help="resume：用户决定")
     ap.add_argument("--note", default="", help="resume：附注（remark 必带内容才续跑）")
     ap.add_argument("--source-name", help="replace-source：新源文件展示名")
@@ -134,6 +144,18 @@ def main() -> None:
             source_mount_path=args.source_mount,
             source_file=json.loads(args.source_json) if args.source_json else None,
         )
+        _print_state(st)
+        return
+
+    if args.cmd == "post-handoff-fix":
+        # FIX-38：交接后修正——n19 → n17 → n20（原位修正，链接不变）→ G4 → n23 → n24（追加 amendments）。
+        dag = Dag.load(Path(args.dag))
+        fix = hc_bridge.post_handoff_fix_outputs(st, args.note)
+        st = reopen_completed(dag, st, entry=hc_bridge.POST_HANDOFF_ENTRY,
+                              artifacts=fix["artifacts"], invalidate=fix["invalidate"],
+                              reason=args.note)
+        if st.status == "awaiting_human":
+            _on_pause(st)
         _print_state(st)
         return
 

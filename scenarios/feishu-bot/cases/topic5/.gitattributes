@@ -1,0 +1,2 @@
+# 客户原版 Skill 包须字节级一致（ssjh-social-task 内置价表按原始字节校验 SHA256），禁止换行符规范化。
+ma-resources/skills/ssjh-social-task/** -text

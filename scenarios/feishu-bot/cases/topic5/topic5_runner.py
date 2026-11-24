@@ -112,27 +112,38 @@ _G3_REQUIRED_INPUT_KEYS = {
 }
 
 
+# 允许上传（修正版）活动明细的失败节点 → 失败详情标记（与编排器 engine.SOURCE_REPLACEABLE 一致）。
+SOURCE_REPLACEABLE = {"n04_run_init": "excel_source:", "n03b_activity_pull": "activity_pull:"}
+
+
 def is_source_repairable_failure(job: PipelineJob) -> bool:
-    """Only n04 Excel-source validation failures may accept a new source."""
+    """n04 Excel 校验失败，或 n03b 自动采集失败（FIX-04：改为上传活动明细）时可接收新源。"""
+    marker = SOURCE_REPLACEABLE.get(job.current_phase)
     return (
         job.status == STATUS_FAILED
-        and job.current_phase == "n04_run_init"
+        and bool(marker)
         and job.failure_scope in ("", "recoverable")
         and job.retry_strategy == RETRY_STRATEGY_NODE
-        and "excel_source:" in (job.last_error or "")
+        and marker in (job.last_error or "")
     )
+
+
+def is_collect_gate(job: PipelineJob) -> bool:
+    """FIX-04：等待采集授权时，用户可不授权、改为上传活动明细。"""
+    return job.status == STATUS_WAIT_HC and job.current_phase == "HC_COLLECT"
 
 
 def activity_attachment_hint(job: PipelineJob) -> str:
     """Return the next allowed action; an attachment never confirms an HC gate."""
-    if job.status == STATUS_WAIT_INPUT or is_source_repairable_failure(job):
+    if job.status == STATUS_WAIT_INPUT or is_source_repairable_failure(job) or is_collect_gate(job):
         return ""
     status_hints = {
         STATUS_PAUSED: "任务已暂停。请先点击“继续任务”恢复流程；发送附件不会自动继续任务。",
         STATUS_STOPPING: "任务正在暂停，请等待暂停完成后再操作；当前不接收活动明细。",
         STATUS_STOPPED: "任务已停止，不再接收活动明细；如需重新分析，请新建任务。",
         STATUS_DONE: "报告已完成，不再接收活动明细；如需分析另一份数据，请新建任务。",
-        STATUS_FAILED: "任务执行失败，当前节点不支持更换活动明细。请通过任务卡片重试或新建任务。",
+        STATUS_FAILED: "任务执行失败，当前节点不支持更换活动明细。请通过任务卡片重试或新建任务。"
+                       "（自动采集失败或 Excel 校验失败时可直接上传活动明细 .xlsx）",
     }
     if job.status in status_hints:
         return status_hints[job.status]
@@ -145,6 +156,7 @@ def activity_attachment_hint(job: PipelineJob) -> str:
             "n21_hc_user": "G4",
             "n_hc7_escalate": "HC7",
             "n_user_escalate": "USER_ESCALATE",
+            "n03b_activity_pull": "HC_COLLECT",
         }.get(job.current_phase, job.current_phase)
         return {
             "G1": "当前等待 G1 需求确认。请先提交需求问卷，再完成 G2 方案确认后上传活动明细。",
@@ -717,11 +729,12 @@ class Topic5Runner:
         """文件挂载完成后，把引用注入 G2 ConfirmedPlan 并自动续跑。"""
         if not job.source_file_id or not job.source_file_mount_path:
             raise Topic5RunnerError("活动明细文件尚未完成挂载")
+        marker = SOURCE_REPLACEABLE.get(job.current_phase)
         source_replacement = (
             job.status == STATUS_RUNNING
-            and job.current_phase == "n04_run_init"
+            and bool(marker)
             and job.retry_strategy == RETRY_STRATEGY_NODE
-            and "excel_source:" in (job.last_error or "")
+            and marker in (job.last_error or "")
         )
         if source_replacement:
             await self.reply_for_job(
@@ -756,6 +769,11 @@ class Topic5Runner:
             ensure_ascii=False,
             separators=(",", ":"),
         )
+        if is_collect_gate(job):
+            # 用户放弃自动采集、改为上传：以 HC_COLLECT upload 续跑，n03b 直接沿用该文件。
+            await self.reply_for_job(job, f"已收到活动明细 `{job.source_file_name}`，不再自动采集，继续生产 Run。")
+            await self.resume_job(job, f"HC_COLLECT upload: {source_note}")
+            return
         await self.reply_for_job(
             job,
             f"数据文件已校验：`{job.source_file_name}`。正在自动启动生产 Run。",
@@ -849,6 +867,10 @@ class Topic5Runner:
             )
             if not claimed:
                 raise Topic5RunnerError("任务状态已变化，修正版未触发重试")
+        elif is_collect_gate(job):
+            claimed = self._store.claim_collect_source(job.job_id, source_id, file_name, mount_path)
+            if not claimed:
+                raise Topic5AttachmentStateError("任务状态已变化，本次附件未替换原数据；请查看当前任务卡片。")
         else:
             claimed = self._store.claim_activity_source(
                 job.job_id, source_id, file_name, mount_path
@@ -992,8 +1014,8 @@ class Topic5Runner:
             task_id, run_id = match.groups()
             replace_source = ""
             if (
-                job.current_phase == "n04_run_init"
-                and "excel_source:" in (job.last_error or "")
+                SOURCE_REPLACEABLE.get(job.current_phase)
+                and SOURCE_REPLACEABLE[job.current_phase] in (job.last_error or "")
                 and job.source_file_mount_path
             ):
                 replace_source = (
@@ -1033,6 +1055,32 @@ class Topic5Runner:
             job.job_id, job.ma_session_id, session_status,
             job.status, job.current_phase,
         )
+        await self.resume_job(job, message)
+        return job
+
+    async def post_handoff_fix(self, chat_id: str, thread_id: str, request: str) -> Optional[PipelineJob]:
+        """FIX-38：已交接报告的修正。沿用原 Run 与原飞书文档（原位修正，链接不变），
+        n19 返修 → G3 质检 → n20 原位修正 → G4 终验 → 提交 → handoff 追加 amendments。"""
+        text = (request or "").strip()
+        if not text:
+            raise Topic5RunnerError("请在 /fix 后写明需要修改的内容")
+        job = self._store.get_done_job_by_topic(chat_id, thread_id)
+        if job is None:
+            return None
+        match = re.search(r"(?:^|/)tasks/([^/]+)/runs/([^/]+)(?:/|$)", job.project_dir)
+        if not match:
+            raise Topic5RunnerError("任务缺少可恢复的 durable run 路径")
+        task_id, run_id = match.groups()
+        message = (
+            "[topic5-control] post_handoff_fix\n"
+            "用户对已交接报告提出修正。只执行下面这条命令（后台），之后按 start/resume 规则轮询；"
+            "不得新建 Run 或新文档。\n"
+            "cd /mnt/skills/pipeline-orchestrator && nohup python3 run_pipeline.py post-handoff-fix "
+            "--dag contracts/pipeline.v0.2.yaml --workspace /workspace/ma-workspaces/projects/topic5 "
+            f"--task {shlex.quote(task_id)} --run {shlex.quote(run_id)} --note {shlex.quote(text)} "
+            f"> /workspace/ma-workspaces/projects/topic5/tasks/{task_id}/runs/{run_id}/postfix.log 2>&1 &"
+        )
+        log.info("topic5 post-handoff fix job=%s", job.job_id)
         await self.resume_job(job, message)
         return job
 
@@ -1311,6 +1359,12 @@ class Topic5Runner:
         )
         if not envelope:
             envelope = extract_nonstructured_failure(collected)
+        if envelope.get("status") == "terminated":
+            # FIX-35：HC7 用户选择终止项目——停止任务，不判失败；已建飞书文档保留。
+            reason = "用户在 HC7 选择终止项目"
+            self._store.mark_stopped(job_id, reason)
+            await self._render_and_patch(job_id, status=STATUS_STOPPED, error=reason, force=True)
+            return
         if envelope.get("status") == "failed":
             reason = str(
                 envelope.get("reason") or envelope.get("error")
@@ -1672,7 +1726,7 @@ def extract_final_envelope(text: str) -> dict:
         if (
             isinstance(value, dict)
             and (
-                value.get("status") == "failed"
+                value.get("status") in ("failed", "terminated")
                 or (value.get("status") == "completed" and "online_url" in value)
             )
         ):

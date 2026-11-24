@@ -53,16 +53,7 @@ class TestSpecificHandlers(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.ws, ignore_errors=True)
 
-    def test_ugc_discovery_fixed_four(self):
-        self.st.params["ugc_category_mode"] = "fixed_four"
-        node = {"id": "n08", "name": "ugc"}
-        out = handlers.ugc_discovery(node, self.st, {})
-        cats = out["artifacts"]["ugc_category_list"]["categories"]
-        self.assertEqual(len(cats), 4)
-        self.assertEqual(out["artifacts"]["ugc_category_list"]["mode"], "fixed_four")
-
     def test_ugc_discovery_dynamic(self):
-        self.st.params["ugc_category_mode"] = "dynamic"
         with self.assertRaisesRegex(RuntimeError, "能力不可用"):
             handlers.ugc_discovery({"id": "n08", "name": "ugc"}, self.st, {})
 
@@ -77,8 +68,8 @@ class TestSpecificHandlers(unittest.TestCase):
             "evidence_count": 12,
         })
         self.st.write_artifact("ugc_category_list", {
-            "mode": "fixed_four",
-            "categories": ["模仿打卡", "创意改编", "测评分享", "晒单分享"],
+            "mode": "dynamic",
+            "categories": ["到店打卡", "开箱测评", "晒单分享", "二创改编"],
         })
         out = handlers.opinion_policy_gate(
             {"id": "n10_hc_opinion", "outputs": ["confirmed_opinion_labels"]},
@@ -388,7 +379,6 @@ class TestSchemaCoverageAllNodes(unittest.TestCase):
         self.ws = tempfile.mkdtemp()
         self.st = make_state(self.ws)
         # pre-seed artifacts some handlers read, so code paths are exercised
-        self.st.params["ugc_category_mode"] = "fixed_four"
         self.st.write_artifact("requirement_confirmed", {
             "confirmed": True,
             "brand": "测试品牌",
@@ -443,6 +433,10 @@ class TestSchemaCoverageAllNodes(unittest.TestCase):
                         self.assertIn("route", res)
                         self.assertIn(res["route"], node["routes"])
                     else:
+                        if node["handler"] == "noise_rollback":
+                            # 回退节点只在 qc_report 带 noise_ids 时被路由到（缺失时 fail-closed）。
+                            self.st.write_artifact("qc_report", {"has_p0": True, "issues": [
+                                {"id": "P0-peak-noise", "severity": "P0", "noise_ids": ["x1"]}]})
                         res = fn(node, self.st, {})
                         self.assertIn("artifacts", res)
                         outputs = node.get("outputs", [])

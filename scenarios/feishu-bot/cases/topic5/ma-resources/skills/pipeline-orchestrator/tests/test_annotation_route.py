@@ -80,7 +80,7 @@ class HandlerTest(unittest.TestCase):
     def setUp(self):
         self.ws = tempfile.mkdtemp()
         self.st = make_state(self.ws, params={"annotation_routing_threshold": 2})
-        self.st.write_artifact("cleaned_data", {"rows": _rows(3)})
+        self.st.write_artifact("denoised_data", {"rows": _rows(3)})
         self.st.write_artifact("confirmed_plan", {
             "activity_name": "A活动", "activity_query": "A+B", "activity_boundary": "背景"})
         self.node = {"id": "n09_annotate_r1", "outputs": ["annotated_round1"]}

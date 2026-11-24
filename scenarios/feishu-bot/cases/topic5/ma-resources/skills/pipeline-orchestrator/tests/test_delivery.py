@@ -30,20 +30,26 @@ def _node(node_id, outputs):
 
 _REPORT_MD = (
     "# 立白营销活动复盘报告\n\n"
-    "## 品牌传播表现\n"
+    "### 数据说明\n平台与周期。\n\n"
+    "## 整体洞察\n活动相关内容 100 条。\n\n"
+    "## 一、品牌传播表现\n"
     "### 1.1 传播概况\n品牌提及率 0.8，条均互动量 12.5。\n"
     "### 1.2 口碑分析\nNSR 0.3。\n"
     "### 1.3 内容分析\n平台和内容类型分布。\n"
     "### 1.4 热门内容\n引用高互动帖子。\n\n"
-    "## 活动传播表现\n"
+    "## 二、活动传播表现\n"
     "### 2.1 活动 测试活动\n"
     "#### 2.1.1 传播概况\n活动相关内容 100 条。\n"
-    "#### 2.1.2 活动声量渗透分析\n产品提及占比 0.5。\n"
+    "#### 2.1.2 提及漏斗分析\n产品提及占比 0.5。\n"
     "#### 2.1.3 口碑分析\nNSR 0.3。\n"
     "#### 2.1.4 内容分析\nUGC 与 PGC 分布。\n"
     "#### 2.1.5 热门内容\n引用代表帖子。\n\n"
-    "## 综合定位\n![封面](https://cdn.example/cover.png)\n\n"
-    "## 经验总结\n证据充分，逐活动统计。\n"
+    "### 2.2 活动拉升效果\n![封面](https://cdn.example/cover.png)\n\n"
+    "## 三、经验总结\n"
+    "### 3.1 成功经验\n证据充分，逐活动统计。\n"
+    "### 3.2 待改进问题\n见 2.1.3。\n"
+    "### 3.3 后续行动计划\n立即行动。\n\n"
+    "## 四、总结与建议\n核心成果表。\n"
 )
 
 
@@ -492,7 +498,7 @@ class TestDeliveryHandlers(unittest.TestCase):
         self.ws = tempfile.mkdtemp()
         self.st = make_state(self.ws, task_id="t5")
         self.st.write_artifact("report_md", {
-            "markdown": _REPORT_MD, "chapters": "five",
+            "markdown": _REPORT_MD, "chapters": "four",
             "version": "0.0", "source": "fallback", "degraded": True})
         self.st.write_artifact("chart_urls", {"charts": [], "degraded": True})
         self.st.write_artifact("confirmed_plan", {"brand": "立白"})

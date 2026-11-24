@@ -25,6 +25,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import mention_funnel
 import wordcloud_adapter
 from typing import Any, Optional
 
@@ -93,6 +94,53 @@ def cover_available() -> bool:
 
 
 # ── 图表选题 + 数据绑定（纯确定性，真/降级共用）──────────────
+# FIX-53：客户图表规范（KS_Chart_Spec）——配色与尺寸常量，builder 写入 spec。
+PALETTE = {
+    "volume": "#4A7AE3", "interaction": "#F06060",
+    "sentiment": {"正面": "#5DBB7D", "中性": "#AAAAAA", "负面": "#F06060"},
+    "content": {"PGC": "#4A7AE3", "UGC": "#5DBB7D", "未知": "#AAAAAA"},
+    "platform": {"小红书": "#FF2442", "抖音": "#333333", "微博": "#FF8200", "B站": "#00A1D6",
+                 "快手": "#FF4906", "微信": "#07C160", "知乎": "#0066FF"},
+}
+SIZES = {
+    "trend": (1400, 600), "platform": (600, 450), "content": (800, 520), "sentiment": (800, 520),
+    "ugc_category": (800, 520), "mention_funnel": (700, 500), "kol_effectiveness": (1000, 500),
+    "dimension_nsr": (900, 400),
+}
+X_AXIS_SHORT_SPAN_DAYS = 92
+X_AXIS_SHORT_STEP = 5
+
+
+def x_axis_policy(day_count: int) -> dict:
+    """日级 x 轴：≤3 个月每 5 天一个标签，更长按周/双周/月/季/年（目标 6-12 个），首末强制。"""
+    if day_count <= X_AXIS_SHORT_SPAN_DAYS:
+        step = X_AXIS_SHORT_STEP
+    else:
+        step = next((s for s in (7, 14, 30, 91, 365) if day_count / s <= 12), 365)
+    return {"min_labels": 6, "max_labels": 12, "force_ends": True, "step": step}
+
+
+def _style(spec: dict | None, kind: str) -> dict | None:
+    """按 chart kind 写入客户配色/尺寸；None 透传（不出图）。"""
+    if not spec:
+        return spec
+    width, height = SIZES.get(kind, (1200, 600))
+    if kind == "dimension_nsr":
+        longest = max((len(str(c)) for c in spec.get("categories") or []), default=0)
+        width = max(900, 400 + 14 * longest)
+    spec.update(width=width, height=height)
+    if kind == "sentiment":
+        spec["colors"] = PALETTE["sentiment"]
+    elif kind == "content":
+        spec["colors"] = PALETTE["content"]
+    elif kind == "platform":
+        spec["colors"] = {name: PALETTE["platform"].get(name, "#86909C") for name in spec.get("categories") or []}
+    elif kind == "trend":
+        spec["colors"] = [PALETTE["volume"], PALETTE["interaction"]]
+        spec["x_axis_policy"] = x_axis_policy(len(spec.get("categories") or []))
+    return spec
+
+
 def _series(name: str, values: list, unit: Optional[str] = None) -> dict:
     s = {"name": name, "values": values}
     if unit:
@@ -168,6 +216,84 @@ def daily_totals(values: dict) -> dict:
     return dict(sorted(result.items()))
 
 
+def _day_range(start: str, end: str) -> list[str]:
+    from datetime import date, timedelta
+    a = date(int(start[:4]), int(start[4:6]), int(start[6:8]))
+    b = date(int(end[:4]), int(end[4:6]), int(end[6:8]))
+    return [(a + timedelta(days=i)).strftime("%Y%m%d") for i in range((b - a).days + 1)]
+
+
+def _bundle_window(bundle: dict) -> tuple[str, str] | None:
+    meta = (bundle or {}).get("meta") or {}
+    start = str(meta.get("start_date") or "").replace("-", "")[:8]
+    end = str(meta.get("end_date") or "").replace("-", "")[:8]
+    return (start, end) if len(start) == 8 and len(end) == 8 else None
+
+
+def _sha(value) -> str:
+    import hashlib
+    import json
+    return hashlib.sha256(json.dumps(value or {}, sort_keys=True, ensure_ascii=False)
+                          .encode("utf-8")).hexdigest()[:16]
+
+
+def two_period_trend(period: dict, base: dict | None) -> dict:
+    """1.1 品牌趋势：基准期 + 活动期连续日级（FIX-48，KS_Chart_Spec 1.1）。
+
+    每日按平台求和、保留原值，缺失日期为 None（不补零）；记录两期起止、天数、来源哈希，
+    并检查平台键、重叠、活动期逐日之和与 total_volume 是否一致（不一致只记录）。
+    """
+    windows, volume, interaction = [], {}, {}
+    sources = [("基准期", base), ("活动期", period)] if base and not base.get("unavailable") else [("活动期", period)]
+    checks = {"missing_days": [], "overlap": False, "platform_keys_match": True, "totals_match": True}
+    for name, bundle in sources:
+        window = _bundle_window(bundle)
+        days_v = daily_totals((bundle or {}).get("volume_trend") or {})
+        days_i = daily_totals((bundle or {}).get("interaction_trend") or {})
+        if not window and days_v:
+            window = (min(days_v), max(days_v))
+        if not window:
+            continue
+        days = _day_range(*window)
+        windows.append({"name": name, "start": window[0], "end": window[1], "days": len(days)})
+        for day in days:
+            if day in volume:
+                checks["overlap"] = True
+            volume[day] = days_v.get(day)
+            interaction[day] = days_i.get(day)
+            if day not in days_v:
+                checks["missing_days"].append(day)
+    if len(sources) == 2:
+        keys = [set(k for k in ((b or {}).get("volume_trend") or {}) if k != "_total") for _, b in sources]
+        checks["platform_keys_match"] = keys[0] == keys[1]
+    total = (period or {}).get("total_volume")
+    if isinstance(total, (int, float)) and windows:
+        last = windows[-1]
+        observed = sum(volume.get(d) or 0 for d in _day_range(last["start"], last["end"]))
+        checks["totals_match"] = observed == total
+    dates = sorted(volume)
+    return {"dates": dates, "volume": [volume[d] for d in dates],
+            "interaction": [interaction[d] for d in dates], "periods": windows,
+            "base_unavailable": len(sources) == 1,
+            "source_sha": {"base": _sha((base or {}).get("volume_trend")) if len(sources) == 2 else None,
+                           "period": _sha((period or {}).get("volume_trend"))},
+            "checks": checks}
+
+
+def _brand_trend_spec(two: dict) -> Optional[dict]:
+    if len(two.get("dates") or []) < 2:
+        return None
+    areas = [{"name": f"{p['name']}（{p['start'][4:6]}.{p['start'][6:]}–{p['end'][4:6]}.{p['end'][6:]}，"
+                      f"{p['days']}天）", "start": p["start"], "end": p["end"]}
+             for p in two.get("periods") or []]
+    return {"chart_id": "brand_trend", "title": "品牌·日声量与互动趋势（基准期+活动期）",
+            "chart_type": "line", "metric": "声量", "dimension": "日期",
+            "categories": two["dates"],
+            "series": [_series("日声量", two["volume"], "条"), _series("日互动量", two["interaction"])],
+            "mark_areas": areas, "mark_points": ["max"], "connect_nulls": False,
+            "source_mode": "native"}
+
+
 def _content_spec(cid: str, stats: dict) -> Optional[dict]:
     """内容类型分布环形图（UGC/PGC/未知）。全零或单一类型不出图。"""
     cd = (stats or {}).get("content_type_dist") or {}
@@ -187,18 +313,15 @@ def _content_spec(cid: str, stats: dict) -> Optional[dict]:
 
 def _analysis_specs(cid: str, stats: dict) -> list[dict]:
     specs = []
-    funnel = (stats or {}).get("mention_funnel") or {}
-    if funnel.get("brand_hits") is not None:
-        cats = ["活动相关", "品牌提及"]
-        vals = [int((stats.get("metrics") or {}).get("活动相关条数") or 0),
-                int(funnel.get("brand_hits") or 0)]
-        if funnel.get("has_product_keywords"):
-            cats.append("产品提及")
-            vals.append(int(funnel.get("product_hits") or 0))
+    # FIX-18：退化时只画 活动相关→产品提及；主讨论对象方法画横向条形，不画漏斗。
+    levels = mention_funnel.chart_levels((stats or {}).get("mention_funnel") or {})
+    if levels:
+        chart_type, cats, vals = levels
+        title = ("主讨论对象分布" if chart_type == "rank_bar" else "提及漏斗")
         specs.append({
             "chart_id": f"{cid}_mention_funnel",
-            "title": f"活动 {cid}·提及漏斗",
-            "chart_type": "funnel",
+            "title": f"活动 {cid}·{title}",
+            "chart_type": chart_type,
             "categories": cats,
             "series": [_series("声量", vals)],
             "source_mode": "native",
@@ -249,7 +372,7 @@ def _analysis_specs(cid: str, stats: dict) -> list[dict]:
 
 
 def _wordcloud_specs(wordcloud_data: dict, plan: Optional[dict] = None) -> list[dict]:
-    """逐活动、维度、平台生成真实词云规格。"""
+    """逐活动、维度生成词云规格；活动词云为综合已选平台的一张图（FIX-54，platform="all"）。"""
     specs = []
     for cid, dimensions in ((wordcloud_data or {}).get("campaigns") or {}).items():
         for dimension, bundle in (dimensions or {}).items():
@@ -264,9 +387,10 @@ def _wordcloud_specs(wordcloud_data: dict, plan: Optional[dict] = None) -> list[
                     words = {row["term"]: row["value"] for row in rows}
                 # Skill selects Top100 only at render time; analysis retains all.
                 top = list(words.items())
+                label = "综合已选平台" if plat == "all" else _PLATFORM_LABEL.get(plat, plat)
                 specs.append({
                     "chart_id": f"wordcloud_{_safe(cid)}_{dimension}_{plat}",
-                    "title": f"{cid}·{dimension}·{_PLATFORM_LABEL.get(plat, plat)}词云",
+                    "title": f"{cid}·{dimension}·{label}词云",
                     "chart_type": "wordcloud",
                     "metric": "词频",
                     "dimension": "关键词",
@@ -281,7 +405,29 @@ def _wordcloud_specs(wordcloud_data: dict, plan: Optional[dict] = None) -> list[
     return specs
 
 
-def build_chart_specs(stats_bundle: dict, wordcloud_data: dict, plan: Optional[dict] = None) -> list[dict]:
+def _chart_kind(chart_id: str) -> str:
+    for kind in SIZES:
+        if chart_id.endswith("_" + kind):
+            return kind
+    return ""
+
+
+def build_chart_specs(stats_bundle: dict, wordcloud_data: dict, plan: Optional[dict] = None,
+                      requirement: Optional[dict] = None) -> list[dict]:
+    specs = _build_chart_specs(stats_bundle, wordcloud_data, plan)
+    for spec in specs:
+        if spec.get("chart_type") == "wordcloud":
+            # FIX-55：每张词云的 call-brief（调用层内部记录），由已保存需求确定性生成。
+            scope = spec.get("wordcloud_scope") or {}
+            spec["call_brief"] = wordcloud_adapter.build_call_brief(
+                plan or {}, requirement or {}, scope.get("campaign", ""),
+                scope.get("dimension", "overall"), scope.get("platform", ""))
+        else:
+            _style(spec, _chart_kind(spec["chart_id"]))
+    return specs
+
+
+def _build_chart_specs(stats_bundle: dict, wordcloud_data: dict, plan: Optional[dict] = None) -> list[dict]:
     """把统计产物翻译为图表 spec 列表（确定性、无副作用、可单测）。
 
     资格规则（简化自 echarts skill §1/§8）：剔除空图/全零/单值/单类别；多活动逐个出图；
@@ -304,7 +450,10 @@ def build_chart_specs(stats_bundle: dict, wordcloud_data: dict, plan: Optional[d
             "content_type_dist": content,
         }
         for builder in (_sentiment_spec, _platform_spec, _trend_spec, _content_spec):
-            spec = builder("brand", brand_stats)
+            if builder is _trend_spec and brand.get("trend_two_period"):
+                spec = _brand_trend_spec(brand["trend_two_period"])   # FIX-48
+            else:
+                spec = builder("brand", brand_stats)
             if spec:
                 spec["title"] = spec["title"].replace("活动 brand", "品牌")
                 specs.append(spec)
@@ -402,6 +551,30 @@ def _gen_cover(title: str, subtitle: str, out_png: str) -> Optional[str]:
         return None
 
 
+# FIX-39 视觉自检（确定性部分）：尺寸、非空、非黑底。可读性/乱码交独立 Validator 逐张查看。
+PNG_MIN_OPAQUE = 0.05       # 非透明像素占比下限（排除空白图）
+PNG_MIN_BRIGHTNESS = 60     # 平均亮度下限 0-255（排除黑底图）
+
+
+def png_self_check(path: str) -> dict:
+    """非空、非黑底。像素尺寸受渲染器 scale 与标题栏影响，不在此断言（尺寸由 spec 控制，见 FIX-53）。"""
+    from PIL import Image, ImageStat
+    with Image.open(path) as img:
+        rgba = img.convert("RGBA")
+        size = rgba.size
+        alpha = rgba.getchannel("A")
+        opaque = sum(alpha.histogram()[1:]) / float(size[0] * size[1])
+        background = Image.new("RGBA", size, (255, 255, 255, 255))
+        brightness = ImageStat.Stat(Image.alpha_composite(background, rgba).convert("L")).mean[0]
+    problems = []
+    if opaque < PNG_MIN_OPAQUE:
+        problems.append(f"非透明像素 {opaque:.1%} < {PNG_MIN_OPAQUE:.0%}（疑似空白图）")
+    if brightness < PNG_MIN_BRIGHTNESS:
+        problems.append(f"平均亮度 {brightness:.0f} < {PNG_MIN_BRIGHTNESS}（疑似黑底）")
+    return {"size": list(size), "opaque_ratio": round(opaque, 4), "brightness": round(brightness, 1),
+            "ok": not problems, "problems": problems}
+
+
 def render_charts(stats_bundle: dict, wordcloud_data: dict, *,
                   project: str, version: str, report_name: str,
                   outdir: str, plan: Optional[dict] = None) -> dict:
@@ -421,20 +594,27 @@ def render_charts(stats_bundle: dict, wordcloud_data: dict, *,
         wordcloud_artifacts = None
         if spec.get("chart_type") == "wordcloud":
             wordcloud_artifacts = _render_wordcloud(spec, outdir)
-            png = wordcloud_artifacts["transparent_path"]
+            # FIX-54：双版都生成，报告引用白底版（KS 词云规格）。
+            png = wordcloud_artifacts["white_path"]
         else:
-            _render_png(spec, png)                # 逐张生成 + 自检
-        charts_out.append({"chart_id": spec["chart_id"], "title": spec["title"],
+            _render_png(spec, png, spec.get("width", 1200), spec.get("height", 600))   # FIX-53 尺寸
+        check = png_self_check(png)
+        if not check["ok"]:
+            raise RuntimeError(f"图表自检未通过 {spec['chart_id']}：" + "；".join(check["problems"]))
+        charts_out.append({
+                           "self_check": check,"chart_id": spec["chart_id"], "title": spec["title"],
                            "chart_type": spec["chart_type"], "local_path": png,
                            "spec": spec,
                            **({"wordcloud_artifacts": wordcloud_artifacts} if wordcloud_artifacts else {}),
                            "url": None, "source_mode": spec.get("source_mode")})
 
-    cover = {"local_path": None, "url": None, "degraded": True}
+    # FIX-39：客户要求封面非空——失败即抛错，由 n14 重试/暂停，不再降级。
     cover_png = _gen_cover(report_name, f"版本 {version}",
                            os.path.join(outdir, "cover.png"))
-    if cover_png:
-        cover = {"local_path": cover_png, "url": None, "degraded": False}
+    if not cover_png or not os.path.isfile(cover_png) or os.path.getsize(cover_png) == 0:
+        raise RuntimeError("封面生成失败（cover.png 为空或不可用）")
+    cover = {"local_path": cover_png, "url": None, "degraded": False,
+             "self_check": png_self_check(cover_png)}
 
     return {"charts": charts_out, "cover": cover, "project": project,
             "version": version, "report_name": report_name,

@@ -98,10 +98,13 @@ def compliant_pipeline_services():
             "brand_stats": {"articles": {}, "degraded": False},
             "brand_stats_baseline": {"articles": {}, "degraded": False},
             "cleaned_data": {"rows": [], "clean_record": {"total_out": 0}},
+            "denoised_data": {"rows": [], "clean_record": {"total_out": 0},
+                              "noise_record": {"cleaned": 0, "removed": 0, "kept": 0}},
+            "noise_review": {"campaigns": {}, "decisions": [], "removed_ids": [], "uncertain_ids": []},
             "ugc_category_list": {
-                "mode": "fixed_four",
-                "categories": ["模仿打卡", "创意改编", "测评分享", "晒单分享"],
-                "source": "fixed",
+                "mode": "dynamic",
+                "categories": ["到店打卡", "开箱测评", "晒单分享", "二创改编"],
+                "source": "fixture",
             },
             "annotated_round1": {"round": 1, "rows": [], "degraded": False},
             "opinion_candidates": {
@@ -120,9 +123,9 @@ def compliant_pipeline_services():
             "chart_urls": {"charts": [], "chart_count": 0, "degraded": False},
             "wordcloud_insight": {"campaigns": {}, "source": "fixture"},
             "report_md": {
-                "markdown": "# 测试报告\n\n## 品牌传播表现\n\n## 活动传播表现\n\n"
-                "## 综合定位\n\n## 经验总结\n",
-                "chapters": "five",
+                "markdown": "# 测试报告\n\n## 一、品牌传播表现\n\n## 二、活动传播表现\n\n"
+                "## 三、经验总结\n\n## 四、总结与建议\n",
+                "chapters": "four",
                 "version": f"0.{st.counters.get('report_patch', 0)}",
                 "source": "fixture",
                 "degraded": False,
@@ -164,7 +167,7 @@ def compliant_pipeline_services():
         }
 
     for name in (
-        "run_init", "ssjh_pull", "clean_campaign", "ugc_discovery", "annotate",
+        "run_init", "ssjh_pull", "clean_campaign", "noise_review", "ugc_discovery", "annotate",
         "opinion_candidates", "aggregate", "charts_render", "wordcloud_insight",
         "write_report", "fix_report", "delivery_draft", "delivery_commit", "handoff",
     ):

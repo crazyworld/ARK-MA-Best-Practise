@@ -55,8 +55,6 @@
 
 | 参数 | 含义 | 候选 | 影响 |
 |---|---|---|---|
-| `ugc_category_mode` | UGC 参与方式分类 | `dynamic` 动态发现 / `fixed_four` 固定四类 | n08 是否锁死类别 |
-| `report_chapters` | 报告结构 | `five` 五部分 / `three` 三章 | n16 报告骨架 |
 
 ---
 

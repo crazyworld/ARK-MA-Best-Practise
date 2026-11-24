@@ -51,7 +51,8 @@ class TestExcelRowMapping(unittest.TestCase):
         self.assertIsInstance(row["publish_time"], int)
         self.assertEqual(row["_source"], "user_uploaded_excel")
 
-    def test_computes_interaction_when_total_missing(self):
+    def test_missing_total_interaction_is_unavailable_not_recomputed(self):
+        """缺陷清单 Q2：总互动量只用供应商字段，缺失不按明细加总、不补零。"""
         row = excel_source.normalize_excel_row(
             {
                 "id": "x",
@@ -63,7 +64,7 @@ class TestExcelRowMapping(unittest.TestCase):
                 "收藏数": 7,
             }
         )
-        self.assertEqual(row["interaction_cnt"], 17)
+        self.assertIsNone(row["interaction_cnt"])
         self.assertEqual(row["content_mode"], "PGC")
 
     @unittest.skipUnless(Workbook is not None, "openpyxl not installed")

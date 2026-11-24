@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import logging
 import time
 from urllib.parse import quote, urlsplit
@@ -27,7 +28,8 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 try:
-    from .pipeline_store import HcEvent, PipelineJob, PipelineStore, STATUS_WAIT_HC
+    from .pipeline_store import (HcEvent, PipelineJob, PipelineStore, STATUS_ARCHIVED_PAUSED,
+                                 STATUS_WAIT_HC)
     from .topic5_intake import (
         DEMO_REQUIREMENT_DEFAULTS,
         IntakeValidationError,
@@ -41,7 +43,8 @@ try:
     from .topic5_runner import Topic5CardSenderProtocol, Topic5Runner
     from .topic5_progress_card import format_review_lines, format_label_snapshot, label_snapshot
 except ImportError:  # pragma: no cover - standalone compatibility
-    from pipeline_store import HcEvent, PipelineJob, PipelineStore, STATUS_WAIT_HC
+    from pipeline_store import (HcEvent, PipelineJob, PipelineStore, STATUS_ARCHIVED_PAUSED,
+                                STATUS_WAIT_HC)
     from topic5_intake import (
         DEMO_REQUIREMENT_DEFAULTS,
         IntakeValidationError,
@@ -61,6 +64,12 @@ DECISION_PASS = "pass"
 DECISION_REJECT = "reject"
 DECISION_REMARK = "remark"
 PENDING_REMARK_NOTE = "等待补充说明"
+# FIX-04：活动数据来源。auto=默认自动采集原帖；upload=G2 后等待用户上传 Excel（原行为）。
+ACTIVITY_DATA_MODE = (os.environ.get("TOPIC5_ACTIVITY_DATA_MODE") or "auto").strip().lower()
+# FIX-35：HC7 三选一（与 hc_bridge.HC7_* 同值）
+DECISION_RELAX = "relax"
+DECISION_REDO = "redo_with_data"
+DECISION_TERMINATE = "terminate"
 
 # 每个 HC 门的头部信息(颜色 + 图标 + 标题)。对齐 hc_bridge.NODE_TO_HC。
 _HC_META = {
@@ -99,6 +108,12 @@ _HC_META = {
         "icon": "warning_outlined",
         "title": "HC7 · 异常升级",
         "subtitle": "流程遇到需要升级处理的异常,请人工裁决",
+    },
+    "HC_COLLECT": {
+        "template": "orange",
+        "icon": "download_outlined",
+        "title": "HC · 活动原帖采集授权",
+        "subtitle": "自动采集涉及数据费用，确认数量上限后才创建任务",
     },
     "USER_ESCALATE": {
         "template": "red",
@@ -275,6 +290,13 @@ def _plan_review_elements(payload: dict) -> list[dict]:
         f"**平台**：{'、'.join(str(x) for x in (scope.get('platforms') or [])) or '未指定'}",
         f"**内容范围**：{scope_name}",
         f"**数据文件**：{scope.get('source_file_name') or 'G2 确认后上传'}",
+        f"**活动类型**：{scope.get('campaign_type') or '待确认'}",
+        # Q3：基准期起止写入需求确认单后在方案卡展示（默认推算值也写明）。
+        *([f"**品牌基准期**：{scope['baseline_start']} ～ {scope['baseline_end']}"
+           + ("（默认：参照开始日前30天）" if scope.get("baseline_source") == "default" else "")]
+          if scope.get("baseline_start") and scope.get("baseline_end") else []),
+        *([f"<font color='red'>**待解决**：{scope['campaign_type_pending']}</font>"]
+          if scope.get("campaign_type_pending") else []),
     ]
 
     metric_lines = []
@@ -585,8 +607,33 @@ def _delivery_review_elements(payload: dict) -> list[dict]:
             f"（`{draft.get('collaborator_perm') or 'none'}`）\n"
             f"- Report Artifact：`{((context.get('report_ref') or {}).get('artifact_id')) or '缺失'}`\n"
             f"- Delivery Artifact：`{((context.get('delivery_ref') or {}).get('artifact_id')) or '缺失'}`"
+            + _delivery_acceptance_text(context)
         ),
     }]
+
+
+def _delivery_acceptance_text(context: dict) -> str:
+    """G4 终验补充（FIX-40）：质检通过时间、关键数字回读、豁免清单、核查清单、重新确认提示。"""
+    generated = context.get("qc_generated_at")
+    if isinstance(generated, (int, float)) and generated:
+        generated = time.strftime("%Y-%m-%d %H:%M", time.localtime(generated))
+    numbers = context.get("numbers_check") or {}
+    if numbers.get("checked"):
+        missing = numbers.get("missing") or []
+        number_line = (f"{numbers['checked']} 项一致" if not missing else
+                       "缺失 " + "、".join(f"{m.get('label')}={m.get('value_text')}" for m in missing))
+    else:
+        number_line = "未核对"
+    lines = [f"\n- 质检通过时间：`{generated or '缺失'}`", f"- 关键数字回读：{number_line}"]
+    waivers = context.get("waivers") or []
+    if waivers:
+        lines.append("- 经用户确认放宽：" + "；".join(
+            f"{w.get('title') or w.get('issue_id')}（{w.get('reason')}）" for w in waivers))
+    checklist = context.get("checklist") or []
+    if checklist:
+        lines.append("\n**布局核查清单**\n" + "\n".join(f"- [ ] {item}" for item in checklist))
+    lines.append("\n> 确认后如再修改，需要重新确认。")
+    return "\n".join(lines)
 
 
 def _escalation_review_elements(payload: dict) -> list[dict]:
@@ -621,6 +668,110 @@ def _escalation_review_elements(payload: dict) -> list[dict]:
             + ("\n".join(issue_lines) or "未提供结构化错误明细")
         ),
     }]
+
+
+def _hc7_action_elements(job, event_id: int, payload: dict) -> list[dict]:
+    """HC7 三选一（FIX-35）：放宽并留痕（勾选 P0+理由）/ 补数据重做 / 终止项目。"""
+    issues = [i for i in ((payload.get("review_context") or {}).get("issues") or [])
+              if isinstance(i, dict) and i.get("severity") == "P0" and i.get("id")]
+    options = [{"text": {"tag": "plain_text", "content": f"{i['id']} · {(i.get('title') or '')[:30]}"},
+                "value": str(i["id"])} for i in issues]
+
+    def form(name, inputs, label, kind, decision):
+        return {"tag": "form", "name": f"{name}_{event_id}", "elements": inputs + [{
+            "tag": "button", "name": f"{name}_submit", "type": kind, "width": "fill",
+            "text": {"tag": "plain_text", "content": label}, "action_type": "form_submit",
+            "value": _action_value(job.job_id, "HC7", event_id, decision)}]}
+
+    def text_input(name, label, placeholder, required=True):
+        return {"tag": "input", "name": name, "required": required, "input_type": "multiline_text",
+                "rows": 2, "max_length": 500, "width": "fill",
+                "label": {"tag": "plain_text", "content": label},
+                "placeholder": {"tag": "plain_text", "content": placeholder}}
+
+    out = []
+    if options:
+        out.append(form("relax_form", [
+            {"tag": "multi_select_static", "name": "issue_ids", "required": True, "width": "fill",
+             "placeholder": {"tag": "plain_text", "content": "勾选要放宽的检查项（外部权限类不可放宽）"},
+             "options": options},
+            text_input("relax_reason", "放宽理由", "说明为何接受该项，将在报告中留痕"),
+        ], "放宽该项并留痕", "primary", DECISION_RELAX))
+    out.append(form("redo_form", [
+        text_input("redo_note", "补充数据说明", "如新的活动明细、基准期天数等", required=False),
+    ], "补充数据后重做", "default", DECISION_REDO))
+    out.append(form("terminate_form", [
+        text_input("terminate_reason", "终止原因", "终止后不再推进，已创建的飞书文档保留"),
+    ], "终止项目", "danger", DECISION_TERMINATE))
+    return out
+
+
+# FIX-37 / FIX-36：终验升级的选项。超时升级 Supervisor 只能「继续等待/换渠道/暂停」；
+# 返工超 3 轮的澄清为「需求变化/质量问题」。
+USER_ESCALATE_OPTIONS = {
+    "timeout": (("wait", "继续等待", "primary"), ("switch_channel", "换渠道通知用户", "default"),
+                ("pause", "暂停", "danger")),
+    "user_rework_exhausted": (("quality_issue", "质量问题：再返工一轮", "primary"),
+                              ("requirement_change", "需求变化：回到需求确认", "default")),
+}
+
+
+def _user_escalate_elements(job, event_id: int, payload: dict) -> list[dict]:
+    reason = ((payload.get("review_context") or {}).get("escalation_reason")) or "timeout"
+    return [{"tag": "button", "width": "fill", "type": kind,
+             "text": {"tag": "plain_text", "content": label},
+             "behaviors": [{"type": "callback",
+                            "value": _action_value(job.job_id, "USER_ESCALATE", event_id, decision)}]}
+            for decision, label, kind in USER_ESCALATE_OPTIONS.get(reason, USER_ESCALATE_OPTIONS["timeout"])]
+
+
+def collect_pending(payload: dict) -> list[dict]:
+    try:
+        return list(json.loads(payload.get("prompt") or "{}").get("collection_authorization_required") or [])
+    except (TypeError, ValueError):
+        return []
+
+
+def _collect_elements(job, event_id: int, payload: dict) -> list[dict]:
+    """FIX-04：逐活动展示预检声量，用户填写数量上限后授权创建（不展示单价/费用）。"""
+    pending = collect_pending(payload)
+    lines = [f"- **{p['campaign']}**：预检声量约 {p.get('estimated_volume') if p.get('estimated_volume') is not None else '未知'} 条"
+             + ("（不确定估算）" if (p.get("estimate") or {}).get("relation") == "UNCERTAIN" else "")
+             for p in pending]
+    inputs = [{"tag": "input", "name": f"max_{i}", "required": True, "width": "fill",
+               "default_value": str(p.get("estimated_volume") or ""),
+               "label": {"tag": "plain_text", "content": f"{p['campaign']} 数量上限（条）"},
+               "placeholder": {"tag": "plain_text", "content": "下载条数上限，正整数"}}
+              for i, p in enumerate(pending)]
+    return [{"tag": "markdown", "content": "**活动原帖预检（只抓帖子，不抓评论）**\n" + "\n".join(lines)
+             + "\n\n> 任务创建成功即发生费用；单次费用超过 1000 元会被门禁拦截。也可不授权，改为在本话题上传活动明细 .xlsx。"},
+            {"tag": "form", "name": f"collect_form_{event_id}", "elements": inputs + [{
+                "tag": "button", "name": "collect_submit", "type": "primary", "width": "fill",
+                "text": {"tag": "plain_text", "content": "授权采集"}, "action_type": "form_submit",
+                "value": _action_value(job.job_id, "HC_COLLECT", event_id, DECISION_PASS)}]}]
+
+
+def collect_note(payload: dict, form_value: dict, operator: str, event_id: int) -> str:
+    grants = {}
+    for i, p in enumerate(collect_pending(payload)):
+        raw = str((form_value or {}).get(f"max_{i}") or "").strip()
+        if not raw.isdigit() or int(raw) <= 0:
+            raise ValueError(f"{p['campaign']} 数量上限须为正整数")
+        grants[p["campaign"]] = {"max_records": int(raw),
+                                 "confirmation_ref": f"feishu-hc:{event_id}:{operator or 'user'}"}
+    return json.dumps({"campaigns": grants}, ensure_ascii=False)
+
+
+def hc7_note(decision: str, form_value: dict, operator: str = "") -> str:
+    """把 HC7 表单转成 hc_bridge 所需 note；放宽项为 JSON（issue_ids + reason + operator）。"""
+    form_value = form_value or {}
+    if decision == DECISION_RELAX:
+        ids = form_value.get("issue_ids") or []
+        ids = [ids] if isinstance(ids, str) else list(ids)
+        return json.dumps({"issue_ids": ids, "reason": str(form_value.get("relax_reason") or "").strip(),
+                           "operator": operator}, ensure_ascii=False)
+    key = "redo_note" if decision == DECISION_REDO else "terminate_reason"
+    return str(form_value.get(key) or "").strip()
 
 
 def _decision_block_reason(hc_kind: str, payload: dict, decision: str) -> str:
@@ -778,11 +929,11 @@ def build_hc_card(
                 ),
             )
         )
-    else:
+    elif hc_kind not in ("USER_ESCALATE", "HC_COLLECT"):
         elements.append(
             {
                 "tag": "button",
-                "text": {"tag": "plain_text", "content": "通过"},
+                "text": {"tag": "plain_text", "content": "再修一轮" if hc_kind == "HC7" else "通过"},
                 "type": "primary_filled",
                 "width": "fill",
                 "behaviors": [
@@ -795,12 +946,30 @@ def build_hc_card(
                 ],
             }
         )
-    if hc_kind != "G1":
+    if hc_kind == "HC7":
+        elements.extend(_hc7_action_elements(job, event_id, payload))
+    if hc_kind == "USER_ESCALATE":
+        elements.extend(_user_escalate_elements(job, event_id, payload))
+    if hc_kind == "HC_COLLECT":
+        elements.extend(_collect_elements(job, event_id, payload))
+    if hc_kind not in ("G1", "HC7", "USER_ESCALATE", "HC_COLLECT"):
         elements.append(
             {
                 "tag": "form",
                 "name": f"reject_form_{event_id}",
                 "elements": [
+                    *([{
+                        # FIX-36：G4 返工区分版式/内容；不确定选内容（会重新质检，避免漏检）。
+                        "tag": "select_static", "name": "change_type", "width": "fill",
+                        "initial_option": "content",
+                        "placeholder": {"tag": "plain_text", "content": "修改类型"},
+                        "options": [
+                            {"text": {"tag": "plain_text", "content": "内容修改（数字/结论/图表，需重新质检）"},
+                             "value": "content"},
+                            {"text": {"tag": "plain_text", "content": "仅版式修改（不改正文）"},
+                             "value": "layout"},
+                        ],
+                    }] if hc_kind == "G4" else []),
                     {
                         "tag": "input",
                         "name": "reject_reason",
@@ -834,11 +1003,12 @@ def build_hc_card(
                 ],
             }
         )
-    footer = (
-        "> 提交问卷后将冻结需求快照并进入方案编制"
-        if hc_kind == "G1"
-        else "> 通过:进入下一阶段    ·  打回并继续:Agent 根据原因回退或调整后重试"
-    )
+    footer = {
+        "G1": "> 提交问卷后将冻结需求快照并进入方案编制",
+        "HC7": "> 再修一轮:返修复检    ·  放宽并留痕:勾选项豁免并在报告注明    ·  "
+               "补充数据后重做:回到方案    ·  终止项目:不再推进，文档保留",
+        "USER_ESCALATE": "> 流程不会绕过用户终验自动提交；暂停后用户任何回复可恢复终验",
+    }.get(hc_kind, "> 通过:进入下一阶段    ·  打回并继续:Agent 根据原因回退或调整后重试")
     elements.append({"tag": "markdown", "content": footer})
     if job.task_id:
         elements.extend(
@@ -1037,7 +1207,37 @@ class Topic5Hitl(Topic5CardSenderProtocol):
                 )
                 handled += 1
                 continue
+        # FIX-37：累计 5 个工作日无回应 → 归档暂停，只由用户终止，不自动终止。
+        for event in self._store.list_g4_archive_due(current):
+            job = self._store.get_job(event.job_id)
+            if job is None or not self._store.mark_archived_paused(job.job_id, phase=job.current_phase):
+                continue
+            await self._runner.reply_for_job(
+                job,
+                "G4 终验已累计 5 个工作日未回应，任务转为「归档暂停」，飞书文档保留。"
+                "在本话题回复任意内容即可恢复终验；如需结束请点击终止。",
+            )
+            handled += 1
         return handled
+
+    async def restore_archived(self, *, chat_id: str, thread_id: str, user_open_id: str) -> bool:
+        """FIX-37：归档暂停的任务收到用户回复 → 恢复为等待 G4 并重发终验卡。"""
+        job = self._store.get_active_job_by_session_key(chat_id, thread_id, user_open_id)
+        if job is None or job.status != STATUS_ARCHIVED_PAUSED:
+            return False
+        phase = job.current_phase
+        if not self._store.restore_from_archive(job.job_id):
+            return False
+        job = self._store.get_job(job.job_id) or job
+        if phase == "USER_ESCALATE":
+            # 升级卡已处理（pause）：以「继续等待」续跑，流水线回到 n21 重新生成 G4 终验卡。
+            await self._runner.resume_job(job, _build_decision_message("USER_ESCALATE", "wait", "用户回复，恢复终验"))
+        else:
+            event = self._store.latest_hc_for_job(job.job_id, "G4")
+            if event is not None and event.resolved_at is None:
+                await self.send_hc_card(job, "G4", event.id, event.payload or {})
+        await self._runner.reply_for_job(job, "已恢复 G4 终验，请在终验卡中确认或说明修改。")
+        return True
 
     # ---- SendHcCard(runner → hitl)----------------------------------------
 
@@ -1188,6 +1388,24 @@ class Topic5Hitl(Topic5CardSenderProtocol):
             audit_note = json.dumps(
                 requirement, ensure_ascii=False, separators=(",", ":")
             )
+        elif hc_kind == "HC_COLLECT" and decision == DECISION_PASS:
+            try:
+                decision_note = audit_note = collect_note(
+                    hc_event.payload or {}, _extract_form_value(action) or {},
+                    job.user_open_id, hc_event.id)
+            except ValueError as error:
+                await self._runner.reply_for_job(job, f"采集授权未提交：{error}")
+                return
+        elif hc_kind == "G4" and decision == DECISION_REJECT:
+            form = _extract_form_value(action) or {}
+            change = "layout" if form.get("change_type") == "layout" else "content"
+            decision_note = audit_note = json.dumps(
+                {"change_type": change, "note": note}, ensure_ascii=False)
+        elif hc_kind == "HC7" and decision in (DECISION_RELAX, DECISION_REDO, DECISION_TERMINATE):
+            decision_note = audit_note = hc7_note(decision, _extract_form_value(action) or {})
+            if decision == DECISION_RELAX and not json.loads(decision_note)["reason"]:
+                await self._runner.reply_for_job(job, "HC7 放宽须填写理由")
+                return
         elif hc_kind == "N10" and decision == DECISION_PASS:
             audit_note = json.dumps(
                 label_snapshot(hc_event.payload, note),
@@ -1251,8 +1469,12 @@ class Topic5Hitl(Topic5CardSenderProtocol):
             )
 
         if hc_kind == "G2" and decision == DECISION_PASS:
-            if not job.source_file_id:
+            if not job.source_file_id and ACTIVITY_DATA_MODE == "upload":
                 await self._runner.wait_for_activity_file(job)
+                return
+            if not job.source_file_id:
+                # FIX-04：默认自动采集活动原帖（ssjh-social-task）；计费前另有采集授权卡。
+                await self._runner.resume_job(job, "G2 pass: auto")
                 return
             decision_note = json.dumps(
                 {
@@ -1261,6 +1483,15 @@ class Topic5Hitl(Topic5CardSenderProtocol):
                 ensure_ascii=False,
                 separators=(",", ":"),
             )
+        if hc_kind == "USER_ESCALATE" and decision == "pause":
+            # FIX-37：Supervisor 选择暂停 → 归档暂停；用户回复后以「继续等待」续跑回 G4（不自动终止）。
+            self._store.mark_archived_paused(job.job_id, phase="USER_ESCALATE")
+            await self._runner.reply_for_job(
+                job, "终验已按 Supervisor 决定转为「归档暂停」，文档保留；用户回复后恢复终验。")
+            return
+        if hc_kind == "USER_ESCALATE" and decision == "switch_channel":
+            await self._runner.reply_for_job(
+                job, "Supervisor 已改用其他渠道联系用户确认终验；在用户确认前不会提交交付。")
         decision_message = _build_decision_message(
             hc_kind, decision, decision_note
         )
@@ -1472,4 +1703,5 @@ def _build_decision_message(hc_kind: str, decision: str, note: str) -> str:
         return f"{hc_kind} reject: {note or '无说明'}"
     if decision == DECISION_REMARK:
         return f"{hc_kind} remark: {note or '无补充'}"
-    return f"{hc_kind} {decision}"
+    # HC7 relax/redo_with_data/terminate、USER_ESCALATE 澄清等：note 必须原样带上（relax 为 JSON）。
+    return f"{hc_kind} {decision}: {note}" if note else f"{hc_kind} {decision}"

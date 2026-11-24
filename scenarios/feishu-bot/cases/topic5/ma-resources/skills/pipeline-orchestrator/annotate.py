@@ -311,7 +311,7 @@ def _small_engine_r1(
             data = semantic.chat_json(
                 sys_prompt,
                 json.dumps(list(items.values()), ensure_ascii=False),
-                max_tokens=2048,
+                max_tokens=2048, lm_scope="annotate_r1",
             )
             by_id = (
                 {str(d.get("id")): d for d in data if isinstance(d, dict)}
@@ -621,7 +621,7 @@ def _run_task(
             data = semantic.chat_json(
                 prompt,
                 json.dumps(_task_payload(pending, ()), ensure_ascii=False),
-                max_tokens=2560,
+                max_tokens=2560, lm_scope="annotate_r2",
             )
             by_id = (
                 {str(item.get("id")): item for item in data if isinstance(item, dict)}

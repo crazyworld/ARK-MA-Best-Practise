@@ -34,6 +34,7 @@ ARK_BETA_HEADER = {"X-Ark-Beta": "agentic-2026-06-01"}
 SKILLS = [
     ("pipeline-orchestrator", "pipeline-orchestrator.zip", "topic5 · durable 编排引擎(29 节点 DAG)"),
     ("SSJH-Social-Stat", "SSJH-Social-Stat.zip", "topic5 · SSJH 社媒取数(n05/n06/n13)"),
+    ("ssjh-social-task", "ssjh-social-task.zip", "topic5 · 活动原帖自动采集 v0.11.6(n03b，只抓帖子)"),
     ("blueai-datahub-skill", "blueai-datahub-skill.zip", "topic5 · DataHub 批量标注(n09/n11)"),
     ("blueai-yuqing-echarts-skill-new", "blueai-yuqing-echarts-skill-new.zip", "topic5 · ECharts 本地 PNG 渲染(n14，飞书 media 交付)"),
     ("report-cover-skill", "report-cover-skill.zip", "topic5 · 报告封面生成"),

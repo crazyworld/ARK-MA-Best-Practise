@@ -271,7 +271,7 @@ Coordinator 必须将完整 JSON 原样传给 `run_pipeline.py resume --note`，
 | 维度       | 验收点                                                                                  |
 | ---------- | --------------------------------------------------------------------------------------- |
 | 幂等       | 同一节点重复执行被 ledger 拦截，副作用不重放（render→ledger 重放/对账）                 |
-| 去重与抽样 | 清洗阶段按 `fingerprint → id → item_id → url` 去重；剔除比例 >10% 触发 `needs_sampling_review`；demo 对清洗后活动明细稳定抽样最多 500 条 |
+| 去重与抽样 | 清洗阶段按 `fingerprint → id → item_id → url` 去重；剔除比例写入 `remove_ratio` 留痕；AI 判「不相关」>10% 时由 n12 `stats_scope.irrelevant_review_required` 标记、轮次一审核计划定向抽查 ≤30 条；demo 对清洗后活动明细稳定抽样最多 500 条 |
 | 中断恢复   | 冷进程重启后 `resume` 从 checkpoint 续跑，不重跑已完成节点；retry 前先 reconcile       |
 | 取消       | Gateway 异常退出后清理本地 `pipeline_jobs` 与 HC 记录，不影响远端 Session               |
 | 落点对齐   | 运行期产物落在沙箱工作区，稳定产物对齐约定目录；版本链一致                               |

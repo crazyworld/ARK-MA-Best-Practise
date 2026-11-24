@@ -22,6 +22,7 @@ mkdir -p "$OUT_DIR"
 SKILLS=(
   "ma-resources/skills/pipeline-orchestrator|pipeline-orchestrator.zip|pipeline-orchestrator"
   "ma-resources/skills/SSJH-Social-Stat|SSJH-Social-Stat.zip|ssjh-social-stat"
+  "ma-resources/skills/ssjh-social-task|ssjh-social-task.zip|ssjh-social-task"
   "ma-resources/skills/blueai-datahub-skill|blueai-datahub-skill.zip|blueai-datahub-skill"
   "ma-resources/skills/blueai-yuqing-echarts-skill-new|blueai-yuqing-echarts-skill-new.zip|blueai-yuqing-echarts-skill-new"
   "ma-resources/skills/report-cover-skill|report-cover-skill.zip|report-cover-skill"

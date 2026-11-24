@@ -60,7 +60,7 @@ DOCS = {
                            ["skills/SSJH-Social-Stat/（付费外部·成本门后接真）", "module: baseline_lift"], "has_asset"),
     "n07_clean": ("活动 Excel 清洗：按周期过滤、id 去重、派生平台标签、派生 kol_level（头/腰/尾），为分层效能分析打基础。",
                   ["test_run/step1_clean.py", "KS_Classification_Rules.md"], "can_wire"),
-    "n08_ugc_discovery": ("默认根据真实UGC样本动态发现参与方式，标签关卡确认；fixed_four只作显式兼容选项。",
+    "n08_ugc_discovery": ("根据真实UGC样本动态发现参与方式，标签关卡确认；不使用固定类别。",
                           ["skills/blueai-phase-ugc-discovery-skill/", "test_run/phase_discovery.py"], "has_asset"),
     "n09_annotate_r1": ("全量内容打两个基础标签：情感 + 是否活动相关。<1000 条走小引擎(claude-haiku)，≥ 走 DataHub 批量。",
                         ["test_run/step2_round1_annotate.py", "/mnt/skills/blueai-datahub-skill/"], "has_asset"),

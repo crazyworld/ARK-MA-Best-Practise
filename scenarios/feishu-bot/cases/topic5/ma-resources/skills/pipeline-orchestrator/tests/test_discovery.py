@@ -235,14 +235,11 @@ class HandlerTest(unittest.TestCase):
         self.assertTrue(art["not_applicable"])
         self.assertIn("9 条", art["reason"])
 
-    def test_fixed_four_has_no_tendency_words(self):
-        self.st.params["ugc_category_mode"] = "fixed_four"
-        out = handlers.ugc_discovery(
-            {"id": "n08", "outputs": ["ugc_category_list"]}, self.st, {})
-        art = out["artifacts"]["ugc_category_list"]
-        self.assertNotIn("自发安利", art["categories"])
-        self.assertFalse([n for n in art["categories"] if L.tendency_hits(n)])
-        self.assertTrue(art["warnings"])
+    def test_no_fixed_category_fallback(self):
+        """D5：不再提供固定四类，无语义能力时直接报错。"""
+        with patch("semantic.llm_available", return_value=False):
+            with self.assertRaisesRegex(RuntimeError, "能力不可用"):
+                handlers.ugc_discovery({"id": "n08", "outputs": ["ugc_category_list"]}, self.st, {})
 
 
 class PolicyGateTest(unittest.TestCase):
@@ -250,7 +247,7 @@ class PolicyGateTest(unittest.TestCase):
         self.ws = tempfile.mkdtemp()
         self.st = make_state(self.ws)
         self.st.write_artifact("ugc_category_list", {
-            "mode": "fixed_four", "categories": ["模仿打卡", "创意改编", "测评分享", "晒单分享"]})
+            "mode": "dynamic", "categories": ["到店打卡", "开箱测评", "晒单分享", "二创改编"]})
 
     def tearDown(self):
         shutil.rmtree(self.ws, ignore_errors=True)

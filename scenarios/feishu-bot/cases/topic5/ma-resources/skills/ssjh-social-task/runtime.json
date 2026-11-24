@@ -1,0 +1,37 @@
+{
+  "python": ">=3.10",
+  "required": [
+    "requests>=2.31,<3",
+    "PyYAML>=6,<7"
+  ],
+  "xlsx": [
+    "openpyxl>=3.1,<4"
+  ],
+  "doctor": "stdlib entry; reports optional dependency absence",
+  "filesystem": "local persistent storage; exclusive creation, atomic replacement and hardlink publication",
+  "validated_environment": "Windows Python 3.13 CLI; v0.11.6 export/recovery verified with openpyxl 3.1.5, with and without lxml. Supplier checks remain v0.11.5 historical evidence; no target Agent loading or macOS attestation.",
+  "target_runtime": {
+    "compatibility_targets": [
+      "Codex",
+      "Claude Code",
+      "OpenClaw",
+      "Hermes"
+    ],
+    "production_target": "ADA",
+    "basic_compatibility_only": true,
+    "target_runtime_acceptance": "NOT_TESTED"
+  },
+  "budget": "Bundled verified internal rates by explicit owner authorization; default persistent ~/.ssjh_private/budget. Explicit administrator environment overrides take precedence. Fixed 1000 CNY gate.",
+  "acceptance_commands": [
+    "python scripts/check_runtime.py --workspace WORKSPACE --runtime RUNTIME",
+    "python scripts/offline_acceptance.py --output NEW_EXTERNAL_DIRECTORY",
+    "python ssjh_social_task.py --action preflight --config TASK_CONFIG --api-config ADMIN_API_CONFIG"
+  ],
+  "transport": {
+    "remote": "HTTPS; explicit official-http-internal profile permits only http://api.dc.datastory.com.cn/api for count_base_url",
+    "loopback_http": "literal loopback IP only; trusted local gateway or synthetic acceptance",
+    "certificate_verification": "required for HTTPS; no automatic downgrade",
+    "vendor_endpoint_status": "2026-11-06 user approved official HTTP for internal tests; HTTPS certificate defect is not fixed"
+  },
+  "private_access_isolation": "Host/service responsibility; same OS identity is not an analyst secrecy boundary. AUTH-CENTRAL-01 remains deferred."
+}

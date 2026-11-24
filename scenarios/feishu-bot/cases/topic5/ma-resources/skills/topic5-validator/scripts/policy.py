@@ -87,6 +87,49 @@ TENDENCY_TERMS = (
 TENDENCY_NAME_PATTERN = re.compile(r"(好|差|棒|赞|烂|高|低|贵|便宜)$")
 CATCHALL_CATEGORY_NAMES = ("其他", "其它", "未分类", "杂项", "无法归类", "其余")
 
+# ── 报告章节结构（FIX-42，KS_Report_Template §一 固定四章，唯一事实源）────
+# 一品牌 / 二活动（每个活动 2.N.1~2.N.5，末节 2.{N+1} 活动拉升效果）/ 三经验总结 / 四总结与建议。
+REPORT_CHAPTERS = ("一、品牌传播表现", "二、活动传播表现", "三、经验总结", "四、总结与建议")
+BRAND_SECTIONS = (("1.1", "传播概况"), ("1.2", "口碑分析"), ("1.3", "内容分析"), ("1.4", "热门内容"))
+CAMPAIGN_SECTIONS = (("1", "传播概况"), ("2", "提及漏斗分析"), ("3", "口碑分析"),
+                     ("4", "内容分析"), ("5", "热门内容"))
+LIFT_SECTION_TITLE = "活动拉升效果"
+SUMMARY_SECTIONS = (("3.1", "成功经验"), ("3.2", "待改进问题"), ("3.3", "后续行动计划"))
+# 「活动声量渗透」为旧标题，「渗透率」为禁用指标名（检查清单 3.8），不得再出现。
+RETIRED_SECTION_TITLES = ("活动声量渗透", "综合表现定位")
+
+
+def lift_prefix(campaign_count: int) -> str:
+    """活动拉升节编号 2.{N+1}（单活动 = 2.2）。"""
+    return f"2.{max(int(campaign_count), 1) + 1}"
+
+
+# ── Callout 写作规则（FIX-46，KS_Report_Template §Callout / 检查清单 5.14、5.15）────
+INSIGHT_MARK = "> [!insight]"
+TIP_MARK = "> [!tip]"
+CALLOUT_ADVICE_TERMS = ("建议", "应该", "应当", "需要")
+CALLOUT_DEGREE_TERMS = ("非常", "极大", "显著", "明显", "大幅", "很少")
+CALLOUT_METAPHOR_TERMS = ("买到", "换来", "跑赢", "撬动", "破圈")
+CALLOUT_CAUSAL_TERMS = ("带来", "驱动", "拉动", "转化为", "说明用户缺乏兴趣")
+CALLOUT_RULES = (
+    "Callout 规则：整体洞察用 `> [!insight]` 开头的单个引用块，固定三句（判断句 → 数字证据 → 意味着什么），"
+    "不写第四句、不给建议；1.1~1.4、2.N.1~2.N.5、2.{N+1} 各节在正文前用 `> [!tip]` 写一句"
+    "（判断与数字证据在同一句），三、四章不写 callout。共用规则：结论在前、数字不作主语、不以数字开头；"
+    "判断不超出数据（不写因果/动机，如" + "、".join(CALLOUT_CAUSAL_TERMS) + "）；"
+    "禁用程度副词（" + "、".join(CALLOUT_DEGREE_TERMS) + "）与比喻（" + "、".join(CALLOUT_METAPHOR_TERMS) + "）；"
+    "数据无差异写「无明显差异」或「样本不足，不下结论」；同一句的比例分母与主语口径一致。"
+)
+
+# 数据说明区禁止的方法论/版本/口径措辞（FIX-43，KS_Report_Template §零）。
+DESCRIPTION_FORBIDDEN_TERMS = ("版本", "v0.", "口径", "采用", "聚合", "清洗", "抽样", "字段")
+
+# ── 热门内容表固定字段（FIX-22，KS_Report_Template 1.4/2.N.5 P0）──────
+# PGC 表含标题/内容类型/作者；UGC 表不设标题、内容类型、作者（隐私）。
+# 「内容」截断 ≤50 字，超出加省略号。报告组装（report_contract）与质检共用。
+HOT_PGC_COLUMNS = ("排名", "标题", "内容", "内容类型", "站点名称", "作者", "链接", "总互动量")
+HOT_UGC_COLUMNS = ("排名", "内容", "站点名称", "链接", "总互动量")
+HOT_EXCERPT_CHARS = 50
+
 
 def tendency_hits(name: str) -> list[str]:
     """类别名命中的倾向词；以评价词结尾记为「评价后缀」。只判断类别名，不判原文。"""

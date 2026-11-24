@@ -1205,6 +1205,33 @@ class RunnerFinalResultParsingTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "独立身份"):
             self.runner._g3_auto_decision(payload)
 
+    def test_post_handoff_fix_reuses_done_run(self) -> None:
+        """FIX-38：/fix 只作用于话题内已完成任务，沿用原 Run 注入 post-handoff-fix 命令。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = ps.PipelineStore(str(Path(temp_dir) / "fix.db"))
+            job = store.create_job("c", "t1", "u", "session-1", "full",
+                                   "/workspace/ma-workspaces/projects/topic5/tasks/T1/runs/R1")
+            asyncio.set_event_loop(asyncio.new_event_loop())   # py3.9：Runner 构造需要当前事件循环
+            runner = self.runner.Topic5Runner(object(), object(), store,
+                                              self.runner.Topic5Config("agent", "env"))
+            sent = []
+
+            async def fake_resume(current_job, message):
+                sent.append(message)
+
+            runner.resume_job = fake_resume
+            self.assertIsNone(asyncio.run(runner.post_handoff_fix("c", "t1", "改一下")))  # 未完成
+            store.mark_done(job.job_id, online_url="https://feishu/docx/abc")
+            with self.assertRaises(self.runner.Topic5RunnerError):
+                asyncio.run(runner.post_handoff_fix("c", "t1", "  "))
+            fixed = asyncio.run(runner.post_handoff_fix("c", "t1", "2.1 占比写错"))
+            self.assertEqual(fixed.job_id, job.job_id)
+            self.assertIn("post-handoff-fix", sent[0])
+            self.assertIn("--task T1 --run R1", sent[0])
+            self.assertIn("'2.1 占比写错'", sent[0])
+            self.assertIsNone(asyncio.run(runner.post_handoff_fix("c", "other", "x")))
+            store.close()
+
     def test_handle_idle_auto_resumes_g3_without_human_event_or_card(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             store = ps.PipelineStore(str(Path(temp_dir) / "runner.db"))
@@ -1659,6 +1686,42 @@ class HitlActionParsingTest(unittest.TestCase):
         self.assertIn("1063002", rendered)
         self.assertIn("Permission denied", rendered)
         self.assertIn("ou_target", rendered)
+        # FIX-35：三选一。外部权限类 P0 仍列入放宽下拉，由 hc_bridge 拒绝（不可放宽）。
+        for label in ("放宽该项并留痕", "补充数据后重做", "终止项目"):
+            self.assertIn(label, rendered)
+        self.assertNotIn("打回并继续", rendered)
+
+    def test_g4_card_has_qc_time_checklist_and_change_type(self) -> None:
+        job = ps.PipelineJob(job_id="job_x", chat_id="c", thread_id="", user_open_id="u",
+                             ma_session_id="s", mode="full", project_dir="d")
+        payload = {"node": "n21_hc_user", "review_context": {
+            "delivery_draft": {"url": "https://x/docx/d", "revision_id": 3},
+            "qc_generated_at": 1795500000, "numbers_check": {"checked": 5, "missing": []},
+            "waivers": [{"issue_id": "P0-a", "title": "缺原帖", "reason": "客户接受"}],
+            "checklist": ["传播概况单平台不分栏"]}}
+        rendered = json.dumps(self.hitl.build_hc_card(job, "G4", 7, payload), ensure_ascii=False)
+        for text in ("质检通过时间", "5 项一致", "经用户确认放宽", "单平台不分栏",
+                     "确认后如再修改，需要重新确认", "仅版式修改"):
+            self.assertIn(text, rendered)
+
+    def test_collect_card_and_note(self) -> None:
+        job = ps.PipelineJob(job_id="job_x", chat_id="c", thread_id="", user_open_id="u",
+                             ma_session_id="s", mode="full", project_dir="d")
+        payload = {"node": "n03b_activity_pull", "prompt": json.dumps({"collection_authorization_required": [
+            {"campaign": "A", "estimated_volume": 1200, "estimate": {"relation": "MATCHED"}}]})}
+        rendered = json.dumps(self.hitl.build_hc_card(job, "HC_COLLECT", 7, payload), ensure_ascii=False)
+        for text in ("预检声量约 1200 条", "授权采集", "只抓帖子", "上传活动明细"):
+            self.assertIn(text, rendered)
+        self.assertNotIn("单价", rendered)
+        note = json.loads(self.hitl.collect_note(payload, {"max_0": "1500"}, "ou_u", 7))
+        self.assertEqual(note["campaigns"]["A"], {"max_records": 1500, "confirmation_ref": "feishu-hc:7:ou_u"})
+        with self.assertRaises(ValueError):
+            self.hitl.collect_note(payload, {"max_0": "abc"}, "ou_u", 7)
+
+    def test_hc7_note_relax_payload(self) -> None:
+        note = self.hitl.hc7_note("relax", {"issue_ids": ["P0-a"], "relax_reason": " 客户接受 "}, "张三")
+        self.assertEqual(json.loads(note), {"issue_ids": ["P0-a"], "reason": "客户接受", "operator": "张三"})
+        self.assertEqual(self.hitl.hc7_note("terminate", {"terminate_reason": "取消"}), "取消")
 
     def test_g1_submit_is_independent_of_file_attach(self) -> None:
         base = dict(
@@ -1807,9 +1870,17 @@ class HitlActionParsingTest(unittest.TestCase):
                 "operator": {"open_id": "ou_test"},
                 "chat_id": "c",
             }
-            asyncio.run(facade.handle_card_action(action))
+            # FIX-04：upload 模式保持「等待上传」；默认 auto 模式直接续跑自动采集（G2 pass: auto）。
+            with patch.object(self.hitl, "ACTIVITY_DATA_MODE", "upload"):
+                asyncio.run(facade.handle_card_action(action))
             self.assertEqual(calls, ["wait_input"])
             self.assertEqual(store.get_hc_event(event_id).user_decision, "pass")
+            store.mark_wait_hc(job.job_id, "G2")
+            event_auto = store.append_hc_event(job.job_id, "G2", payload)
+            action["action"]["value"]["event_id"] = event_auto
+            with patch.object(self.hitl, "ACTIVITY_DATA_MODE", "auto"):
+                asyncio.run(facade.handle_card_action(action))
+            self.assertEqual(calls, ["wait_input", "resume"])
             store.close()
 
     def test_g2_pass_rejects_inconsistent_bundle_hash(self) -> None:
