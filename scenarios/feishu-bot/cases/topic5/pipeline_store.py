@@ -40,6 +40,10 @@ DEFAULT_PIPELINE_DB_PATH = str(
 STATUS_RUNNING = "running"
 STATUS_WAIT_HC = "wait_hc"
 STATUS_WAIT_INPUT = "wait_input"
+# Phase1 Step0–2：等待用户在话题内补充需求描述（模板 / Skill 澄清问题已发出）。
+STATUS_WAIT_INTAKE = "wait_intake"
+INTAKE_PHASE_TEMPLATE = "intake_template"   # 只发了模板，Session 尚未收到开场消息
+INTAKE_PHASE_CLARIFY = "intake"             # Skill 已在 Session 内执行，等待澄清答复
 STATUS_STOPPING = "stopping"
 STATUS_PAUSED = "paused"
 STATUS_DONE = "done"
@@ -477,7 +481,7 @@ class PipelineStore:
                     SELECT * FROM pipeline_jobs
                     WHERE chat_id = ?
                       AND (thread_id = ? OR topic_thread_id = ?)
-                      AND status IN (?, ?, ?, ?, ?, ?)
+                      AND status IN (?, ?, ?, ?, ?, ?, ?)
                     ORDER BY started_at DESC LIMIT 1
                     """,
                     (
@@ -487,6 +491,7 @@ class PipelineStore:
                         STATUS_RUNNING,
                         STATUS_WAIT_HC,
                         STATUS_WAIT_INPUT,
+                        STATUS_WAIT_INTAKE,
                         STATUS_STOPPING,
                         STATUS_PAUSED,
                         STATUS_ARCHIVED_PAUSED,
@@ -500,7 +505,7 @@ class PipelineStore:
                     SELECT * FROM pipeline_jobs
                     WHERE chat_id = ? AND user_open_id = ?
                       AND thread_id = '' AND topic_thread_id = ''
-                      AND status IN (?, ?, ?, ?, ?, ?)
+                      AND status IN (?, ?, ?, ?, ?, ?, ?)
                     ORDER BY started_at DESC LIMIT 1
                     """,
                     (
@@ -509,6 +514,7 @@ class PipelineStore:
                         STATUS_RUNNING,
                         STATUS_WAIT_HC,
                         STATUS_WAIT_INPUT,
+                        STATUS_WAIT_INTAKE,
                         STATUS_STOPPING,
                         STATUS_PAUSED,
                         STATUS_ARCHIVED_PAUSED,
@@ -529,7 +535,7 @@ class PipelineStore:
                 SELECT * FROM pipeline_jobs
                 WHERE chat_id = ?
                   AND (thread_id = ? OR topic_thread_id = ?)
-                  AND status IN (?, ?, ?, ?, ?, ?)
+                  AND status IN (?, ?, ?, ?, ?, ?, ?)
                 ORDER BY started_at DESC LIMIT 1
                 """,
                 (
@@ -539,6 +545,7 @@ class PipelineStore:
                     STATUS_RUNNING,
                     STATUS_WAIT_HC,
                     STATUS_WAIT_INPUT,
+                    STATUS_WAIT_INTAKE,
                     STATUS_STOPPING,
                     STATUS_PAUSED,
                     STATUS_ARCHIVED_PAUSED,
@@ -576,7 +583,7 @@ class PipelineStore:
                     SELECT * FROM pipeline_jobs
                     WHERE chat_id = ?
                       AND (thread_id = ? OR topic_thread_id = ?)
-                      AND status IN (?, ?, ?, ?, ?, ?)
+                      AND status IN (?, ?, ?, ?, ?, ?, ?)
                     ORDER BY updated_at DESC LIMIT 1
                     """,
                     (
@@ -586,6 +593,7 @@ class PipelineStore:
                         STATUS_RUNNING,
                         STATUS_WAIT_HC,
                         STATUS_WAIT_INPUT,
+                        STATUS_WAIT_INTAKE,
                         STATUS_FAILED,
                         STATUS_PAUSED,
                         STATUS_ARCHIVED_PAUSED,
@@ -597,7 +605,7 @@ class PipelineStore:
                     SELECT * FROM pipeline_jobs
                     WHERE chat_id = ? AND user_open_id = ?
                       AND thread_id = '' AND topic_thread_id = ''
-                      AND status IN (?, ?, ?, ?, ?, ?)
+                      AND status IN (?, ?, ?, ?, ?, ?, ?)
                     ORDER BY updated_at DESC LIMIT 1
                     """,
                     (
@@ -606,6 +614,7 @@ class PipelineStore:
                         STATUS_RUNNING,
                         STATUS_WAIT_HC,
                         STATUS_WAIT_INPUT,
+                        STATUS_WAIT_INTAKE,
                         STATUS_FAILED,
                         STATUS_PAUSED,
                         STATUS_ARCHIVED_PAUSED,
@@ -619,13 +628,14 @@ class PipelineStore:
             row = self._conn.execute(
                 """
                 SELECT * FROM pipeline_jobs
-                WHERE status IN (?, ?, ?, ?, ?, ?)
+                WHERE status IN (?, ?, ?, ?, ?, ?, ?)
                 ORDER BY started_at DESC LIMIT 1
                 """,
                 (
                     STATUS_RUNNING,
                     STATUS_WAIT_HC,
                     STATUS_WAIT_INPUT,
+                    STATUS_WAIT_INTAKE,
                     STATUS_STOPPING,
                     STATUS_PAUSED,
                     STATUS_ARCHIVED_PAUSED,
@@ -639,13 +649,14 @@ class PipelineStore:
             rows = self._conn.execute(
                 """
                 SELECT * FROM pipeline_jobs
-                WHERE status IN (?, ?, ?, ?)
+                WHERE status IN (?, ?, ?, ?, ?)
                 ORDER BY started_at ASC
                 """,
                 (
                     STATUS_RUNNING,
                     STATUS_WAIT_HC,
                     STATUS_WAIT_INPUT,
+                    STATUS_WAIT_INTAKE,
                     STATUS_STOPPING,
                 ),
             ).fetchall()
@@ -718,6 +729,56 @@ class PipelineStore:
                 (STATUS_WAIT_INPUT, "input", _now(), job_id),
             )
         self._notify_status(job_id, STATUS_WAIT_INPUT)
+
+    def mark_wait_intake(self, job_id: str, phase: str = INTAKE_PHASE_CLARIFY) -> None:
+        """Phase1：模板（intake_template，Session 尚未开跑）或澄清问题（intake）已发出。"""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE pipeline_jobs SET status = ?, current_phase = ?, updated_at = ? "
+                "WHERE job_id = ?",
+                (STATUS_WAIT_INTAKE, phase, _now(), job_id),
+            )
+        self._notify_status(job_id, STATUS_WAIT_INTAKE)
+
+    def claim_intake_reply(self, job_id: str) -> Optional[str]:
+        """原子认领一条需求补充：wait_intake → running，返回认领前的 phase；已被认领返回 None。"""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT current_phase FROM pipeline_jobs WHERE job_id = ? AND status = ?",
+                (job_id, STATUS_WAIT_INTAKE),
+            ).fetchone()
+            if row is None:
+                return None
+            cursor = self._conn.execute(
+                "UPDATE pipeline_jobs SET status = ?, current_phase = ?, updated_at = ? "
+                "WHERE job_id = ? AND status = ?",
+                (STATUS_RUNNING, INTAKE_PHASE_CLARIFY, _now(), job_id, STATUS_WAIT_INTAKE),
+            )
+        if cursor.rowcount != 1:
+            return None
+        self._notify_status(job_id, STATUS_RUNNING)
+        return str(row["current_phase"])
+
+    def get_wait_intake_job(
+        self, chat_id: str, thread_id: str, user_open_id: str
+    ) -> Optional[PipelineJob]:
+        """定位等待需求补充的任务：话题内不限发送人；无话题（单聊）按发起人。"""
+        thread = thread_id or ""
+        with self._lock:
+            if thread:
+                row = self._conn.execute(
+                    "SELECT * FROM pipeline_jobs WHERE chat_id = ? "
+                    "AND (thread_id = ? OR topic_thread_id = ?) AND status = ? "
+                    "ORDER BY updated_at DESC LIMIT 1",
+                    (chat_id, thread, thread, STATUS_WAIT_INTAKE),
+                ).fetchone()
+            else:
+                row = self._conn.execute(
+                    "SELECT * FROM pipeline_jobs WHERE chat_id = ? AND user_open_id = ? "
+                    "AND status = ? ORDER BY updated_at DESC LIMIT 1",
+                    (chat_id, user_open_id, STATUS_WAIT_INTAKE),
+                ).fetchone()
+        return self._row_to_job(row) if row else None
 
     def resume_running(self, job_id: str, next_phase: str) -> None:
         with self._lock:
@@ -817,7 +878,7 @@ class PipelineStore:
                 UPDATE pipeline_jobs
                 SET status = ?, stop_requested_at = ?, stop_requested_by = ?,
                     updated_at = ?
-                WHERE job_id = ? AND status IN (?, ?, ?)
+                WHERE job_id = ? AND status IN (?, ?, ?, ?)
                 """,
                 (
                     STATUS_STOPPING,
@@ -828,6 +889,7 @@ class PipelineStore:
                     STATUS_RUNNING,
                     STATUS_WAIT_HC,
                     STATUS_WAIT_INPUT,
+                    STATUS_WAIT_INTAKE,
                 ),
             )
         if cursor.rowcount:

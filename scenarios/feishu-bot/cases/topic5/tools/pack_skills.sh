@@ -28,6 +28,7 @@ SKILLS=(
   "ma-resources/skills/report-cover-skill|report-cover-skill.zip|report-cover-skill"
   "ma-resources/skills/wordcloud-insight|wordcloud-insight.zip|wordcloud-insight"
   "ma-resources/skills/topic5-validator|topic5-validator.zip|topic5-validator"
+  "ma-resources/skills/campaign-keyword-generation|campaign-keyword-generation.zip|campaign-keyword-generation"
 )
 
 MAX_UPLOAD=$((30 * 1024 * 1024))

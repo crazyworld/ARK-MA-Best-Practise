@@ -26,6 +26,7 @@ try:
     from .artifact_sync import Topic5ArtifactSync
     from .pipeline_store import (
         STATUS_RUNNING, STATUS_STOPPING, STATUS_WAIT_HC, STATUS_WAIT_INPUT, PipelineStore,
+        STATUS_WAIT_INTAKE,
     )
     from .topic5_hitl import Topic5Hitl, Topic5HitlDeps
     from .topic5_runner import (
@@ -41,6 +42,7 @@ except ImportError:  # pragma: no cover - standalone compatibility
     from artifact_sync import Topic5ArtifactSync
     from pipeline_store import (
         STATUS_RUNNING, STATUS_STOPPING, STATUS_WAIT_HC, STATUS_WAIT_INPUT, PipelineStore,
+        STATUS_WAIT_INTAKE,
     )
     from topic5_hitl import Topic5Hitl, Topic5HitlDeps
     from topic5_runner import (
@@ -56,7 +58,7 @@ except ImportError:  # pragma: no cover - standalone compatibility
 log = logging.getLogger("arkagent.case.topic5")
 # 过程文件同步持续到任务离开这些状态（终态/暂停后再做最后一次同步即停止）。
 ACTIVE_SYNC_STATUSES = frozenset(
-    {STATUS_RUNNING, STATUS_WAIT_HC, STATUS_WAIT_INPUT, STATUS_STOPPING}
+    {STATUS_RUNNING, STATUS_WAIT_HC, STATUS_WAIT_INPUT, STATUS_WAIT_INTAKE, STATUS_STOPPING}
 )
 CONTINUE_COMMAND_RE = re.compile(r"^/(?:continue|resume)(?:\s+(.*))?$", re.IGNORECASE)
 # FIX-38：交接后修正（话题内，任务已完成时）。
@@ -65,7 +67,8 @@ FIX_COMMAND_RE = re.compile(r"^/fix(?:\s+(.*))?$", re.IGNORECASE | re.DOTALL)
 _USAGE = (
     "当前 Bot 启用 topic5 复盘报告场景。发送「复盘报告 demo」"
     "(G1 自动预填，清洗后活动明细最多 500 条)或"
-    "「复盘报告 full」(G1 空表，全量，默认)触发;两者质量门禁相同。"
+    "「复盘报告 full」(全量，默认；可直接附上活动描述、起止日期和平台，关键词由系统生成)触发;"
+    "两者质量门禁相同。"
     "发送 /continue 续跑最近一次任务;发送 /new 可取消当前任务。"
 )
 
@@ -94,7 +97,7 @@ class Topic5Gateway:
         self._timeout_task: asyncio.Task | None = None
 
     def accept(self, message: IncomingMessage) -> bool:
-        if not _should_handle_message(message):
+        if not _should_handle_message(message, self._pipeline_store):
             return False
         if not self._store.claim_event(message.event_id):
             return False
@@ -249,6 +252,16 @@ class Topic5Gateway:
                 self._store.complete_event(message.event_id, "completed")
                 return
 
+            # Phase1：等待需求补充时，话题内文字直接作为需求描述/补充（无需 @）。
+            if await self._runner.handle_intake_reply(
+                chat_id=message.chat_id,
+                thread_id=message.thread_id,
+                user_open_id=message.user_open_id,
+                text=text,
+            ):
+                self._store.complete_event(message.event_id, "completed")
+                return
+
             if await self._hitl.handle_remark_message(
                 chat_id=message.chat_id,
                 thread_id=message.thread_id,
@@ -284,13 +297,23 @@ class Topic5Gateway:
             await self._reply(message.chat_id, f"执行失败:{reason[:240]}")
 
 
-def _should_handle_message(message: IncomingMessage) -> bool:
+def _should_handle_message(
+    message: IncomingMessage, pipeline_store: PipelineStore | None = None
+) -> bool:
     if message.resources:
         # 群聊主时间线的普通附件不抢占；话题内附件由当前关卡判断，无需再次 @bot。
         return message.chat_type == "p2p" or bool(message.thread_id)
     if not message.text.strip():
         return False
-    return message.chat_type == "p2p" or message.mentioned_bot
+    if message.chat_type == "p2p" or message.mentioned_bot:
+        return True
+    # Phase1：任务话题处于「等待需求补充」时，话题内回复无需 @（仅限该话题）。
+    return bool(
+        message.thread_id
+        and pipeline_store is not None
+        and pipeline_store.get_wait_intake_job(
+            message.chat_id, message.thread_id, message.user_open_id)
+    )
 
 
 _COORDINATOR_AGENT_JSON = Path(__file__).resolve().parent / "ma-resources" / "agents" / "coordinator.json"

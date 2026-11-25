@@ -40,6 +40,7 @@ SKILLS = [
     ("report-cover-skill", "report-cover-skill.zip", "topic5 · 报告封面生成"),
     ("wordcloud-insight", "wordcloud-insight.zip", "topic5 · 完整词云议题分析与双版配图 v0.2.6"),
     ("topic5-validator", "topic5-validator.zip", "topic5 · 报告质检(G3 / n17_validate)"),
+    ("campaign-keyword-generation", "campaign-keyword-generation.zip", "topic5 · Phase1 需求理解与品牌/活动关键词生成 v1.1.0"),
 ]
 
 

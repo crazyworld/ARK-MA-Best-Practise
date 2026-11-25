@@ -98,7 +98,17 @@ def write_hc_pending(st, run_dir: Path) -> dict:
         "expect": human.get("expect", []),
         "status": "awaiting_human",
     }
-    if node_id == "n03_hc_plan":
+    if node_id == "n01_hc_requirement":
+        # 需求变更回退到表单时，用上次 Skill 结果预填（预置需求已作废，只读其留痕）。
+        meta = st.artifacts.get("requirement_preset") or {}
+        try:
+            preset = json.loads(Path(meta["path"]).read_text(encoding="utf-8")) if meta else {}
+            previous = json.loads(preset.get("note") or "{}")
+        except (OSError, ValueError, KeyError):
+            previous = {}
+        if isinstance(previous, dict) and previous.get("keyword_generation"):
+            payload["keyword_generation"] = previous["keyword_generation"]
+    elif node_id == "n03_hc_plan":
         payload["review_context"] = {
             "analysis_plan": st.read_artifact("analysis_plan") or {},
             "execution_plan": st.read_artifact("execution_plan") or {},
@@ -237,6 +247,27 @@ def _parse_requirement(note: str) -> dict:
     if value.get("content_scope") not in ("all", "ugc", "pgc"):
         raise ValueError("G1 content_scope 必须是 all/ugc/pgc")
     return _with_traceability(value)
+
+
+G1_AUTHORITY_SKILL = "skill_auto_adopted"
+
+
+def confirmed_requirement(note: str, *, authority: str) -> dict:
+    """G1 冻结的需求快照。authority=user（表单提交）或 skill_auto_adopted（原版 Phase1
+    v1.12：campaign-keyword-generation 返回 ready 后直接采用，HC-T5-0 仅展示不确认）。"""
+    requirement = _parse_requirement(note)
+    if authority == G1_AUTHORITY_SKILL and not (
+            requirement.get("keyword_generation") or {}).get("status") == "ready":
+        raise ValueError("G1 自动采用须附带 keyword_generation.status=ready 的 Skill 留痕")
+    return {
+        **requirement,
+        "confirmed": True,
+        "validator_precheck": {
+            "status": "passed",
+            "rules": ["required_fields", "date_range", "content_scope"],
+            "authority": authority,
+        },
+    }
 
 
 # FIX-09：需求留痕字段（原话/更正/来源/Skill 调用/交付要求）。
@@ -793,7 +824,8 @@ def build_human_outputs(
                 expect[0] if expect else "escalation_decision": {
                     "decision": decision, "note": note, "escalated": True, "release_authorized": False},
                 "_control": {"next": "n00_intake", "gate_status": "rejected",
-                             "invalidate_artifacts": ["requirement_confirmed"] + REDO_INVALIDATE},
+                             "invalidate_artifacts": ["requirement_confirmed", "requirement_preset"]
+                             + REDO_INVALIDATE},
             }
         if decision == "quality_issue":
             st.counters["user_rework_rounds"] = USER_REWORK_MAX - 1
@@ -818,21 +850,10 @@ def build_human_outputs(
                 "_control": {
                     "next": "n00_intake",
                     "gate_status": "rejected",
-                    "invalidate_artifacts": ["requirement_confirmed"],
+                    "invalidate_artifacts": ["requirement_confirmed", "requirement_preset"],
                 },
             }
-        requirement = _parse_requirement(note)
-        return {"requirement_confirmed": {
-            **requirement,
-            "confirmed": True,
-            "validator_precheck": {
-                "status": "passed",
-                "rules": [
-                    "required_fields", "date_range", "content_scope",
-                ],
-                "authority": "user",
-            },
-        }}
+        return {"requirement_confirmed": confirmed_requirement(note, authority="user")}
     if node_id == "n03_hc_plan":
         requirement = st.read_artifact("requirement_confirmed") or {}
         analysis_plan = st.read_artifact("analysis_plan") or {}

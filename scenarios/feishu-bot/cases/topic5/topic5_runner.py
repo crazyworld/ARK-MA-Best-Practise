@@ -41,6 +41,9 @@ from arkagent.feishu import FeishuSender, ResourceRef
 from arkagent.session_state import is_session_resumable, session_status_from_payload
 try:
     from .pipeline_store import (
+        INTAKE_PHASE_CLARIFY,
+        INTAKE_PHASE_TEMPLATE,
+        STATUS_WAIT_INTAKE,
         FAILURE_SCOPE_SESSION,
         FAILURE_SCOPE_TASK,
         HC_KINDS,
@@ -56,7 +59,15 @@ try:
         PipelineJob,
         PipelineStore,
     )
-    from .topic5_intake import IntakeValidationError, validate_xlsx_container
+    from .topic5_intake import (
+        IntakeValidationError,
+        clarification_text,
+        has_requirement_description,
+        intake_summary_text,
+        intake_template_text,
+        requirement_from_skill_result,
+        validate_xlsx_container,
+    )
     from .artifact_sync import ReplayBundleError, build_replay_bundle
     from .topic5_progress_card import (
         MAX_TOOL_LINES,
@@ -65,6 +76,9 @@ try:
     )
 except ImportError:  # pragma: no cover - standalone compatibility
     from pipeline_store import (
+        INTAKE_PHASE_CLARIFY,
+        INTAKE_PHASE_TEMPLATE,
+        STATUS_WAIT_INTAKE,
         FAILURE_SCOPE_SESSION,
         FAILURE_SCOPE_TASK,
         HC_KINDS,
@@ -80,7 +94,15 @@ except ImportError:  # pragma: no cover - standalone compatibility
         PipelineJob,
         PipelineStore,
     )
-    from topic5_intake import IntakeValidationError, validate_xlsx_container
+    from topic5_intake import (
+        IntakeValidationError,
+        clarification_text,
+        has_requirement_description,
+        intake_summary_text,
+        intake_template_text,
+        requirement_from_skill_result,
+        validate_xlsx_container,
+    )
     from artifact_sync import ReplayBundleError, build_replay_bundle
     from topic5_progress_card import (
         MAX_TOOL_LINES,
@@ -140,6 +162,7 @@ def activity_attachment_hint(job: PipelineJob) -> str:
     if job.status == STATUS_WAIT_INPUT or is_source_repairable_failure(job) or is_collect_gate(job):
         return ""
     status_hints = {
+        STATUS_WAIT_INTAKE: "当前正在梳理复盘需求。请先在本话题用文字描述或补充需求；活动明细会在方案确认后接收。",
         STATUS_PAUSED: "任务已暂停。请先点击“继续任务”恢复流程；发送附件不会自动继续任务。",
         STATUS_STOPPING: "任务正在暂停，请等待暂停完成后再操作；当前不接收活动明细。",
         STATUS_STOPPED: "任务已停止，不再接收活动明细；如需重新分析，请新建任务。",
@@ -183,6 +206,7 @@ def _event_contract_text(event: dict) -> str:
     if (
         "HC_PENDING " in body
         or "FINAL_RESULT " in body
+        or "INTAKE_RESULT " in body
         or re.search(r"\bstatus\s*[:=]\s*failed\b", body, re.IGNORECASE)
     ):
         return body
@@ -351,6 +375,37 @@ def _repair_truncated_json_object(candidate: str) -> Optional[dict]:
     return repaired if isinstance(repaired, dict) else None
 
 
+INTAKE_RESULT_MARKER = "INTAKE_RESULT "
+INTAKE_STATUSES = ("ready", "need_clarification", "blocked", "need_input")
+# 需求口径预检失败回注 Skill 修正的上限；超限判失败，避免无限循环。
+INTAKE_REPAIR_MAX = 3
+
+
+def extract_intake_result(texts: list[str]) -> dict:
+    """取本轮最后一个 ``INTAKE_RESULT {json}``（intake_result.py emit 的唯一交接行）。"""
+    decoder = json.JSONDecoder()
+    for text in reversed(texts or []):
+        index = (text or "").rfind(INTAKE_RESULT_MARKER)
+        while index >= 0:
+            try:
+                value, _ = decoder.raw_decode(text[index + len(INTAKE_RESULT_MARKER):].lstrip())
+            except json.JSONDecodeError:
+                value = None
+            if isinstance(value, dict) and value.get("status") in INTAKE_STATUSES:
+                return value
+            index = text.rfind(INTAKE_RESULT_MARKER, 0, index)
+    return {}
+
+
+def build_start_prompt(mode: str, user_message: str, *, intake: str) -> str:
+    """开场消息：intake=skill 先按 Skill 受理需求；intake=skip（demo）直接启动编排器。"""
+    return (
+        f"[topic5] 触发词=复盘报告 mode={mode} intake={intake}\n"
+        f"请按 topic5-coordinator system prompt 驱动 run_pipeline.py 执行复盘报告 pipeline。\n"
+        f"用户原始消息:{user_message}"
+    )
+
+
 def extract_project_dir(text: str) -> Optional[str]:
     """解析 Coordinator 的 ``[run_dir]`` / ``[project_dir]`` 状态标记(沙箱 run 目录)。"""
     if not text:
@@ -509,6 +564,7 @@ class Topic5Runner:
         self._active_streams: dict[str, asyncio.Task] = {}
         self._progress: dict[str, "_ProgressState"] = {}
         self._card_locks: dict[str, asyncio.Lock] = {}
+        self._intake_repairs: dict[str, int] = {}
 
     async def _send_message(self, session_id: str, text: str) -> None:
         """向 MA Session 注入 user.message 的唯一入口（启动、HC 续跑、重试、/continue 均经此）。
@@ -683,11 +739,11 @@ class Topic5Runner:
             job.job_id, session_id, mode, chat_id, user_open_id,
         )
 
-        prompt = (
-            f"[topic5] 触发词=复盘报告 mode={mode}\n"
-            f"请按 topic5-coordinator system prompt 驱动 run_pipeline.py 执行复盘报告 pipeline。\n"
-            f"用户原始消息:{user_message}"
-        )
+        # 原版 Phase1 v1.12 Step0：demo 沿用固定样例 G1 表单；full 走自然语言入口——
+        # 已附带需求描述立即交 Skill，只唤起未描述则原样发送 Intake 模板并等待描述。
+        send_template = mode != "demo" and not has_requirement_description(user_message)
+        prompt = build_start_prompt(
+            mode, user_message, intake="skip" if mode == "demo" else "skill")
         state = _ProgressState()
         self._progress[job.job_id] = state
         self._card_locks[job.job_id] = asyncio.Lock()
@@ -715,9 +771,83 @@ class Topic5Runner:
             job.progress_card_message_id = message_id
             state.last_signature = self._signature(card)
 
+        if send_template:
+            self._store.mark_wait_intake(job.job_id, INTAKE_PHASE_TEMPLATE)
+            await self._render_and_patch(job.job_id, status=STATUS_WAIT_INTAKE, force=True)
+            await self.reply_for_job(job, intake_template_text())
+            return self._store.get_job(job.job_id) or job
         task = self._spawn_stream(job, first_user_message=prompt)
         self._active_streams[session_id] = task
         return job
+
+    async def handle_intake_reply(
+        self, *, chat_id: str, thread_id: str, user_open_id: str, text: str,
+    ) -> bool:
+        """话题内需求描述/补充（无需 @）：只在 wait_intake 时接收，原子认领后回注 Session。"""
+        note = (text or "").strip()
+        if not note:
+            return False
+        job = self._store.get_wait_intake_job(chat_id, thread_id, user_open_id)
+        if job is None:
+            return False
+        phase = self._store.claim_intake_reply(job.job_id)
+        if phase is None:
+            await self.reply_for_job(job, "上一条补充正在处理，请稍候。")
+            return True
+        if phase == INTAKE_PHASE_TEMPLATE:
+            message = build_start_prompt(job.mode, note, intake="skill")
+        else:
+            message = f"[topic5-intake] 用户补充: {note}"
+        await self.reply_for_job(job, "已收到补充，正在更新需求理解。")
+        refreshed = self._store.get_job(job.job_id) or job
+        await self.resume_job(refreshed, message)
+        return True
+
+    async def _handle_intake_result(self, job: PipelineJob, intake: dict) -> None:
+        """消费 INTAKE_RESULT：转达问题 / 判失败 / 冻结需求并展示 HC-T5-0 后启动编排器。"""
+        status = intake.get("status")
+        if status == "need_input":
+            self._store.mark_wait_intake(job.job_id, INTAKE_PHASE_CLARIFY)
+            await self._render_and_patch(job.job_id, status=STATUS_WAIT_INTAKE, force=True)
+            await self.reply_for_job(job, intake_template_text())
+            return
+        if status == "need_clarification":
+            self._store.mark_wait_intake(job.job_id, INTAKE_PHASE_CLARIFY)
+            await self._render_and_patch(job.job_id, status=STATUS_WAIT_INTAKE, force=True)
+            await self.reply_for_job(job, clarification_text(intake))
+            return
+        if status == "blocked":
+            reason = ("intake_blocked: " + str(intake.get("reason") or "关键词口径无法形成"))[:400]
+            self._store.mark_failed(job.job_id, reason)
+            await self._render_and_patch(job.job_id, status=STATUS_FAILED, error=reason, force=True)
+            return
+        try:
+            requirement = requirement_from_skill_result(intake)
+        except IntakeValidationError as error:
+            count = self._intake_repairs.get(job.job_id, 0) + 1
+            self._intake_repairs[job.job_id] = count
+            if count > INTAKE_REPAIR_MAX:
+                reason = f"intake_invalid: 口径预检连续 {INTAKE_REPAIR_MAX} 次未通过：{error}"[:400]
+                self._store.mark_failed(job.job_id, reason)
+                await self._render_and_patch(
+                    job.job_id, status=STATUS_FAILED, error=reason, force=True)
+                return
+            log.warning("topic5 intake requirement invalid job=%s: %s", job.job_id, error)
+            await self.resume_job(job, f"[topic5-intake] 口径校验失败: {error}")
+            return
+        self._intake_repairs.pop(job.job_id, None)
+        # 审计：以已处理的 G1 记录冻结快照（进度卡持续展示），操作人标明为能力自动采用。
+        audit = json.dumps(requirement, ensure_ascii=False, separators=(",", ":"))
+        event_id = self._store.append_hc_event(
+            job.job_id, "G1", {"node": "n01_hc_requirement", "source": "skill_auto_adopted"})
+        self._store.resolve_hc_event(
+            event_id, "pass", audit, operator_label="关键词生成能力自动采用")
+        await self.reply_for_job(job, intake_summary_text(requirement))
+        note = await self.attach_requirement_payload(job, requirement, event_id)
+        # 离开受理阶段：后续空闲按编排器契约判定，不再按「受理未交接」处理。
+        self._store.update_phase(job.job_id, "n01_hc_requirement")
+        refreshed = self._store.get_job(job.job_id) or job
+        await self.resume_job(refreshed, f"[topic5-intake] ready requirement: {note}")
 
     async def resume_job(self, job: PipelineJob, decision_message: str) -> None:
         """HITL 卡片回调路径:注入 user.message(``HCx pass/reject/remark: note``)后重订 SSE。"""
@@ -1160,6 +1290,9 @@ class Topic5Runner:
                 job.job_id, status=STATUS_WAIT_INPUT, force=True
             )
             return STATUS_WAIT_INPUT
+        if job.status == STATUS_WAIT_INTAKE:
+            await self._render_and_patch(job.job_id, status=STATUS_WAIT_INTAKE, force=True)
+            return STATUS_WAIT_INTAKE
         events = await self._ark.list_session_events(job.ma_session_id)
         if job.status == STATUS_STOPPING:
             return "stopping"
@@ -1435,6 +1568,18 @@ class Topic5Runner:
                 job_id, status=STATUS_FAILED, error=reason, force=True
             )
             return
+        intake = {} if envelope else extract_intake_result(collected)
+        if intake:
+            await self._handle_intake_result(job, intake)
+            return
+        if not envelope and job.current_phase in (INTAKE_PHASE_CLARIFY, INTAKE_PHASE_TEMPLATE):
+            payload = _best_hc_payload(collected)
+            if payload is None:
+                reason = "intake: 需求受理未输出 INTAKE_RESULT，可发送 /continue 重试"
+                self._store.mark_failed(job_id, reason)
+                await self._render_and_patch(
+                    job_id, status=STATUS_FAILED, error=reason, force=True)
+                return
         # A terminal result supersedes HC envelopes read from historical logs.
         payload = None if envelope else _best_hc_payload(collected)
         if payload is None and not envelope:

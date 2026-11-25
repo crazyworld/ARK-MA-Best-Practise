@@ -684,6 +684,11 @@ def normalize_requirement(form_value: dict[str, Any]) -> dict:
         # Phase1 v1.10:129：未补入填「无」。
         "brand_supplement_activity_terms": (
             _clean_text(raw.get("brand_supplement_activity_terms")) or "无"),
+        # Phase1 v1.12 Step2-5：关键词生成 Skill 的完整调用留痕与采用来源（G1 表单路径为空）。
+        "keyword_generation": (
+            dict(raw["keyword_generation"])
+            if isinstance(raw.get("keyword_generation"), dict) else {}),
+        "requirement_source": _clean_text(raw.get("requirement_source")) or "g1_form",
     }
     missing = [FIELD_LABELS[key] for key in REQUIRED_FIELDS if not normalized.get(key)]
     if missing:
@@ -954,7 +959,7 @@ def _escape_markdown(value: Any) -> str:
     return text
 
 
-def requirement_parsed_summary(requirement: dict) -> str:
+def requirement_parsed_summary(requirement: dict, head: str = "") -> str:
     """G1 卡片顶部「业务解析」摘要（FIX-09）。
 
     原版 HC-T5-0 口径（Phase1_需求梳理 v1.10:157-161）：
@@ -1032,10 +1037,17 @@ def requirement_parsed_summary(requirement: dict) -> str:
     merged = requirement.get("merge_window") or {}
     if merged.get("start") and len(requirement.get("campaigns") or []) > 1:
         lines.insert(1, f"合并窗口：{merged['start']} ～ {merged['end']}")
+    campaigns = requirement.get("campaigns") or []
+    if len(campaigns) > 1:
+        # 原版 HC-T5-0：展示各活动周期及合并窗口。
+        lines.extend(
+            f"活动周期 · {c.get('name')}：{c.get('period_start') or '未填写'} ～ "
+            f"{c.get('period_end') or '未填写'}"
+            for c in campaigns if isinstance(c, dict))
     if not lines:
         return ""
-    head = "**业务解析**（无需逐项确认，提交即通过；标红项请补充）"
-    return head + "\n" + "\n".join(lines[:8])
+    head = head or "**业务解析**（无需逐项确认，提交即通过；标红项请补充）"
+    return head + "\n" + "\n".join(lines[:8 + max(0, len(campaigns) - 1)])
 
 
 def requirement_snapshot_rows(requirement: dict) -> list[tuple[str, str]]:
@@ -1052,6 +1064,19 @@ def requirement_snapshot_rows(requirement: dict) -> list[tuple[str, str]]:
     questions = requirement.get("business_questions") or []
     if isinstance(questions, str):
         questions = [questions]
+    rows = _snapshot_rows(requirement, source_file, platforms, scope, questions)
+    if requirement.get("requirement_source") == REQUIREMENT_SOURCE_SKILL:
+        # 原版 Step5：能力生成的关键词与过滤词只写入确认单，不向用户展示。
+        rows = [(k, v) for k, v in rows if k not in _HIDDEN_SKILL_ROWS]
+        rows.append(("需求来源", "关键词生成能力自动采用（口径已写入需求确认单）"))
+    return rows
+
+
+_HIDDEN_SKILL_ROWS = frozenset(
+    {"品牌取数关键词", "品牌过滤词", "活动取数关键词", "活动过滤词", "产品关键词"})
+
+
+def _snapshot_rows(requirement, source_file, platforms, scope, questions):
     return [
         ("活动明细文件", f"{source_file.get('name') or '未记录'}（已挂载）"),
         ("品牌", requirement.get("brand") or "未填写"),
@@ -1097,4 +1122,199 @@ def format_requirement_snapshot(requirement: dict, *, heading: bool = True) -> s
     ]
     if heading:
         return "**G1 需求快照**\n" + "\n".join(lines)
+    return "\n".join(lines)
+
+
+# ── Phase1 Step0–2：自然语言入口（原版 Phase1_需求梳理 v1.12）────────────────
+# 模板唯一事实源：原版 KS_Project_Intake_Template.md（原样复制到 ma-resources/io/intake/）。
+INTAKE_TEMPLATE_PATH = (
+    __import__("pathlib").Path(__file__).resolve().parent
+    / "ma-resources" / "io" / "intake" / "KS_Project_Intake_Template.md"
+)
+REQUIREMENT_SOURCE_SKILL = "campaign_keyword_generation"
+INTAKE_SUMMARY_HEAD = "**需求解析结果**（无需确认，已进入方案编制；如需更正可直接在话题内说明）"
+# 唤起语里不构成需求描述的成分：触发词 / 模式词 / 口语填充词。
+_TRIGGER_WORDS = ("复盘报告", "营销复盘", "活动复盘")
+_MODE_WORDS = ("demo", "演示", "小样本", "试跑", "full", "完整", "正式", "全量")
+_FILLER_RE = re.compile(r"(帮我|请|麻烦|给我|我要|我想|想要|需要|做|出|生成|写|来|一份|一个|一下|个|下|吧|呢|啊|哈|呀|的|了)")
+
+
+def intake_template_text(path=None) -> str:
+    """读取 Intake 模板「使用方式」下的代码块，原样发送（Step 0，不加邀请话术）。"""
+    text = (path or INTAKE_TEMPLATE_PATH).read_text(encoding="utf-8")
+    section = text.split("## 使用方式", 1)[-1]
+    match = re.search(r"```[^\n]*\n(.*?)```", section, re.DOTALL)
+    if not match:
+        raise IntakeValidationError("Intake 模板缺少填写示例代码块")
+    return match.group(1).strip()
+
+
+def has_requirement_description(text: str) -> bool:
+    """Step 0：去掉触发词、模式词、口语填充词与标点后仍有内容，即视为已附带需求描述。
+
+    只有品牌（如「瑞幸」）也算已描述，按原版立即调用 Skill。
+    """
+    rest = re.sub(r"^(?:@\S+\s*)+", "", str(text or "")).lower()
+    for word in _TRIGGER_WORDS + _MODE_WORDS:
+        rest = rest.replace(word.lower(), " ")
+    rest = _FILLER_RE.sub(" ", rest)
+    rest = re.sub(r"[\s\W_]+", "", rest)
+    return bool(rest)
+
+
+def _canonical_platforms(values: Any) -> list[str]:
+    if isinstance(values, str):
+        values = re.split(r"[,，、/\s]+", values)
+    out: list[str] = []
+    try:
+        import platforms as _platforms  # 路径已由 _platform_options 注入
+        aliases = _platforms.ALIASES
+    except Exception:  # noqa: BLE001
+        aliases = {}
+    for item in values or []:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        name = aliases.get(text) or aliases.get(text.lower()) or text
+        if name not in out:
+            out.append(name)
+    return out
+
+
+def _period_of(item: dict) -> dict:
+    period = item.get("campaign_period") or item.get("period") or {}
+    if not isinstance(period, dict):
+        period = _clean_period(period)
+    return {
+        "start": str(period.get("start") or item.get("period_start") or "")[:10],
+        "end": str(period.get("end") or item.get("period_end") or "")[:10],
+    }
+
+
+def _skill_campaign_lines(activity: Any, activity_filter: Any, resolved: dict) -> list[dict]:
+    """多活动口径（contract：activity_keywords 多活动分别记录）→ G1 活动列表行。"""
+    known = {}
+    for item in resolved.get("campaigns") or []:
+        if isinstance(item, dict):
+            name = str(item.get("campaign_name") or item.get("name") or "").strip()
+            if name:
+                known[name] = item
+    if isinstance(activity, dict):
+        items = [{"name": k, "expression": v} for k, v in activity.items()]
+    else:
+        items = [x for x in activity if isinstance(x, dict)]
+    rows = []
+    for item in items:
+        name = str(item.get("campaign_name") or item.get("name") or "").strip()
+        expr = item.get("activity_keywords") or item.get("expression") or item.get("keywords")
+        if not name or not isinstance(expr, str) or not expr.strip():
+            continue
+        if isinstance(activity_filter, dict):
+            exclude = activity_filter.get(name) or ""
+        else:
+            exclude = item.get("activity_filter") or ""
+        period = _period_of({**known.get(name, {}), **item})
+        rows.append({
+            "name": name,
+            "period_start": period["start"],
+            "period_end": period["end"],
+            "activity_query": expr.strip(),
+            "activity_filter": exclude if isinstance(exclude, str) else "",
+        })
+    return rows
+
+
+def skill_result_to_requirement_input(intake: dict) -> dict:
+    """把 intake_result.py 交接的 ready 结果映射为 normalize_requirement 的输入。
+
+    只做字段搬运与格式归一，不改写 Skill 已采用的表达式；校验由 normalize_requirement
+    完成，失败原因回注协调器，由 Skill 携带 prior_result 修正（Step2 第 4 条）。
+    """
+    result = dict((intake or {}).get("result") or {})
+    resolved = result.get("resolved_request") or {}
+    resolved = dict(resolved) if isinstance(resolved, dict) else {}
+    skill = dict((intake or {}).get("skill") or {})
+    merged = dict(resolved)
+    for key in ("campaign_name", "campaign_type", "activity_boundary", "brand_keyword",
+                "activity_keywords", "brand_filter", "activity_filter"):
+        if result.get(key) not in (None, "", [], {}):
+            merged[key] = result[key]
+    products = (result.get("product_keywords") or resolved.get("product_keywords")
+                or resolved.get("product_keyword") or "")
+    if isinstance(products, (list, tuple)):
+        products = "|".join(str(p).strip() for p in products if str(p).strip())
+    merged["product_keyword"] = products
+    activity = merged.get("activity_keywords")
+    campaign_lines: list[dict] = []
+    if isinstance(activity, (list, dict)):
+        campaign_lines = _skill_campaign_lines(activity, merged.get("activity_filter"), resolved)
+        exprs = [row["activity_query"] for row in campaign_lines]
+        merged["activity_keywords"] = (
+            exprs[0] if len(exprs) == 1 else "|".join(f"({e})" for e in exprs))
+    if not isinstance(merged.get("activity_filter"), str):
+        merged["activity_filter"] = ""
+    if isinstance(merged.get("content_scope"), str):
+        merged["content_scope"] = merged["content_scope"].strip().lower()
+    form = resolved_request_to_g1_defaults(merged)
+    form["platforms"] = _canonical_platforms(resolved.get("platforms") or form.get("platforms"))
+    questions = resolved.get("business_question") or resolved.get("business_questions")
+    if isinstance(questions, (list, tuple)):
+        questions = "；".join(str(q).strip() for q in questions if str(q).strip())
+    delivery = resolved.get("delivery_requirements")
+    form.update({
+        "business_questions": questions or "",
+        "delivery_expectation": delivery if isinstance(delivery, str) else (
+            (delivery or {}).get("form") or "" if isinstance(delivery, dict) else ""),
+        "delivery_deadline": (delivery or {}).get("deadline") or ""
+        if isinstance(delivery, dict) else "",
+        "raw_request": resolved.get("user_description") or "",
+        "field_sources": resolved.get("field_sources") or {},
+        "corrections": resolved.get("corrections") or [],
+        "campaign_lines": campaign_lines if len(campaign_lines) > 1 else [],
+        "baseline_period": resolved.get("baseline_period") or "",
+        "requirement_source": REQUIREMENT_SOURCE_SKILL,
+        "skill_invocations": [{
+            "skill": skill.get("skill_name") or "campaign-keyword-generation",
+            "version": skill.get("skill_version") or "",
+            "at": skill.get("executed_at") or "",
+            "ok": True,
+            "note": f"status=ready; confirmation_state={result.get('confirmation_state') or ''}",
+        }],
+        "keyword_generation": {
+            "status": "ready",
+            **{k: skill.get(k) or "" for k in (
+                "skill_name", "skill_version", "rule_baseline", "resolved_skill_path",
+                "executed_at")},
+            "result_path": (intake or {}).get("result_path") or "",
+            # 含已采用口径，需求变更回退到 G1 表单时用于预填。
+            "resolved_request": {**resolved, **{k: merged.get(k) for k in (
+                "campaign_name", "brand_keyword", "activity_keywords", "brand_filter",
+                "activity_filter", "product_keyword") if merged.get(k)}},
+            "dependency_state": result.get("dependency_state") or {},
+            "confirmation_state": result.get("confirmation_state") or "",
+            "campaign_type": result.get("campaign_type") or {},
+            "activity_boundary": result.get("activity_boundary") or {},
+            "filter_export_status": result.get("filter_export_status") or "",
+        },
+    })
+    return form
+
+
+def requirement_from_skill_result(intake: dict) -> dict:
+    """Skill ready 结果 → 冻结的需求快照（含表达式预检）；失败抛 IntakeValidationError。"""
+    return normalize_requirement(skill_result_to_requirement_input(intake))
+
+
+def intake_summary_text(requirement: dict) -> str:
+    """HC-T5-0：只展示业务解析；关键词与过滤词不展示（原版 Step5）。"""
+    return requirement_parsed_summary(requirement, head=INTAKE_SUMMARY_HEAD)
+
+
+def clarification_text(intake: dict) -> str:
+    """转达 Skill 的澄清问题一次（clarification_delivery=caller）。"""
+    summary = str((intake or {}).get("summary") or "").strip()
+    questions = [str(q).strip() for q in (intake or {}).get("questions") or [] if str(q).strip()]
+    lines = [summary] if summary else []
+    lines += [f"{i}. {q}" if len(questions) > 1 else q for i, q in enumerate(questions, 1)]
+    lines.append("请直接在本话题回复补充，无需 @机器人。")
     return "\n".join(lines)

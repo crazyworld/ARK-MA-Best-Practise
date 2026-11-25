@@ -23,9 +23,14 @@
 ## 关键规则索引
 
 - **触发词**:**"复盘报告" / "营销复盘" / "活动复盘"**(由 gateway `Topic5Runner` 分派进入 topic5 主线)。
+- **需求受理（原版 Phase1 v1.12）**:`full` 触发时用户未描述需求 → Gateway 原样发送
+  `KS_Project_Intake_Template` 模板;已描述 → 协调器按 `campaign-keyword-generation` Skill 理解/判缺/
+  生成品牌与活动两套口径,`intake_result.py emit` 交接;need_clarification 由 Gateway 转达问题,
+  用户在话题内直接回复(无需 @);ready 后 G1 直接采用(HC-T5-0 只展示业务解析,不展示关键词),
+  进入方案;blocked 判失败并说明缺失依赖。`demo` 仍用固定样例 G1 表单。
 - **薄 Agent 边界**:协调器**不做业务判断**,只跑 `run_pipeline.py start/resume/status` 驱动确定性编排器,
   遇人工关卡抛 HC JSON 结束 turn,HC 决定回注后续跑。所有口径逻辑在编排器 handler,**不在 Prompt**。
-- **人工关卡(不可跳过/合并)**:质量门 `G1`(n01 需求)/`G2`(n03 方案)/`G3`(n17 Validator 质检)/`G4`(n21 用户终验);
+- **人工关卡(不可跳过/合并)**:质量门 `G1`(n01 需求;Skill ready 时自动采用)/`G2`(n03 方案)/`G3`(n17 Validator 质检)/`G4`(n21 用户终验);
   操作级 HC `HC_COLLECT`(n03b 采集授权)/`N10`(n10 观点标签)/`HC7`(QC 超限:放宽留痕/补数据重做/终止)/
   `USER_ESCALATE`(终验超时或返工超 3 轮)。由 gateway 渲染飞书交互卡片,回帖以 `user.message`
   (`HCx <decision>: note`)塞回 Session;note 原样传给 `--note`。

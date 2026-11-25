@@ -48,6 +48,11 @@
       "type": "custom",
       "skill_id": "${skill_id.wordcloud-insight}",
       "version": "${version.wordcloud-insight}"
+    },
+    {
+      "type": "custom",
+      "skill_id": "${skill_id.campaign-keyword-generation}",
+      "version": "${version.campaign-keyword-generation}"
     }
   ],
   "tools": [

@@ -22,7 +22,7 @@ governance:
   agent_runtime: ma
 
   release_gates:                       # 发布门（治理级，authority 决定放行主体）
-    - {id: G1, after: n01_hc_requirement, subject: RequirementSnapshot, authority: user}
+    - {id: G1, after: n01_hc_requirement, subject: RequirementSnapshot, authority: user}   # Phase1 v1.12：Skill ready 时 authority=skill_auto_adopted（HC-T5-0 只展示）
     - {id: G2, after: n03_hc_plan,        subject: ConfirmedPlan,       authority: user}
     - {id: G3, after: n17_validate,       subject: ReportArtifact,      authority: validator, pass_policy: "p0_count==0"}
     - {id: G4, after: n21_hc_user,        subject: DeliveryDraft,       authority: user}
@@ -99,7 +99,7 @@ nodes:
     gate: G1
     handler: human_gate
     outputs: [requirement_confirmed]
-    success: 用户提交结构化需求问卷并冻结 RequirementSnapshot；不要求活动明细 Excel
+    success: 冻结 RequirementSnapshot：campaign-keyword-generation ready 时直接采用（requirement_preset，不暂停）；否则用户提交需求问卷；不要求活动明细 Excel
     next: n02_plan
 
   # 方案阶段 + 方案确认门 G2（v0.1 有、旧 DAG 缺，本版补回）

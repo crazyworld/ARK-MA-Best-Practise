@@ -4097,6 +4097,15 @@ def _truthy(value) -> bool:
 
 @handler("human_gate")
 def human_gate(node, state, ctx):
+    if str(node.get("gate") or "") == "G1":
+        preset = state.read_artifact("requirement_preset")
+        if isinstance(preset, dict) and preset.get("note"):
+            # 原版 Phase1 v1.12 Step5：Skill ready 后直接采用，HC-T5-0 只展示不确认。
+            import hc_bridge
+            return {
+                "artifacts": {"requirement_confirmed": hc_bridge.confirmed_requirement(
+                    preset["note"], authority=hc_bridge.G1_AUTHORITY_SKILL)},
+            }
     if _g2_auto_confirm_allowed(node, state, ctx):
         # n02_plan_compile 产出 analysis_plan；G2 冻结后即为 confirmed_plan
         plan = state.read_artifact("analysis_plan") or {}

@@ -202,6 +202,17 @@ def chat(system: str, user: str, *, max_tokens: int = 4096,
             if finish == "length":
                 raise ValueError(f"输出被 max_tokens={max_tokens} 截断")
             return "".join(parts)
+        except urllib.error.HTTPError as error:
+            # 把 relay 响应体带进异常：只剩「HTTP Error 400: Bad Request」无法定位原因。
+            try:
+                detail = error.read().decode("utf-8", "replace")[:500]
+            except Exception:  # 响应体不可读时保留原状态码
+                detail = ""
+            error.msg = (f"{error.msg} model={payload['model']} "
+                         f"input_chars={len(system) + len(user)} body={detail}")
+            if attempt == retries - 1:
+                raise
+            time.sleep(2 ** attempt)
         except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError):
             if attempt == retries - 1:
                 raise

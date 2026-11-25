@@ -820,6 +820,7 @@ class RuntimeResourcePathTest(unittest.TestCase):
                 resources / "skills/blueai-yuqing-echarts-skill-new",
             "report-cover-skill": resources / "skills/report-cover-skill",
             "topic5-validator": resources / "skills/topic5-validator",
+            "campaign-keyword-generation": resources / "skills/campaign-keyword-generation",
         }
         pattern = re.compile(
             r"/mnt/skills/([a-z0-9-]+)(/[A-Za-z0-9._/-]+)?"

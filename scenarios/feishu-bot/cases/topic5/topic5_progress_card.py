@@ -21,6 +21,7 @@ from typing import Iterable, Optional
 
 try:
     from .pipeline_store import (
+        STATUS_WAIT_INTAKE,
         FAILURE_SCOPE_RECOVERABLE,
         HcEvent,
         RETRY_STRATEGY_NODE,
@@ -37,6 +38,7 @@ try:
     from .topic5_intake import format_requirement_snapshot
 except ImportError:  # pragma: no cover - standalone compatibility
     from pipeline_store import (
+        STATUS_WAIT_INTAKE,
         FAILURE_SCOPE_RECOVERABLE,
         HcEvent,
         RETRY_STRATEGY_NODE,
@@ -97,6 +99,8 @@ def _header(status: str, phase: str, failure_scope: str = "") -> dict:
         title, template = f"⏸️ Topic5 复盘报告 · 等待审核 {phase}", "turquoise"
     elif status == STATUS_WAIT_INPUT:
         title, template = "⏸️ Topic5 复盘报告 · 等待活动明细", "turquoise"
+    elif status == STATUS_WAIT_INTAKE:
+        title, template = "⏸️ Topic5 复盘报告 · 等待需求描述", "turquoise"
     elif status == STATUS_STOPPING:
         title, template = "Topic5 复盘报告 · 正在暂停", "grey"
     else:
@@ -363,6 +367,13 @@ def build_progress_card(
                 ),
             }
         )
+    elif status == STATUS_WAIT_INTAKE:
+        elements.append(
+            {
+                "tag": "markdown",
+                "content": "👉 请在本话题直接回复，描述或补充复盘需求（无需 @机器人）。",
+            }
+        )
     elif status == STATUS_WAIT_INPUT:
         elements.append(
             {
@@ -469,7 +480,7 @@ def build_progress_card(
                 "behaviors": [{"type": "open_url", "default_url": online_url}],
             }
         )
-    if status in (STATUS_RUNNING, STATUS_WAIT_HC, STATUS_WAIT_INPUT) and job.task_id:
+    if status in (STATUS_RUNNING, STATUS_WAIT_HC, STATUS_WAIT_INPUT, STATUS_WAIT_INTAKE) and job.task_id:
         elements.extend(
             [
                 {"tag": "hr"},

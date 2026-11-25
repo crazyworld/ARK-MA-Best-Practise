@@ -1,7 +1,7 @@
 """CLI：启动 / 续跑 / 查看 本地 Topic5 pipeline run —— 薄 Agent 的编排入口。
 
 薄 Agent + Durable Workflow 契约（Gateway 据此驱动）：
-  start   先 create_run 再 run；遇人工关卡暂停并落 hc_pending.json、打印 HC JSON。
+  start   先 create_run 再 run（--requirement 时 G1 按 Skill 结果直接采用）；遇人工关卡暂停并落 hc_pending.json、打印 HC JSON。
   resume  注入用户结构化决定续跑：--hc {kind} --decision {pass|reject|remark} [--note ...]
           决定经 hc_bridge 翻译为当前暂停节点所需 human_outputs（无 schema 变更）。
   status  查看当前状态与待办关卡。
@@ -100,6 +100,9 @@ def main() -> None:
     ap.add_argument("--run")
     ap.add_argument("--mode", choices=["demo", "full"], default="full",
                     help="start：仅记录请求模式；demo 只由 Gateway 用于 G1 表单预填，流水线标准相同")
+    ap.add_argument("--requirement", default="",
+                    help="start：Gateway 校验后的需求 JSON（或 @/mnt/session/uploads/...）；"
+                         "提供时 G1 按 Skill 结果直接采用，不弹表单")
     ap.add_argument("--hc", help="resume：人工关卡种类（G1/G2/G3/G4/HC7/N10/...）")
     ap.add_argument("--decision",
                     choices=["pass", "reject", "remark", "relax", "redo_with_data", "terminate",
@@ -118,6 +121,10 @@ def main() -> None:
         dag = Dag.load(Path(args.dag))
         st = create_run(dag, ws, args.task, args.run)
         st.params["run_mode"] = args.mode
+        if args.requirement:
+            # 先校验再落盘：非法载荷不得让 Run 进入方案阶段。
+            hc_bridge.confirmed_requirement(args.requirement, authority=hc_bridge.G1_AUTHORITY_SKILL)
+            st.write_artifact("requirement_preset", {"note": args.requirement})
         st.save()
         st = run(dag, st)
         if st.status == "awaiting_human":
