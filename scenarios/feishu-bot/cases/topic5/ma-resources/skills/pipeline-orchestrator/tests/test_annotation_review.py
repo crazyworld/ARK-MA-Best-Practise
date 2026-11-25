@@ -194,7 +194,8 @@ class ReworkTest(unittest.TestCase):
         review["plan"] = {"samples": [{"id": "k1"}, {"id": "k2"}],
                           "remaining_after_plan": 300}
         st, plan = self._run(review, gate="n11r_rework")
-        self.assertEqual(plan["history"]["reviewed_ids"], ["k1", "k2"])
+        # 台账按轮次分开（执行契约 §2：每轮各 500 额度）
+        self.assertEqual(plan["history"]["by_stage"]["round2"], ["k1", "k2"])
 
 
 class BridgeTest(unittest.TestCase):

@@ -133,7 +133,7 @@ class ApplyTest(unittest.TestCase):
         self.assertNotIn("discussion_dimension", row)
 
     def test_ugc_other_accepted(self):
-        row = _row()
+        row = _row(content_mode="UGC")
         A._apply_attr(row, {"ugc_category": "其他", "discussion_dimension": "品牌"},
                       UGC, use_ugc=True)
         self.assertEqual(row["ugc_category"], "其他")
@@ -167,7 +167,7 @@ class CoverageTest(unittest.TestCase):
         self.assertEqual(cov["opinion"]["status"], "ERROR")
 
     def test_ugc_other_warn_not_block(self):
-        rows = [_row(i, 1) for i in range(10)]
+        rows = [_row(i, 1, content_mode="UGC") for i in range(10)]
         for row in rows:
             row["opinion"] = "口味好评"
             row["ugc_category"] = "晒单开箱"

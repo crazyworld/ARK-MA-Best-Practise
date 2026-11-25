@@ -107,7 +107,8 @@ class TestRound2Fallback(unittest.TestCase):
         self.assertEqual(cov["opinion"]["status"], "ERROR")
         self.assertTrue(cov["has_error"])
 
-    def test_na_counts_as_labeled(self):
+    def test_na_in_applicable_scope_is_missing(self):
+        """原版 check_coverage：应标注行出现「无/N/A 等非法占位」与空值同判 ERROR。"""
         rows = _rows(3)
         for r in rows:
             r["relevance"] = True
@@ -116,10 +117,11 @@ class TestRound2Fallback(unittest.TestCase):
             r["ugc_category"] = "N/A"
             r["discussion_dimension"] = "N/A"
         cov = annotate_mod.check_coverage(rows, degraded=False)
-        self.assertEqual(cov["opinion"]["missing"], 0)
+        self.assertEqual(cov["opinion"]["missing"], 3)
         self.assertEqual(cov["opinion"]["na"], 3)
-        self.assertEqual(cov["opinion"]["status"], "OK")
-        self.assertFalse(cov["has_error"])
+        self.assertEqual(cov["opinion"]["status"], "ERROR")
+        self.assertEqual(cov["discussion_dimension"]["missing"], 3)
+        self.assertTrue(cov["has_error"])
 
     def test_task_prompts_declare_their_own_fields(self):
         """FIX-28：每个子任务只声明自己的字段，且维度固定三枚举。"""
@@ -252,8 +254,9 @@ class TestRouting(unittest.TestCase):
         self.assertNotIn("discussion_dimension", row)
         annotate_mod._apply_r2(row, {"discussion_dimension": "品牌"})
         self.assertEqual(row["discussion_dimension"], "品牌")
+        # 原版 check_coverage:217：相关行维度 N/A 视为缺失，不接受模型给的 N/A
         annotate_mod._apply_r2(row, {"discussion_dimension": "N/A"})
-        self.assertEqual(row["discussion_dimension"], "N/A")
+        self.assertEqual(row["discussion_dimension"], "品牌")
 
     def test_route_datahub_when_over_threshold(self):
         """行数 ≥ 阈值且 DataHub 可用 → 走批量；monkeypatch 避免真实网络。"""

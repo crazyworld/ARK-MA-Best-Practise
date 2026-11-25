@@ -920,11 +920,16 @@ def _structure_config(
     negatives = ([str(x) for x in negative_labels if str(x).strip()]
                  if negative_labels is not None else labels)
     ugc = [str(x) for x in (ugc_categories or []) if str(x).strip()]
+    # 原版 annot_r2.py:84/94 观点、UGC 均允许「其他」（占比由覆盖检查管控），结构门同口径。
+    other = annotate_mod.OPINION_OTHER
     return {
-        "positive_labels": labels,
-        "negative_labels": negatives,
+        "positive_labels": labels + [other] if labels else [],
+        "negative_labels": negatives + [other] if negatives else [],
+        # 某方向无候选（原版 status!=ok，<10 条）→ 该方向观点填「无」，不检类别。
+        "positive_applicable": bool(labels),
+        "negative_applicable": bool(negatives),
         # 仅 PGC 项目：ugc_applicable=False，预检要求相关行一律 N/A。
-        "ugc_labels": ugc,
+        "ugc_labels": ugc + [annotate_mod.UGC_OTHER] if ugc else [],
         "ugc_applicable": not ugc_not_applicable,
     }
 
@@ -975,6 +980,41 @@ def _calibration_samples(review: dict, rows: list[dict]) -> list[dict]:
             "correct": expected,
         })
     return samples
+
+
+def _history_by_stage(history) -> dict[str, list[str]]:
+    """已审台账按轮次拆分（执行契约 §2：每轮各 500 额度）；旧格式只算轮次一。"""
+    if not isinstance(history, dict):
+        return {}
+    by_stage = {k: list(v or []) for k, v in (history.get("by_stage") or {}).items()}
+    if history.get("reviewed_ids") and not by_stage:
+        by_stage["round1"] = list(history["reviewed_ids"])
+    return by_stage
+
+
+def _stage_reviewed_ids(history, stage: str) -> list[str]:
+    return list(_history_by_stage(history).get(stage) or [])
+
+
+def _rerun_base_rows(state, plan: dict, rows: list[dict]) -> list[dict]:
+    """增量重标：以 rework 保存的上一版标注为底（按 _annot_id 对齐），找不到时用源行。"""
+    ref = plan.get("base_artifact") if isinstance(plan, dict) else None
+    path = None
+    if isinstance(ref, dict):
+        key, version = ref.get("key"), ref.get("version")
+        meta = state.artifacts.get(key) or {}
+        candidate = state.run_dir / "artifacts" / str(key) / f"v{version}" / "payload.json"
+        path = candidate if candidate.exists() else (
+            Path(meta["path"]) if meta.get("version") == version and meta.get("path") else None)
+    if path is None or not Path(path).exists():
+        return rows
+    previous = json.loads(Path(path).read_text(encoding="utf-8"))
+    prev_rows = previous.get("rows") if isinstance(previous, dict) else None
+    if not prev_rows:
+        return rows
+    annotate_mod._tag_ids(rows)
+    by_id = {str(r.get("_annot_id")): r for r in prev_rows if r.get("_annot_id")}
+    return [dict(by_id.get(str(r.get("_annot_id")), r)) for r in rows]
 
 
 def _rerun_scope(state, stage: str, review_key: str, rows: list[dict]):
@@ -1684,6 +1724,8 @@ def annotate(node, state, ctx):
         ) or []
 
         r2_rerun, r2_calib = _rerun_scope(state, "round2", "r2_review", rows)
+        if r2_rerun:
+            rows = _rerun_base_rows(state, state.read_artifact("annotation_rework_plan"), rows)
         # 与轮次一共用用户的路由决定（FIX-33：DataHub 不可用时用户确认 small_engine）。
         decision = state.read_artifact("annotation_route_decision") or {}
         route2 = decision.get("route") if isinstance(decision, dict) else None
@@ -1713,9 +1755,14 @@ def annotate(node, state, ctx):
         # 覆盖检查缺口（真路径 ERROR）→ 直接报错，交引擎按 retry/on_fail=pause 处理。
         cov = result.get("coverage") or {}
         if cov.get("has_error"):
-            miss = {t: cov[t]["missing"] for t in ("opinion", "ugc_category",
-                    "discussion_dimension") if cov.get(t, {}).get("status") == "ERROR"}
-            raise ValueError(f"annotate r2: 覆盖检查存在缺口（missing），按口径报错：{miss}")
+            # 写清每项的缺失数、「其他」数与适用范围：缺失为 0 时即「空值+其他」≥10% 阻断。
+            miss = {t: {k: cov[t].get(k) for k in ("scope_total", "missing", "other",
+                                                    "invalid_values") if k in cov[t]}
+                    for t in ("opinion", "ugc_category", "discussion_dimension")
+                    if cov.get(t, {}).get("status") == "ERROR"}
+            raise ValueError(
+                "annotate r2: 覆盖检查未通过（缺失/非法，或观点「空值+其他」≥"
+                f"{annotate_mod.OPINION_OTHER_BLOCK_RATIO:.0%}）：{miss}")
         sc_mode = str(state.params.get("annotation_structure_check", "block")).lower()
         sc_config = _structure_config(
             opinion_labels=list(positive_labels or opinion_labels),
@@ -2139,9 +2186,12 @@ def opinion_policy_gate(node, state, ctx):
         "validator_review": validator_review,
         "labels": labels,
         # FIX-31：正负两套候选分开冻结，供轮次二两个观点任务各自注入
-        "positive_labels": list(opinion.get("positive_candidates") or labels),
-        "negative_labels": list(opinion.get("negative_candidates") or labels)
-        if "negative_candidates" in opinion else list(labels),
+        # 新产物：某方向候选为空 = 该方向不适用（原版 status!=ok），保持空表、不借用合并标签；
+        # 旧产物（无分方向字段）两边共用 labels。
+        "positive_labels": (list(opinion.get("positive_candidates") or [])
+                            if "positive_candidates" in opinion else list(labels)),
+        "negative_labels": (list(opinion.get("negative_candidates") or [])
+                            if "negative_candidates" in opinion else list(labels)),
         "ugc_categories": ugc_categories,
         "ugc_not_applicable": bool(ugc.get("not_applicable")),
         **label_review.confirmed_review(opinion, ugc),
@@ -4185,7 +4235,7 @@ def annotation_review(node, state, ctx):
             isinstance(ugc_list, dict) and ugc_list.get("not_applicable")))
 
     history = state.read_artifact("annotation_review_history") or {}
-    reviewed = list(history.get("reviewed_ids") or []) if isinstance(history, dict) else []
+    reviewed = _stage_reviewed_ids(history, stage)
     sample_plan = review_plan_mod.plan_review(
         rows, stage="round1" if stage == "round1" else "round2",
         reviewed_ids=reviewed, config=config)
@@ -4319,19 +4369,25 @@ def annotation_rework(node, state, ctx):
         state.counters.get(f"annotation_review_rounds_{stage}", 0) + 1)
 
     # 轮次一重标 → 轮次二及其下游全部失效；轮次二重标 → 只失效轮次二及下游。
+    # wordcloud_data 来自外部 SSJH（只由 n02 扇出的 n13 产出一次），与标注无关，不失效；
+    # 否则 n12 永远等不到输入、Run 判 stuck。
     downstream = (["annotated_round1", "opinion_candidates", "confirmed_opinion_labels",
                    "ugc_category_list", "annotated_data", "stats_bundle",
-                   "chart_urls", "wordcloud_data", "wordcloud_insight",
+                   "chart_urls", "wordcloud_insight",
                    "report_md", "qc_report", "delivery_draft"]
                   if stage == "round1" else
-                  ["annotated_data", "stats_bundle", "chart_urls", "wordcloud_data",
+                  ["annotated_data", "stats_bundle", "chart_urls",
                    "wordcloud_insight", "report_md", "qc_report", "delivery_draft"])
+    # 增量重标的底稿：失效前先保存本轮标注（执行契约 §3：只修对应行，其余行保留原标注）。
+    labeled_key = "annotated_round1" if stage == "round1" else "annotated_data"
+    base_ref = None if systematic else state.artifact_ref(labeled_key)
     state.invalidate_artifacts(downstream)
 
     history = state.read_artifact("annotation_review_history") or {}
-    reviewed = list(history.get("reviewed_ids") or []) if isinstance(history, dict) else []
+    by_stage = _history_by_stage(history)
     plan = review.get("plan") or {}
-    reviewed += [str(s.get("id")) for s in (plan.get("samples") or []) if s.get("id")]
+    by_stage[stage] = sorted(set(by_stage.get(stage, [])) | {
+        str(s.get("id")) for s in (plan.get("samples") or []) if s.get("id")})
 
     payload = {
         "stage": stage,
@@ -4342,7 +4398,8 @@ def annotation_rework(node, state, ctx):
         "error_types": error_types,
         "review_rounds": state.counters[f"annotation_review_rounds_{stage}"],
         "invalidated": downstream,
-        "history": {"reviewed_ids": sorted(set(reviewed))},
+        "base_artifact": base_ref,
+        "history": {"by_stage": by_stage},
     }
     return {"artifacts": {"annotation_rework_plan": payload,
                           "annotation_review_history": payload["history"]}}

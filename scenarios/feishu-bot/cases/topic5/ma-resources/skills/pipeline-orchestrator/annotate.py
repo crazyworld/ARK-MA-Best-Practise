@@ -563,12 +563,14 @@ def _apply_opinion(row: dict, parsed: dict, allowed: list[str]) -> None:
 
 def _apply_attr(row: dict, parsed: dict, allowed_ugc: list[str], use_ugc: bool) -> None:
     """回填属性任务；维度不在三枚举内时丢弃（交覆盖检查判 ERROR）。"""
-    if use_ugc:
+    # 类别只写到 UGC 行（非 UGC 行已预填 N/A，模型给值也不覆盖）；N/A 不算合法类别。
+    if use_ugc and _is_ugc_row(row):
         ugc = str(parsed.get("ugc_category") or "").strip()
-        if ugc and ugc in (*allowed_ugc, UGC_OTHER, _NA):
+        if ugc and ugc in (*allowed_ugc, UGC_OTHER):
             row["ugc_category"] = ugc
+    # 原版 check_coverage:217：相关行维度必须是三枚举之一，N/A 视为缺失。
     dim = str(parsed.get("discussion_dimension") or "").strip()
-    if dim in (*_DISCUSSION_DIMENSIONS, _NA):
+    if dim in _DISCUSSION_DIMENSIONS:
         row["discussion_dimension"] = dim
 
 
@@ -613,10 +615,17 @@ def _preset_r2_defaults(
         else:
             # 中性（或未判定）：观点填「无」，不进入观点任务。
             row["opinion"] = OPINION_NONE
-    if ugc_not_applicable:
-        for row in rows:
+    for row in attr:
+        # 原版 annot_r2.py:107/111 + check_coverage:186：ugc_category 只适用于「相关且 UGC」，
+        # PGC / 未知类型行预填 N/A，不交模型取类别。
+        if ugc_not_applicable or not _is_ugc_row(row):
             row["ugc_category"] = _NA
     return {"opinion_pos": opinion_pos, "opinion_neg": opinion_neg, "attr": attr}
+
+
+def _is_ugc_row(row: dict) -> bool:
+    """内容类型 = UGC（SSJH content_mode；未知/缺失不算 UGC，原版口径）。"""
+    return str(row.get("content_mode") or "").strip().upper() == "UGC"
 
 
 def _task_payload(rows: list[dict], fields: tuple[str, ...]) -> list[dict]:
@@ -698,12 +707,26 @@ def annotate_round2(
         raise ValueError(
             "annotate_round2: 未注入 ugc_category_list，禁止开始 UGC 方式标注")
     _tag_ids(rows)
-    groups = _preset_r2_defaults(rows, ugc_not_applicable)
     if rerun_ids:
-        # 增量重标（FIX-30）：只保留指定 ID，其余行保留原标注。
+        # 增量重标（FIX-30，执行契约 §3「个别错误修对应行」）：其余行沿用调用方传入的
+        # 上一版标注（rows 以 previous annotated_data 为底），只清空并重标指定 ID。
         wanted = {str(x) for x in rerun_ids}
-        groups = {key: [r for r in group if r.get("_annot_id") in wanted]
-                  for key, group in groups.items()}
+        for row in rows:
+            if row.get("_annot_id") in wanted:
+                for field in ("opinion", "ugc_category", "discussion_dimension"):
+                    row.pop(field, None)
+        groups = _preset_r2_defaults([r for r in rows if r.get("_annot_id") in wanted],
+                                     ugc_not_applicable)
+    else:
+        groups = _preset_r2_defaults(rows, ugc_not_applicable)
+    # 方向不适用（候选为空，原版 status!=ok）：观点填「无」，不建任务、不借用另一方向标签。
+    for key, labels in (("opinion_pos", opinion_labels),
+                        ("opinion_neg", opinion_labels if negative_labels is None
+                         else negative_labels)):
+        if not [x for x in (labels or []) if str(x).strip()]:
+            for row in groups[key]:
+                row["opinion"] = OPINION_NONE
+            groups[key] = []
     prompts = _r2_task_prompts(
         campaign_name, opinion_labels, ugc_categories,
         ugc_not_applicable, opinion_review_items, ugc_review_items,
@@ -712,8 +735,9 @@ def annotate_round2(
 
     opinion_missing = lambda row: not str(row.get("opinion") or "").strip()
     attr_missing = lambda row: (
-        not str(row.get("discussion_dimension") or "").strip()
-        or (not ugc_not_applicable and not str(row.get("ugc_category") or "").strip())
+        str(row.get("discussion_dimension") or "").strip() not in _DISCUSSION_DIMENSIONS
+        or (not ugc_not_applicable and _is_ugc_row(row)
+            and str(row.get("ugc_category") or "").strip() in ("", _NA))
     )
 
     tasks = (
@@ -749,7 +773,7 @@ def annotate_round2(
                              is_labeled=lambda row, miss=is_missing: not miss(row))
         except Exception as error:  # 批量任务级失败：先问用户，不静默切换
             raise DataHubRouteRequired(
-                total, threshold, f"DataHub 运行异常：{type(error).__name__}") from error
+                total, threshold, f"DataHub 运行异常：{type(error).__name__}: {str(error)[:300]}") from error
         routed_via = "datahub"
         # 行级缺口补标（原版 check_coverage：缺失 → ERROR → 补标后重查）。
         missing_ids: set[str] = set()
@@ -873,10 +897,16 @@ def check_coverage(
     relevant = [r for r in rows if _is_relevant_row(r)]
     opinion_scope = [
         r for r in relevant if _row_sentiment_label(r) in ("正面", "负面")
+        # 方向不适用（原版 skip_op：该方向无候选）时观点为「无」，不计入分母。
+        and str(r.get("opinion") or "").strip() != OPINION_NONE
     ]
+    # 原版 check_coverage:185：ugc_category 适用范围 = 相关且内容类型 UGC。
+    ugc_scope = [r for r in relevant if _is_ugc_row(r)]
 
     def stat(scope: list[dict], field: str, other_value: str | None = None) -> dict:
-        labeled = sum(1 for r in scope if str(r.get(field) or "").strip())
+        # 原版 check_coverage:194/217：空值与 N/A 都算缺失（维度另有越界检查）。
+        labeled = sum(1 for r in scope
+                      if str(r.get(field) or "").strip() not in ("", _NA))
         na = sum(1 for r in scope if str(r.get(field) or "").strip() == _NA)
         other = (sum(1 for r in scope if str(r.get(field) or "").strip() == other_value)
                  if other_value else 0)
@@ -913,9 +943,12 @@ def check_coverage(
     ):
         if task == "opinion":
             item = stat(opinion_scope, field, other_value)
-        elif task == "ugc_category" and ugc_not_applicable:
+        elif task == "ugc_category" and (ugc_not_applicable or not ugc_scope):
             item = {"scope_total": len(relevant), "labeled": len(relevant),
-                    "na": len(relevant), "other": 0, "missing": 0}
+                    "na": len(relevant), "other": 0, "missing": 0,
+                    "applicable": False}
+        elif task == "ugc_category":
+            item = stat(ugc_scope, field, other_value)
         else:
             item = stat(relevant, field, other_value)
         item["status"] = status_of(item, block_ratio=block, warn_ratio=warn)
@@ -992,7 +1025,7 @@ def _route_and_run(rows, *, threshold, dh_prompt, dh_apply, small_engine, degrad
             return "datahub", False
         except Exception as error:  # 批量任务级失败：同样先问用户，不静默切换
             raise DataHubRouteRequired(
-                n, threshold, f"DataHub 运行异常：{type(error).__name__}") from error
+                n, threshold, f"DataHub 运行异常：{type(error).__name__}: {str(error)[:300]}") from error
     if semantic.llm_available() and n:
         try:
             small_engine(rows)
