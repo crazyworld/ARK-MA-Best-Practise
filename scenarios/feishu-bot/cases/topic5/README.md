@@ -69,7 +69,7 @@ Bot 会基于触发消息创建独立话题，按以下顺序推进：
    任务创建成功即计费、单次超 1000 元被门禁拦截；也可不授权，直接在本话题发送活动明细 `.xlsx`；
 4. 采集核验通过（或文件校验通过）后自动进入生产 Run。
 
-Gateway 设 `TOPIC5_ACTIVITY_DATA_MODE=upload` 可恢复「G2 后等待上传 Excel」的旧流程。
+Gateway 在 `config.env` 设 `TOPIC5_ACTIVITY_DATA_MODE=upload`（重启 Gateway 生效）可切换为「G2 后等待上传 Excel」；取值只认 `auto`/`upload`，其他值按 `auto`。
 
 ### 过程文件同步与测试回放
 

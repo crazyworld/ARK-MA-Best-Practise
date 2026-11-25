@@ -167,6 +167,21 @@ class NewGateCardsTest(unittest.TestCase):
         self.assertEqual(self._decisions(card), ["pass"])
         self.assertIn("改用直连模型标注", json.dumps(card, ensure_ascii=False))
 
+    def test_activity_data_mode_reads_config_env_loaded_after_import(self):
+        # arkagent.cli 先 import case 模块，再把 config.env 写入 os.environ；
+        # 模块级常量会永远停在 auto，config.env 里的 upload 不生效。
+        import os
+        from unittest.mock import patch
+        with patch.dict(os.environ, {"TOPIC5_ACTIVITY_DATA_MODE": "upload"}):
+            self.assertEqual(self.hitl.activity_data_mode(), "upload")
+        with patch.dict(os.environ, {"TOPIC5_ACTIVITY_DATA_MODE": " Upload "}):
+            self.assertEqual(self.hitl.activity_data_mode(), "upload")
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("TOPIC5_ACTIVITY_DATA_MODE", None)
+            self.assertEqual(self.hitl.activity_data_mode(), "auto")
+        with patch.dict(os.environ, {"TOPIC5_ACTIVITY_DATA_MODE": "uplaod"}):
+            self.assertEqual(self.hitl.activity_data_mode(), "auto")
+
     def test_annotation_review_is_internal(self):
         self.assertIn("R1_REVIEW", self.hitl.INTERNAL_HC_KINDS)
         self.assertIn("R2_REVIEW", self.hitl.INTERNAL_HC_KINDS)

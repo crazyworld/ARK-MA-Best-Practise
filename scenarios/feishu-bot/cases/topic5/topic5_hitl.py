@@ -65,7 +65,16 @@ DECISION_REJECT = "reject"
 DECISION_REMARK = "remark"
 PENDING_REMARK_NOTE = "等待补充说明"
 # FIX-04：活动数据来源。auto=默认自动采集原帖；upload=G2 后等待用户上传 Excel（原行为）。
-ACTIVITY_DATA_MODE = (os.environ.get("TOPIC5_ACTIVITY_DATA_MODE") or "auto").strip().lower()
+ACTIVITY_DATA_MODES = ("auto", "upload")
+
+
+def activity_data_mode() -> str:
+    """调用时读取：arkagent 先 import case 模块，之后才把 config.env 写入 os.environ。
+
+    未知取值按 auto 处理（默认自动采集；缺凭证时 n03b 如实阻断并允许上传）。
+    """
+    mode = (os.environ.get("TOPIC5_ACTIVITY_DATA_MODE") or "auto").strip().lower()
+    return mode if mode in ACTIVITY_DATA_MODES else "auto"
 DECISION_KEEP = "keep"
 DECISION_EXCLUDE = "exclude"
 # 标注审核（n09r/n11r）与 G3 同构：由协调器委派独立 Validator 后自动续跑，不发用户卡片。
@@ -1518,7 +1527,7 @@ class Topic5Hitl(Topic5CardSenderProtocol):
             )
 
         if hc_kind == "G2" and decision == DECISION_PASS:
-            if not job.source_file_id and ACTIVITY_DATA_MODE == "upload":
+            if not job.source_file_id and activity_data_mode() == "upload":
                 await self._runner.wait_for_activity_file(job)
                 return
             if not job.source_file_id:

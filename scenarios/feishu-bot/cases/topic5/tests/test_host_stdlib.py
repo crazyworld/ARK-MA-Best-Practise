@@ -12,6 +12,7 @@ import asyncio
 import io
 import importlib.util
 import json
+import os
 import re
 import sys
 import sqlite3
@@ -1877,14 +1878,14 @@ class HitlActionParsingTest(unittest.TestCase):
                 "chat_id": "c",
             }
             # FIX-04：upload 模式保持「等待上传」；默认 auto 模式直接续跑自动采集（G2 pass: auto）。
-            with patch.object(self.hitl, "ACTIVITY_DATA_MODE", "upload"):
+            with patch.dict(os.environ, {"TOPIC5_ACTIVITY_DATA_MODE": "upload"}):
                 asyncio.run(facade.handle_card_action(action))
             self.assertEqual(calls, ["wait_input"])
             self.assertEqual(store.get_hc_event(event_id).user_decision, "pass")
             store.mark_wait_hc(job.job_id, "G2")
             event_auto = store.append_hc_event(job.job_id, "G2", payload)
             action["action"]["value"]["event_id"] = event_auto
-            with patch.object(self.hitl, "ACTIVITY_DATA_MODE", "auto"):
+            with patch.dict(os.environ, {"TOPIC5_ACTIVITY_DATA_MODE": "auto"}):
                 asyncio.run(facade.handle_card_action(action))
             self.assertEqual(calls, ["wait_input", "resume"])
             store.close()
