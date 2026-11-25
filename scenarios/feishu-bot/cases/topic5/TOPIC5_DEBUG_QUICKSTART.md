@@ -122,6 +122,10 @@ FEISHU_APP_ID=cli_xxx
 FEISHU_APP_SECRET=xxx
 ```
 
+topic5/topic6 共用这一份 config.env，topic 专属值用前缀区分。topic5 使用独立飞书 Bot 时写
+`TOPIC5_FEISHU_APP_ID/TOPIC5_FEISHU_APP_SECRET`（优先于通用 `FEISHU_APP_*`，不影响 topic6）；
+模型统一走 bmc-llm-relay，需 `LLM_RELAY_BASE_URL/LLM_RELAY_API_KEY/BYOK_MODEL_AUTH_HEADER_*`。
+
 `update_ma.sh` 会默认将 `FEISHU_APP_ID/FEISHU_APP_SECRET` 复用为沙箱使用的
 `LARK_APP_ID/LARK_APP_SECRET`。只有 Gateway 与沙箱需要使用不同飞书应用时，才显式设置。
 

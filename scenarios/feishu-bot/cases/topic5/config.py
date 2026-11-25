@@ -17,11 +17,18 @@ from typing import Mapping, Optional
 
 REQUIRED_KEYS = [
     "ARK_API_KEY",
-    "FEISHU_APP_ID",
-    "FEISHU_APP_SECRET",
     "TOPIC5_COORDINATOR_AGENT_ID",
     "TOPIC5_ENVIRONMENT_ID",
 ]
+
+# topic5/topic6 共用 ~/.arkagent/cases/topicX/config.env；topic5 用独立飞书 Bot 时以
+# TOPIC5_FEISHU_APP_* 区分，未设置时回退通用 FEISHU_APP_*。
+_FEISHU_KEYS = (("TOPIC5_FEISHU_APP_ID", "FEISHU_APP_ID"),
+                ("TOPIC5_FEISHU_APP_SECRET", "FEISHU_APP_SECRET"))
+
+
+def _feishu_value(environ: Mapping[str, str], prefixed: str, generic: str) -> str:
+    return (environ.get(prefixed) or "").strip() or (environ.get(generic) or "").strip()
 
 
 @dataclass(frozen=True)
@@ -50,6 +57,7 @@ DEFAULT_ARTIFACT_SYNC_DIR = Path(__file__).resolve().parent / "data" / "artifact
 def load_case_config(env: Optional[Mapping[str, str]] = None) -> Topic5Config:
     environ = os.environ if env is None else env
     missing = [k for k in REQUIRED_KEYS if not (environ.get(k) or "").strip()]
+    missing += [f"{p}/{g}" for p, g in _FEISHU_KEYS if not _feishu_value(environ, p, g)]
     if missing:
         raise RuntimeError(f"缺少环境变量:{', '.join(missing)}")
     open_ids = tuple(
@@ -60,8 +68,8 @@ def load_case_config(env: Optional[Mapping[str, str]] = None) -> Topic5Config:
     return Topic5Config(
         ark_api_key=environ["ARK_API_KEY"],
         ark_base_url=(environ.get("ARK_BASE_URL") or "https://ark.cn-beijing.volces.com/api/v3").rstrip("/"),
-        feishu_app_id=environ["FEISHU_APP_ID"],
-        feishu_app_secret=environ["FEISHU_APP_SECRET"],
+        feishu_app_id=_feishu_value(environ, *_FEISHU_KEYS[0]),
+        feishu_app_secret=_feishu_value(environ, *_FEISHU_KEYS[1]),
         coordinator_agent_id=environ["TOPIC5_COORDINATOR_AGENT_ID"].strip(),
         environment_id=environ["TOPIC5_ENVIRONMENT_ID"].strip(),
         memory_store_id=(environ.get("TOPIC5_MEMORY_STORE_ID") or "").strip(),

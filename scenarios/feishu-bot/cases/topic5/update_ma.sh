@@ -49,6 +49,12 @@ set -a
 source "$CONFIG_FILE"
 set +a
 
+# 共享 topicX/config.env：topic5 专属飞书 Bot 以 TOPIC5_FEISHU_APP_* 区分，映射为沙箱与
+# 资源装配使用的通用名；未设置时沿用通用 FEISHU_APP_*。
+FEISHU_APP_ID="${TOPIC5_FEISHU_APP_ID:-${FEISHU_APP_ID:-}}"
+FEISHU_APP_SECRET="${TOPIC5_FEISHU_APP_SECRET:-${FEISHU_APP_SECRET:-}}"
+export FEISHU_APP_ID FEISHU_APP_SECRET
+
 # set -u 下安全读取环境变量:避免使用 ${!name:-}(zsh/dash 会拒绝该表达式)。
 # 先 eval 取值再判空,Bash 3.2.57 / zsh / dash 均可处理。
 # 模型统一走 bmc-llm-relay（对齐 topic6）：沙箱用 LLM_RELAY_*，2 个 Agent 的 BYOK 鉴权由
@@ -116,6 +122,8 @@ ISOLATED_TEST_ENV_KEYS=(
   FEISHU_ROOT_FOLDER_TOKEN
   FEISHU_APP_ID
   FEISHU_APP_SECRET
+  TOPIC5_FEISHU_APP_ID
+  TOPIC5_FEISHU_APP_SECRET
   FEISHU_USER_ACCESS_TOKEN
   REPORT_COVER_API_KEY
   BLUEAI_API_KEY

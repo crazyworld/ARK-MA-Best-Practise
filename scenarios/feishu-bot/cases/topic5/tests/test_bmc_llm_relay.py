@@ -121,6 +121,34 @@ class AgentByokTest(unittest.TestCase):
         self.assertEqual(sent, [{"X-User-Model-Header-Authorization": "v"}])
 
 
+class SharedTopicXConfigTest(unittest.TestCase):
+    """topic5/topic6 共用 ~/.arkagent/cases/topicX/config.env；topic5 专属的飞书 Bot 以
+    TOPIC5_FEISHU_APP_ID/SECRET 区分，未设置时回退通用 FEISHU_APP_*（不影响 topic6）。"""
+
+    BASE = {"ARK_API_KEY": "ak", "FEISHU_APP_ID": "cli_topic6", "FEISHU_APP_SECRET": "s6",
+            "TOPIC5_COORDINATOR_AGENT_ID": "agent", "TOPIC5_ENVIRONMENT_ID": "env"}
+
+    def test_prefixed_feishu_bot_wins(self):
+        cfg = config.load_case_config({**self.BASE, "TOPIC5_FEISHU_APP_ID": "cli_topic5",
+                                       "TOPIC5_FEISHU_APP_SECRET": "s5"})
+        self.assertEqual((cfg.feishu_app_id, cfg.feishu_app_secret), ("cli_topic5", "s5"))
+
+    def test_falls_back_to_generic_feishu_bot(self):
+        cfg = config.load_case_config(self.BASE)
+        self.assertEqual((cfg.feishu_app_id, cfg.feishu_app_secret), ("cli_topic6", "s6"))
+
+    def test_deploy_maps_prefixed_bot_into_sandbox(self):
+        script = (_CASE / "update_ma.sh").read_text(encoding="utf-8")
+        source = script.index('source "$CONFIG_FILE"')
+        mapping = script.index('FEISHU_APP_ID="${TOPIC5_FEISHU_APP_ID:-${FEISHU_APP_ID:-}}"')
+        check = script.index("for name in \\\n  ARK_API_KEY")
+        self.assertLess(source, mapping)
+        self.assertLess(mapping, check)
+        self.assertIn('FEISHU_APP_SECRET="${TOPIC5_FEISHU_APP_SECRET:-${FEISHU_APP_SECRET:-}}"', script)
+        for name in ("TOPIC5_FEISHU_APP_ID", "TOPIC5_FEISHU_APP_SECRET"):
+            self.assertIn(name, script.split("ISOLATED_TEST_ENV_KEYS=(", 1)[1].split("\n)", 1)[0])
+
+
 class DeployScriptTest(unittest.TestCase):
     def test_deploy_requires_relay_and_byok(self):
         script = (_CASE / "update_ma.sh").read_text(encoding="utf-8")
