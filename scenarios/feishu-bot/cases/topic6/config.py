@@ -60,6 +60,19 @@ class Topic6Config:
     # Gateway 侧妙搭兜底发布（Phase H 遇不可抗力时的 backup）。cli 为空 = 不启用兜底，行为与原来一致。
     miaoda_cli_bin: str = ""
     miaoda_node_bin_dir: str = ""
+    # 调度方 open_id → 固定真人 open_id（TOPIC6_PROXY_OPEN_IDS="ou_bot:ou_human,..."）。
+    # 调度 Bot 代发的消息按该真人处理（白名单/妙搭 OAuth/HC 通知/操作人）。临时能力。
+    proxy_open_ids: tuple[tuple[str, str], ...] = ()
+
+
+def _proxy_open_ids(environ: Mapping[str, str]) -> tuple[tuple[str, str], ...]:
+    pairs = []
+    for item in (environ.get("TOPIC6_PROXY_OPEN_IDS") or "").replace(",", " ").split():
+        src, sep, dst = item.partition(":")
+        if not sep or not src.strip() or not dst.strip():
+            raise RuntimeError(f"TOPIC6_PROXY_OPEN_IDS 格式应为 源open_id:目标open_id，非法项:{item}")
+        pairs.append((src.strip(), dst.strip()))
+    return tuple(pairs)
 
 def _auto_pass_hc(environ: Mapping[str, str]) -> tuple[str, ...]:
     raw = environ.get("TOPIC6_AUTO_PASS_HC")
@@ -125,4 +138,5 @@ def load_case_config(env: Optional[Mapping[str, str]] = None) -> Topic6Config:
         auto_pass_hc=_auto_pass_hc(environ),
         miaoda_cli_bin=(environ.get("TOPIC6_MIAODA_CLI_BIN") or "").strip(),
         miaoda_node_bin_dir=(environ.get("TOPIC6_MIAODA_NODE_BIN_DIR") or "").strip(),
+        proxy_open_ids=_proxy_open_ids(environ),
     )

@@ -11,6 +11,24 @@
 
 ---
 
+## 2026-11-25
+
+### 支持调度 Bot（阿哒）发起任务、富文本入站、话题内文字确认 HC（临时，迁移 ada_ma 后删除）
+
+- **触发**：Ada 数字员工样例录制需要阿哒 @本 Bot 发 `/start` 调度 topic6；阿哒发的是富文本(post)；HC 审核除点卡片按钮外要能在话题里用文字确认。
+- **根因**：
+  - `arkagent/feishu.py` `_inbound_to_incoming` 只放行 text 或带附件的消息，纯文字 post 被直接丢弃；
+  - 发起人是调度 Bot 时，妙搭 OAuth 会对 Bot 发起扫码、HC 通知也 @ 到 Bot；
+  - 话题内文字只在「先点备注按钮」后才被接住，其余文字落到 `/start` 用法提示。
+- **改动**：
+  - `arkagent/feishu.py`：纯文字 post 放行（SDK 已转 Markdown 正文）；
+  - `config.py`：新增 `TOPIC6_PROXY_OPEN_IDS`（`源open_id:目标open_id`）；
+  - `gateway.py`：`_process` 入口按映射替换发起人；post 首行标题 `# xxx` 剥离后再解析命令；待审 HC 时
+    `通过/确认/同意/pass/ok`、`打回|驳回 [原因]`、`补充|备注 <内容>` 构造与卡片回调同形的 action 交
+    `Topic6Hitl.handle_card_action`，落库/patch 卡片/resume/通知与按钮完全一致；其他文字行为不变。
+    定位 HC：话题根为 HC 卡片时按卡片反查，否则取本群活跃任务的未处理 HC。
+- **测试**：`tests/test_topic6_bot_dispatch.py`（24 条，含真实 Topic6Hitl 联调）。
+
 ## 2026-11-23
 
 ### 网页报告：营销观察「原始热点」与消费洞察「触发事件」统一呈现

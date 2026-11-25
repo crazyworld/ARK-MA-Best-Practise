@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import os
@@ -86,6 +87,26 @@ except ImportError:  # pragma: no cover - standalone compatibility
     from config import Topic6Config
 
 log = logging.getLogger("arkagent.case.topic6")
+
+# 话题内文字确认 HC（与卡片按钮等价）。只认明确关键词，其余文字照旧走后续分支。
+_TEXT_HC_PASS_RE = re.compile(r"^(?:通过|确认|同意|pass|ok)[。.!！]?$", re.IGNORECASE)
+_TEXT_HC_REJECT_RE = re.compile(r"^(?:打回|驳回|reject)(?:[\s:：,，]+(.*))?$", re.IGNORECASE | re.DOTALL)
+_TEXT_HC_REMARK_RE = re.compile(r"^(?:补充|备注|remark)[\s:：,，]+(.+)$", re.IGNORECASE | re.DOTALL)
+
+
+def parse_text_hc_decision(text: str) -> tuple[str, str] | None:
+    """「通过」→pass；「打回 原因」→reject；「补充 内容」→remark；其他返回 None。"""
+    text = text.strip()
+    if _TEXT_HC_PASS_RE.fullmatch(text):
+        return "pass", ""
+    match = _TEXT_HC_REJECT_RE.fullmatch(text)
+    if match:
+        return "reject", (match.group(1) or "").strip()
+    match = _TEXT_HC_REMARK_RE.fullmatch(text)
+    if match:
+        return "remark", match.group(1).strip()
+    return None
+
 TOKEN_REFRESH_INTERVAL_S = 60.0
 # 飞书 tenant token 剩余 >30min 时重复申请返回同一个；进入最后 30min 才签发新 token 且旧的
 # 仍有效到期，因此在剩余 <30min 时换新，Vault 下一次解析即生效、无空窗。
@@ -199,12 +220,20 @@ class Topic6Gateway:
 
     async def _process(self, message: IncomingMessage) -> None:
         try:
+            # 调度 Bot 代发：按配置换成固定真人，后续白名单/OAuth/通知/操作人都按该人处理。
+            proxy_to = dict(getattr(self._config, "proxy_open_ids", ()) or ()).get(message.user_open_id)
+            if proxy_to:
+                log.info("topic6 proxy sender %s -> %s", message.user_open_id, proxy_to)
+                message = dataclasses.replace(message, user_open_id=proxy_to, user_id="")
             if self._authorized and message.user_open_id not in self._authorized:
                 await self._reply(message.chat_id, "当前用户未授权。请联系管理员把你的 open_id 加入白名单。")
                 self._store.complete_event(message.event_id, "completed")
                 return
 
             text = normalize_user_text(message.text, message.mentioned_bot)
+            if message.content_type == "post" and text.startswith("# "):
+                # 富文本标题被 SDK 渲染成首行「# 标题」，去掉后再解析命令
+                text = normalize_user_text(text.partition("\n")[2], message.mentioned_bot)
 
             if text == "/new":
                 cancelled = await self._runner.cancel_active_job(
@@ -322,6 +351,10 @@ class Topic6Gateway:
                 self._store.complete_event(message.event_id, "completed")
                 return
 
+            if await self._resolve_hc_by_text(message, text):
+                self._store.complete_event(message.event_id, "completed")
+                return
+
             # 待裁决任务时只回复了选项字母(如「A」)：提示正确命令，不自动执行裁决。
             if re.fullmatch(r"[A-Za-z]", text):
                 pending = self._pending_decision_job(message)
@@ -381,6 +414,38 @@ class Topic6Gateway:
                 f"❌ 执行异常{phase_hint}：{reason}{session_hint}\n"
                 f"建议：发送 /continue 尝试恢复，或 /new 取消当前任务重新开始。",
             )
+
+    async def _resolve_hc_by_text(self, message: IncomingMessage, text: str) -> bool:
+        """待审 HC 时 @bot 发「通过 / 打回 原因 / 补充 内容」，等价于点卡片按钮。
+
+        定位：话题根是 HC 卡片 → 按卡片反查；否则取本群当前活跃任务的未处理 HC。
+        构造与卡片回调同形的 dict 交给 handle_card_action，落库/patch 卡片/resume/通知全复用。
+        """
+        parsed = parse_text_hc_decision(text)
+        store = self._pipeline_store
+        if parsed is None or store is None:
+            return False
+        hc_event = store.get_pending_hc_by_card(message.root_id) if message.root_id else None
+        if hc_event is None:
+            job = store.get_active_job()
+            if job is None or job.chat_id != message.chat_id or job.status != STATUS_WAIT_HC:
+                return False
+            hc_event = store.latest_hc_for_job(job.job_id, job.current_phase)
+            if hc_event is None or hc_event.resolved_at is not None:
+                return False
+        decision, note = parsed
+        log.info("topic6 text hc decision job=%s hc=%s event=%s decision=%s",
+                 hc_event.job_id, hc_event.hc_kind, hc_event.id, decision)
+        await self._hitl.handle_card_action({
+            "chat_id": message.chat_id,
+            "operator": {"open_id": message.user_open_id},
+            "action": {
+                "value": {"decision": decision, "event_id": hc_event.id,
+                          "job_id": hc_event.job_id, "hc": hc_event.hc_kind},
+                "form_value": {"note": note} if note else {},
+            },
+        })
+        return True
 
     def _pending_decision_job(self, message: IncomingMessage):
         """本会话中由 [need_decision] 停下、等待 /continue <选项> 的任务；没有返回 None。"""

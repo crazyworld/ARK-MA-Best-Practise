@@ -1460,7 +1460,8 @@ def _inbound_to_incoming(msg: object) -> Optional[IncomingMessage]:
     """
     content_type = str(getattr(msg, "raw_content_type", None) or "")
     resources = _extract_resources(msg)
-    if content_type != "text" and not resources:
+    # 纯文字富文本（post）同样放行：调度 Bot（如 Ada）默认发 post；SDK 已转成 Markdown 正文。
+    if content_type not in ("text", "post") and not resources:
         return None
     conversation = getattr(msg, "conversation", None)
     sender = getattr(msg, "sender", None)
