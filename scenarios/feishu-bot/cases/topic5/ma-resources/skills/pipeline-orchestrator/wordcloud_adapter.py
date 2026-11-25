@@ -138,6 +138,21 @@ def render(spec, out_root, skill_dir, font=None):
     }
 
 
+def _row_platform(row: dict, inherited: str = "") -> str:
+    value = row.get("_platform") or row.get("platform") or row.get("site_name") or inherited
+    reverse = {v: k for k, v in LABELS.items()}
+    return reverse.get(value, value)
+
+
+def platform_matches(platform: str, row: dict, inherited: str = "") -> bool:
+    """词云范围的平台过滤。活动词云按「全部所选平台」合并（platform=all），此时不过滤：
+    逐帖都带真实平台，按 all 精确比较会把原帖全部跳过（KS_Wordcloud_Skill_Integration:62）。"""
+    if platform == "all":
+        return True
+    row_platform = _row_platform(row, inherited)
+    return not row_platform or row_platform == platform
+
+
 def walk_posts(value, pointer="", platform=""):
     """Locate server post fields in the actual immutable acquisition artifact."""
     if isinstance(value, list):
@@ -174,11 +189,9 @@ def prepare_posts(state, scope, destination):
     rows = []
     seen_ids = set()
     for pointer, row, inherited in walk_posts(raw, prefix):
-        row_platform = row.get("_platform") or row.get("platform") or row.get("site_name") or inherited
-        reverse = {v: k for k, v in LABELS.items()}
-        row_platform = reverse.get(row_platform, row_platform)
-        if row_platform and row_platform != platform:
+        if not platform_matches(platform, row, inherited):
             continue
+        row_platform = _row_platform(row, inherited)
         body_key = "content" if isinstance(row.get("content"), str) else "text"
         post_id = str(row.get("id") or row.get("item_id") or row.get("url") or pointer)
         if post_id in seen_ids:

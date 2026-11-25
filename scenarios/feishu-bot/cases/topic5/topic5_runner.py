@@ -184,7 +184,7 @@ def activity_attachment_hint(job: PipelineJob) -> str:
             "n03b_activity_pull": "HC_COLLECT",
         }.get(job.current_phase, job.current_phase)
         return {
-            "G1": "当前等待 G1 需求确认。请先提交需求问卷，再完成 G2 方案确认后上传活动明细。",
+            "G1": "当前等待 G1 需求确认。请先在需求卡片中提交，再完成 G2 方案确认后上传活动明细。",
             "G2": "当前等待 G2 方案确认。请先在方案卡片中点击“通过”，再上传活动明细 `.xlsx`。",
             "N10": (
                 "当前等待 N10 观点与 UGC 标签确认。请在审核卡片中核对定义、边界和原帖后点击“通过”；"

@@ -24,6 +24,22 @@ from PIL import Image
 from io import BytesIO
 
 
+_DEFAULT_BASE = "https://bmc-llm-relay.bluemediagroup.cn"
+
+
+def cover_endpoint() -> tuple[str, str]:
+    """封面接口凭据与地址。优先 REPORT_COVER_*，缺省复用沙箱统一的 bmc-llm-relay（LLM_RELAY_*）。
+
+    空字符串按未配置处理（Environment 渲染未设置的变量为空串，get(key, 默认值) 不会回落）。
+    """
+    key = (os.environ.get("REPORT_COVER_API_KEY") or os.environ.get("LLM_RELAY_API_KEY") or "").strip()
+    base = (os.environ.get("REPORT_COVER_API_BASE_URL") or os.environ.get("LLM_RELAY_BASE_URL")
+            or _DEFAULT_BASE).strip().rstrip("/")
+    if not base.endswith("/v1"):
+        base += "/v1"
+    return key, base + "/images/generations"
+
+
 def generate_report_cover_gpt(
     title: str,
     subtitle: str,
@@ -51,12 +67,10 @@ def generate_report_cover_gpt(
         dict: {"success": True/False, "path": ..., "size": ..., "error": ...}
     """
     # 凭据只从入参 / 环境变量读（禁止硬编码真实 key；原客户脚本在此硬编码了 relay key，迁入时移除）。
+    env_key, endpoint = cover_endpoint()
+    api_key = api_key or env_key
     if not api_key:
-        api_key = os.environ.get("REPORT_COVER_API_KEY")
-    if not api_key:
-        raise ValueError("缺少 REPORT_COVER_API_KEY（入参或环境变量），无法调用封面生成接口")
-
-    BASE_URL = os.environ.get("REPORT_COVER_API_BASE_URL", "https://bmc-llm-relay.bluemediagroup.cn")
+        raise ValueError("缺少封面接口凭据（REPORT_COVER_API_KEY 或 LLM_RELAY_API_KEY），无法调用封面生成接口")
 
     target_w, target_h = width, height
 
@@ -118,7 +132,7 @@ Create a professional ultra-wide banner cover image (3:1 aspect ratio) for a dat
 
     try:
         response = requests.post(
-            f"{BASE_URL}/v1/images/generations",
+            endpoint,
             headers=headers,
             json=payload,
             timeout=600

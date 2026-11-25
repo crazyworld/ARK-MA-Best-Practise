@@ -4,7 +4,8 @@
 只能在装了 arkagent 框架的 Gateway 宿主进程运行,无法在 MA 云沙箱内独立 import 测试。
 
 只处理 topic5 场景(复盘报告/营销复盘)的入站消息与卡片回调。与 topic6 的差异:
-  - 触发词是「复盘报告」「营销复盘」,demo 对清洗后活动明细稳定抽样最多 500 条
+  - 触发词是「复盘报告」「营销复盘」「活动复盘」；full 走自然语言需求受理（原版 Phase1 v1.12），
+    demo 用固定样例 G1 表单并对清洗后活动明细稳定抽样最多 500 条
   - 交付走飞书文档,**不需要** Miaoda 用户 OAuth / token-keepalive;过程文件经 Session
     输出目录同步到本地 ``data/artifacts/<job_id>/``(artifact_sync.py),可作测试回放来源
   - HC 门是 DAG 人工门 G1/G2/N10/G3/G4/HC7
@@ -64,12 +65,16 @@ CONTINUE_COMMAND_RE = re.compile(r"^/(?:continue|resume)(?:\s+(.*))?$", re.IGNOR
 # FIX-38：交接后修正（话题内，任务已完成时）。
 FIX_COMMAND_RE = re.compile(r"^/fix(?:\s+(.*))?$", re.IGNORECASE | re.DOTALL)
 
+# 开新任务的统一说法（full 走自然语言入口；demo 用固定样例演示）。
+_NEW_TASK_HINT = "开新任务请在群主时间线 @我 发送「复盘报告」并附上活动描述。"
 _USAGE = (
-    "当前 Bot 启用 topic5 复盘报告场景。发送「复盘报告 demo」"
-    "(G1 自动预填，清洗后活动明细最多 500 条)或"
-    "「复盘报告 full」(全量，默认；可直接附上活动描述、起止日期和平台，关键词由系统生成)触发;"
-    "两者质量门禁相同。"
-    "发送 /continue 续跑最近一次任务;发送 /new 可取消当前任务。"
+    "我负责营销活动复盘报告。在群主时间线 @我 发送「复盘报告」，并附上活动描述"
+    "（品牌和活动、统计起止日期、平台即可，关键词和过滤词由我生成），例如：\n"
+    "复盘报告 塔斯汀×Pingu联名活动，2026-10-22 至 2026-11-04，小红书和抖音\n"
+    "只发「复盘报告」时，我会先发一份描述模板；信息不全时我会在任务话题里追问，"
+    "直接在话题里回复即可，无需 @我。\n"
+    "「复盘报告 demo」使用固定样例演示，质量标准与正式任务相同。\n"
+    "在任务话题内：/continue 续跑任务，/new 取消任务。"
 )
 
 
@@ -180,18 +185,15 @@ class Topic5Gateway:
                 )
                 if cancelled is None:
                     hint = (
-                        "当前话题没有活跃任务。"
+                        "当前话题没有进行中的任务，无需取消。"
                         if message.thread_id
-                        else "主会话不绑定具体任务，请进入目标任务话题后发送 /new。"
+                        else "/new 用于取消某个任务，请在该任务的话题内发送；开新任务不需要 /new。"
                     )
-                    await self._reply(
-                        message.chat_id,
-                        f"[/new] {hint}也可在主会话发送「复盘报告 demo」或「复盘报告 full」开新一轮。",
-                    )
+                    await self._reply(message.chat_id, f"[/new] {hint}{_NEW_TASK_HINT}")
                 else:
                     await self._reply(
                         message.chat_id,
-                        f"[/new] 已取消当前任务 job_id={cancelled.job_id}(状态置为 failed:cancelled_by_user)。可再发触发词开新一轮。",
+                        f"[/new] 已取消当前任务（job_id={cancelled.job_id}）。{_NEW_TASK_HINT}",
                     )
                 self._store.complete_event(message.event_id, "completed")
                 return
@@ -225,12 +227,9 @@ class Topic5Gateway:
                     hint = (
                         "当前话题没有可续跑的任务。"
                         if message.thread_id
-                        else "主会话不绑定具体任务，请进入目标任务话题后发送 /continue。"
+                        else "/continue 用于续跑某个任务，请在该任务的话题内发送。"
                     )
-                    await self._reply(
-                        message.chat_id,
-                        f"[/continue] {hint}若要开新一轮，请在主会话发送「复盘报告 demo」或「复盘报告 full」。",
-                    )
+                    await self._reply(message.chat_id, f"[/continue] {hint}{_NEW_TASK_HINT}")
                 else:
                     message_hint = (
                         "补充消息已注入。"

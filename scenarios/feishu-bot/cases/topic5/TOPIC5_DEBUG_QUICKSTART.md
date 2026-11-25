@@ -135,17 +135,18 @@ topic5/topic6 共用这一份 config.env，topic 专属值用前缀区分。topi
 # DataHub——n09/n11 批量 AI 标注
 DATAHUB_API_KEY=<业务对接人给的 Key>
 DATAHUB_BASE_URL=https://...
-DATAHUB_ANNOTATE_MODEL=gpt-4o-mini
+DATAHUB_ANNOTATE_MODEL=gpt-5.4-mini   # 由 environment.json 固定注入（原版口径）
 
 # SSJH 社媒统计——n05/n06/n13 取数
 SSJH_API_TOKEN=<业务对接人给的 Token>
 
-# 报告封面服务（n14，可选；缺失则无封面）
-REPORT_COVER_API_KEY=xxx
-REPORT_COVER_API_BASE_URL=https://...
+# 模型统一走 bmc-llm-relay（标注 claude-haiku / 撰写 claude-sonnet-4-6 / 封面 gpt-image-2）
+LLM_RELAY_BASE_URL=https://.../v1
+LLM_RELAY_API_KEY=<relay key>
 
-# Ark Chat/Embedding（语义 handler；ARK_* 可回退 OPENAI_*，两者都缺失则阻断）
-ARK_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
+# 报告封面（n14，必需）：默认复用 LLM_RELAY_*；仅封面需单独账号时才设置
+# REPORT_COVER_API_KEY=
+# REPORT_COVER_API_BASE_URL=
 ```
 
 > 图表（n14）本地渲染为 PNG，交付时经**飞书原生 media 上传**（`drive/v1/medias/upload_all`）进文档 image block，不需要外部对象存储配置。缺图表渲染器（node_modules 未装）时 n14 阻断，禁止无图交付。
@@ -300,7 +301,7 @@ Coordinator 必须将完整 JSON 原样传给 `run_pipeline.py resume --note`，
 | Skill 找不到                  | 核对打包/上传结果和 Agent Skill 绑定，按 §3.1 原地更新后新建 Session             |
 | HC 卡片点击后无响应           | Feishu Bot 后台「事件订阅」里是否开启 `card.action.trigger` 权限                |
 | SSE 中断/超时                 | 单会话默认超时，超长任务加大 `SESSION_TIMEOUT_MS`（毫秒）                       |
-| n14 图表渲染失败              | 检查 `REPORT_COVER_API_KEY`；沙箱 node_modules 是否安装成功（看 setup_script 日志）|
+| n14 图表渲染失败              | 看报错原文（已带出渲染器 stderr / 封面接口错误）；封面凭据默认用 `LLM_RELAY_*`；沙箱 node_modules 是否安装成功（看 setup_script 日志）|
 | n09/n11 标注走降级            | 检查 `DATAHUB_API_KEY` / `DATAHUB_BASE_URL`；行数 <1000 会走小引擎 semantic     |
 | 飞书交付失败                  | 检查任务发起人身份、转移或 `full_access` 协作者授权与权限回读；按实际 P0 处理 |
 | Excel 上传提示配额不足        | 核对是否仍使用旧 Session 或 `ark_files`；新 Session 默认采用附件直读，沙箱须具备飞书资源下载凭证 |

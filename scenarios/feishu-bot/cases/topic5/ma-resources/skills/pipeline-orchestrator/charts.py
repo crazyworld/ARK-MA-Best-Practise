@@ -88,8 +88,8 @@ def renderer_diagnostic() -> str:
 
 
 def cover_available() -> bool:
-    """封面真生成条件：有 relay key 且封面脚本在仓。"""
-    return bool(os.environ.get("REPORT_COVER_API_KEY")) and \
+    """封面真生成条件：有封面凭据（REPORT_COVER_API_KEY，缺省复用 LLM_RELAY_API_KEY）且封面脚本在仓。"""
+    return bool((os.environ.get("REPORT_COVER_API_KEY") or os.environ.get("LLM_RELAY_API_KEY") or "").strip()) and \
         os.path.isfile(os.path.join(COVER_DIR, "scripts", "generate_cover_gpt.py"))
 
 
@@ -348,7 +348,9 @@ def _analysis_specs(cid: str, stats: dict) -> list[dict]:
         specs.append({
             "chart_id": f"{cid}_kol_effectiveness",
             "title": f"活动 {cid}·达人层级效能",
-            "chart_type": "bar",          # 双轴柱图：左轴声量占比，右轴条均互动量
+            # KS_Chart_Spec.md:65 双轴：左轴声量占比（柱），右轴条均互动量（线）。
+            # 渲染器的 bar 只取 series[0]，会丢掉右轴数据。
+            "chart_type": "bar_line_combo",
             "categories": [labels.get(level, level) for level in levels],
             "series": [
                 _series("声量占比", [kol[level]["volume_share"] for level in levels]),
@@ -481,7 +483,7 @@ def _build_chart_specs(stats_bundle: dict, wordcloud_data: dict, plan: Optional[
             specs.append({
                 "chart_id": "baseline_lift",
                 "title": "活动期与基准期日均声量对比",
-                "chart_type": "bar",
+                "chart_type": "grouped_bar",   # KS_Chart_Spec.md:67 分组柱图（bar 只画第一组）
                 "categories": categories,
                 "series": [
                     _series("日均声量", volume_series),
@@ -514,11 +516,16 @@ def _render_png(spec: dict, out_png: str, width: int = 1200, height: int = 600) 
         _json.dump(spec, f, ensure_ascii=False)
         spec_path = f.name
     try:
-        subprocess.run(
-            ["node", _RENDER_SCRIPT, "--spec", spec_path, "--output", out_png,
-             "--width", str(width), "--height", str(height)],
-            capture_output=True, timeout=120, check=True,
-        )
+        try:
+            subprocess.run(
+                ["node", _RENDER_SCRIPT, "--spec", spec_path, "--output", out_png,
+                 "--width", str(width), "--height", str(height)],
+                capture_output=True, timeout=120, check=True,
+            )
+        except subprocess.CalledProcessError as error:
+            # 带出渲染器原文（字体缺失、chart_type 不支持等），否则只剩 exit status 1。
+            detail = (error.stderr or b"").decode("utf-8", "replace").strip()[-2000:]
+            raise RuntimeError(f"图表渲染失败 {spec.get('chart_id')}：{detail or error}") from error
     finally:
         try:
             os.unlink(spec_path)
@@ -535,20 +542,34 @@ def _render_wordcloud(spec: dict, out_root: str) -> dict:
     return wordcloud_adapter.render(spec, out_root, WORDCLOUD_DIR, font)
 
 
-def _gen_cover(title: str, subtitle: str, out_png: str) -> Optional[str]:
-    """封面真生成（best-effort）；成功返回本地路径，任何失败返回 None。"""
-    if not cover_available():
-        return None
+def _load_cover_fn():
     if os.path.join(COVER_DIR, "scripts") not in sys.path:
         sys.path.insert(0, os.path.join(COVER_DIR, "scripts"))
-    try:
-        from generate_cover_gpt import generate_report_cover_gpt  # noqa: E402
-        r = generate_report_cover_gpt(
-            title=title, subtitle=subtitle, title_en=title, subtitle_en=subtitle,
-            output_path=out_png)
-        return out_png if r.get("success") else None
-    except Exception:
-        return None
+    from generate_cover_gpt import generate_report_cover_gpt  # noqa: E402
+    return generate_report_cover_gpt
+
+
+# 封面 prompt 只能是英文（脚本说明：中文会触发 moderation_blocked）。标题以「由模型在画面上
+# 渲染的中文」形式出现，prompt 里用英文描述替代原文：中文原标题不进 prompt。
+_COVER_TITLE_EN = "Marketing Campaign Review Report"
+
+
+def _ascii_or(text: str, fallback: str) -> str:
+    return text if text and all(ord(ch) < 128 for ch in text) else fallback
+
+
+def _gen_cover(title: str, subtitle: str, out_png: str) -> Optional[str]:
+    """封面真生成；成功返回本地路径。失败带原因抛出（FIX-39 封面必须非空，不再静默降级）。"""
+    if not cover_available():
+        raise RuntimeError("封面生成不可用：缺少 REPORT_COVER_API_KEY / LLM_RELAY_API_KEY 或封面脚本")
+    generate = _load_cover_fn()
+    r = generate(title=title, subtitle=subtitle,
+                 title_en=_ascii_or(title, _COVER_TITLE_EN),
+                 subtitle_en=_ascii_or(subtitle, "Data Insight Report"),
+                 output_path=out_png)
+    if not r.get("success"):
+        raise RuntimeError(f"封面生成失败：{r.get('error') or '未知原因'}")
+    return out_png
 
 
 # FIX-39 视觉自检（确定性部分）：尺寸、非空、非黑底。可读性/乱码交独立 Validator 逐张查看。
