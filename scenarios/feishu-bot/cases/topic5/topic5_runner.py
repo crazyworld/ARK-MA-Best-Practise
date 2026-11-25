@@ -453,31 +453,39 @@ def _g3_auto_decision(payload: dict) -> tuple[str, str]:
     context = payload.get("review_context")
     qc = context.get("qc_report") if isinstance(context, dict) else None
     if not isinstance(qc, dict):
-        raise ValueError("G3 缺少独立 Validator 结果")
+        stale = isinstance(context, dict) and context.get("qc_report_stale")
+        raise ValueError("G3 缺少独立 Validator 结果"
+                         + ("（validation/qc_report.json 仍是上一版报告的结果）" if stale else ""))
     metadata = qc.get("qc_metadata") or {}
     execution_ref = qc.get("execution_ref") or {}
     subject = qc.get("subject") or {}
+    report_ref = context.get("report_ref") or {}
     input_keys = {
         item.get("key")
         for item in (metadata.get("input_artifacts") or [])
         if isinstance(item, dict) and item.get("sha256")
     }
-    if (
-        qc.get("validator") != "topic5-validator"
-        or not subject.get("artifact_id")
-        or not subject.get("sha256")
-        or not qc.get("execution_source")
-        or not qc.get("rules_version")
-        or not qc.get("validator_version")
-        or metadata.get("mode") != "independent-agent"
-        or metadata.get("validator_id") != "topic5-validator"
-        or not all(
-            execution_ref.get(key)
-            for key in ("task_id", "run_id", "attempt_id")
-        )
-        or not _G3_REQUIRED_INPUT_KEYS.issubset(input_keys)
-    ):
-        raise ValueError("G3 Validator 结果缺少独立身份、版本或完整输入绑定")
+    # 逐项列出缺口，失败信息写清具体缺哪个字段（不再只给一句笼统结论）。
+    checks = {
+        "validator": qc.get("validator") == "topic5-validator",
+        "subject.artifact_id": bool(subject.get("artifact_id")),
+        "subject.sha256": bool(subject.get("sha256")),
+        "subject=当前报告版本": not report_ref or (
+            subject.get("artifact_id") == report_ref.get("artifact_id")
+            and subject.get("sha256") == report_ref.get("sha256")),
+        "execution_source": bool(qc.get("execution_source")),
+        "rules_version": bool(qc.get("rules_version")),
+        "validator_version": bool(qc.get("validator_version")),
+        "qc_metadata.mode": metadata.get("mode") == "independent-agent",
+        "qc_metadata.validator_id": metadata.get("validator_id") == "topic5-validator",
+        "execution_ref": all(execution_ref.get(key)
+                             for key in ("task_id", "run_id", "attempt_id")),
+        "input_artifacts": _G3_REQUIRED_INPUT_KEYS.issubset(input_keys),
+    }
+    missing = [name for name, ok in checks.items() if not ok]
+    if missing:
+        raise ValueError("G3 Validator 结果缺少独立身份、版本或完整输入绑定："
+                         + "、".join(missing))
 
     p0_count = int(qc.get("p0_count") or 0)
     has_p0 = bool(qc.get("has_p0"))

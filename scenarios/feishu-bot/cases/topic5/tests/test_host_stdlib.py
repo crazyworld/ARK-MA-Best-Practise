@@ -1213,6 +1213,26 @@ class RunnerFinalResultParsingTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "独立身份"):
             self.runner._g3_auto_decision(payload)
 
+    def test_g3_auto_decision_rejects_result_bound_to_old_report(self) -> None:
+        payload = self._g3_payload(p0_count=0)
+        payload["review_context"]["report_ref"] = {
+            "artifact_id": "report_md@v2", "key": "report_md", "version": 2, "sha256": "new"}
+        with self.assertRaisesRegex(ValueError, "subject=当前报告版本"):
+            self.runner._g3_auto_decision(payload)
+
+    def test_g3_auto_decision_names_missing_fields(self) -> None:
+        payload = self._g3_payload(p0_count=0)
+        del payload["review_context"]["qc_report"]["rules_version"]
+        with self.assertRaisesRegex(ValueError, "rules_version"):
+            self.runner._g3_auto_decision(payload)
+
+    def test_g3_auto_decision_reports_stale_qc(self) -> None:
+        payload = self._g3_payload(p0_count=0)
+        payload["review_context"]["qc_report"] = None
+        payload["review_context"]["qc_report_stale"] = True
+        with self.assertRaisesRegex(ValueError, "上一版报告"):
+            self.runner._g3_auto_decision(payload)
+
     def test_post_handoff_fix_reuses_done_run(self) -> None:
         """FIX-38：/fix 只作用于话题内已完成任务，沿用原 Run 注入 post-handoff-fix 命令。"""
         with tempfile.TemporaryDirectory() as temp_dir:

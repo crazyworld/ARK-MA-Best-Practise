@@ -195,7 +195,7 @@ env_payload="$(
 # 沙箱内去噪/标注/写作经 bmc-llm-relay 调模型；模型 ID 不存在或无权限时要到 n07b 才暴露。
 # 部署前用 1 token 请求逐个探测（含 DataHub 传入的标注模型，relay 与 DataHub 模型列表一致），
 # 失败则中止且不更新 Environment。
-for _model_key in TOPIC5_SEMANTIC_MODEL TOPIC5_MODEL_ID DATAHUB_ANNOTATE_MODEL; do
+for _model_key in TOPIC5_SEMANTIC_MODEL TOPIC5_REPORT_MODEL TOPIC5_MODEL_ID DATAHUB_ANNOTATE_MODEL; do
   _model=$(jq -r --arg k "$_model_key" '.config.env[$k] // ""' <<<"$env_payload")
   [ -n "$_model" ] || continue
   _code=$(curl -sS -o /dev/null -w "%{http_code}" -X POST "${LLM_RELAY_BASE_URL%/}/chat/completions" \

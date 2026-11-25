@@ -118,9 +118,9 @@ class TestReportRepairStructure(unittest.TestCase):
     def test_fix_report_stops_after_three_structure_errors(self):
         with patch("semantic.llm_available", return_value=True), \
                 patch("semantic.chat", return_value="# 截断报告") as model:
-            with self.assertRaisesRegex(ValueError, "3 次节点内返修"):
-                handlers.fix_report({"id": "n19"}, self.state, {})
+            out = handlers.fix_report({"id": "n19"}, self.state, {})
         self.assertEqual(model.call_count, 3)
+        self.assertTrue(out["artifacts"]["report_md"]["unresolved_p0"])
 
     def test_actual_hot_tables_reject_missing_rows_columns_and_changed_values(self):
         assembled = contract.assemble(self.base, plan={}, stats=self.stats, charts={}, insight={})

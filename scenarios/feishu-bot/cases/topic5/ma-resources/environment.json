@@ -27,6 +27,7 @@
       "PYTHONUNBUFFERED": "1",
       "TOPIC5_MODEL_ID": "claude-haiku-4-5-20251001",
       "TOPIC5_SEMANTIC_MODEL": "claude-haiku-4-5-20251001",
+      "TOPIC5_REPORT_MODEL": "claude-sonnet-4-6",
       "LLM_RELAY_BASE_URL": "${LLM_RELAY_BASE_URL}",
       "LLM_RELAY_API_KEY": "${LLM_RELAY_API_KEY}",
       "DATAHUB_API_KEY": "${DATAHUB_API_KEY}",

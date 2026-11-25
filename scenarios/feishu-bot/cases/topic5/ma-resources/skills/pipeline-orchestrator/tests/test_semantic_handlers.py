@@ -217,9 +217,12 @@ class TestSemanticDegradedContract(unittest.TestCase):
 
         with patch("semantic.llm_available", return_value=True), \
                 patch("semantic.chat", side_effect=fake_chat):
-            with self.assertRaises(ValueError):
-                handlers.fix_report({"id": "n19", "name": "fix"}, self.st, {})
+            out = handlers.fix_report({"id": "n19", "name": "fix"}, self.st, {})
         self.assertIn("TAIL_SENTINEL", prompts[0])
+        # 截断替换被拒：保留完整原稿并标出未关闭 P0，交 n17 复检 → 超限进 HC7（原版 v0.60:286）
+        report = out["artifacts"]["report_md"]
+        self.assertIn("TAIL_SENTINEL", report["markdown"])
+        self.assertTrue(report["unresolved_p0"])
 
     def test_fix_report_retries_preflight_inside_same_node(self):
         stats = {"campaigns": {"campA": {}}}
@@ -311,12 +314,12 @@ class TestSemanticDegradedContract(unittest.TestCase):
                     "handlers.validator_mod.validate_report",
                     return_value=failed,
                 ):
-            with self.assertRaisesRegex(
-                ValueError, "3 次节点内返修后仍有确定性 P0"
-            ):
-                handlers.fix_report(
-                    {"id": "n19", "name": "fix"}, self.st, {}
-                )
+            out = handlers.fix_report(
+                {"id": "n19", "name": "fix"}, self.st, {}
+            )
+        report = out["artifacts"]["report_md"]
+        self.assertEqual([i["id"] for i in report["unresolved_p0"]], ["P0-still-open"])
+        self.assertEqual(report["deterministic_preflight"]["attempts"], 3)
 
 
 if __name__ == "__main__":

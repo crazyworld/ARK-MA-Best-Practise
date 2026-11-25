@@ -25,6 +25,10 @@ from contextlib import contextmanager
 from typing import Any
 
 _DEFAULT_MODEL = "claude-haiku-4-5-20251001"
+# 报告撰写/经验总结/返修模型（原版 KS_Content_Analysis_Prompt.md:142「推荐 claude-sonnet-4-6 或以上」）。
+_DEFAULT_REPORT_MODEL = "claude-sonnet-4-6"
+# 未显式传 timeout 时的整体时限（秒）；可由 TOPIC5_SEMANTIC_TIMEOUT_SEC 覆盖。
+_DEFAULT_TIMEOUT_SEC = 180
 
 
 @contextmanager
@@ -39,7 +43,7 @@ def _hard_deadline(seconds: int):
         return
 
     def on_timeout(_signum, _frame):
-        raise TimeoutError(f"方舟流式响应超过整体时限 {seconds}s")
+        raise TimeoutError(f"relay 流式响应超过整体时限 {seconds}s")
 
     previous_handler = signal.getsignal(signal.SIGALRM)
     signal.signal(signal.SIGALRM, on_timeout)
@@ -67,6 +71,19 @@ def llm_available() -> bool:
 
 def _model() -> str:
     return os.environ.get("TOPIC5_SEMANTIC_MODEL") or _DEFAULT_MODEL
+
+
+def report_model() -> str:
+    """报告撰写类调用的模型：TOPIC5_REPORT_MODEL → 默认 claude-sonnet-4-6。"""
+    return os.environ.get("TOPIC5_REPORT_MODEL") or _DEFAULT_REPORT_MODEL
+
+
+def _overall_timeout(explicit: int | None) -> int:
+    """调用方显式给出的时限优先（长报告需要更长时间），环境变量只覆盖默认值。"""
+    if explicit:
+        return int(explicit)
+    return int(os.environ.get("TOPIC5_SEMANTIC_TIMEOUT_SEC") or _DEFAULT_TIMEOUT_SEC)
+
 
 
 def parse_json(text: str) -> Any:
@@ -130,8 +147,9 @@ def with_lm(system: str, lm_scope: str | None) -> str:
 
 
 def chat(system: str, user: str, *, max_tokens: int = 4096,
-         temperature: float = 0.2, timeout: int = 180, retries: int = 2,
-         thinking: str | None = None, lm_scope: str | None = None) -> str:
+         temperature: float = 0.2, timeout: int | None = None, retries: int = 2,
+         thinking: str | None = None, lm_scope: str | None = None,
+         model: str | None = None) -> str:
     """bmc-llm-relay OpenAI 兼容 chat/completions（流式）。无凭据直接抛错，由调用方降级。
 
     thinking 参数保留签名兼容；relay 的 GPT 模型不接受 thinking 字段（400），请求不再携带。
@@ -141,7 +159,7 @@ def chat(system: str, user: str, *, max_tokens: int = 4096,
     if not base or not key:
         raise RuntimeError("缺少 bmc-llm-relay 凭据（LLM_RELAY_BASE_URL/LLM_RELAY_API_KEY）")
     payload = {
-        "model": _model(),
+        "model": model or _model(),
         "max_tokens": max_tokens,
         "temperature": temperature,
         "stream": True,
@@ -156,9 +174,7 @@ def chat(system: str, user: str, *, max_tokens: int = 4096,
     for attempt in range(retries):
         parts: list[str] = []
         finish = ""
-        overall_timeout = int(
-            os.environ.get("TOPIC5_SEMANTIC_TIMEOUT_SEC") or timeout
-        )
+        overall_timeout = _overall_timeout(timeout)
         idle_timeout = int(
             os.environ.get("TOPIC5_SEMANTIC_IDLE_TIMEOUT_SEC") or 45
         )
@@ -176,7 +192,7 @@ def chat(system: str, user: str, *, max_tokens: int = 4096,
                     for raw in resp:
                         if time.monotonic() >= deadline:
                             raise TimeoutError(
-                                f"方舟流式响应超过整体时限 {overall_timeout}s"
+                                f"relay 流式响应超过整体时限 {overall_timeout}s"
                             )
                         line = raw.decode("utf-8").strip()
                         if not line.startswith("data:"):
@@ -187,7 +203,7 @@ def chat(system: str, user: str, *, max_tokens: int = 4096,
                         chunk = json.loads(data)
                         if chunk.get("error"):
                             raise RuntimeError(
-                                f"方舟流式错误: {chunk['error']!r}"
+                                f"relay 流式错误: {chunk['error']!r}"
                             )
                         choices = chunk.get("choices") or []
                         if not choices:
@@ -210,6 +226,7 @@ def chat(system: str, user: str, *, max_tokens: int = 4096,
                 detail = ""
             error.msg = (f"{error.msg} model={payload['model']} "
                          f"input_chars={len(system) + len(user)} body={detail}")
+            # relay 的 400 也出现过偶发（job_bf3c6b52db7b n09b 事后重放成功），保持重试。
             if attempt == retries - 1:
                 raise
             time.sleep(2 ** attempt)

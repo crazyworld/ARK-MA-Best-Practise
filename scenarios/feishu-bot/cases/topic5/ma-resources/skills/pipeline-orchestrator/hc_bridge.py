@@ -131,13 +131,17 @@ def write_hc_pending(st, run_dir: Path) -> dict:
         }
     elif node_id == "n17_validate":
         qc_path = Path(run_dir) / "validation" / "qc_report.json"
+        report_ref = st.artifact_ref("report_md")
+        existing = (json.loads(qc_path.read_text(encoding="utf-8"))
+                    if qc_path.exists() else None)
+        # 只转发绑定当前报告版本的结果：上一轮的 qc_report 不能被 Gateway 用来判 pass/reject
+        # （QC_Protocol §8：结果须来自本轮独立审计产物）。
+        stale = isinstance(existing, dict) and existing.get("subject") != report_ref
         payload["review_context"] = {
-            "report_ref": st.artifact_ref("report_md"),
+            "report_ref": report_ref,
             "qc_report_path": str(qc_path),
-            "qc_report": (
-                json.loads(qc_path.read_text(encoding="utf-8"))
-                if qc_path.exists() else None
-            ),
+            "qc_report": None if stale else existing,
+            "qc_report_stale": stale,
         }
         # FIX-36：用户内容返工后，复检对象为飞书回读文本（MD 仅作结构对照）。
         rework = st.read_artifact("user_rework") or {}

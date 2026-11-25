@@ -2281,6 +2281,12 @@ def _report_evidence(stats: dict) -> dict:
     return compact(stats)
 
 
+# 报告撰写/经验总结/返修：原版推荐 claude-sonnet-4-6（KS_Content_Analysis_Prompt.md:142）；
+# 长报告输出约 1-2 万 token，按 relay 吞吐需要数分钟，整体时限单独放宽，不受标注默认 180s 约束。
+_REPORT_LLM = {"model": semantic.report_model(),
+               "timeout": int(os.environ.get("TOPIC5_REPORT_TIMEOUT_SEC") or 900)}
+
+
 @handler("write_report")
 def write_report(node, state, ctx):
     """报告内容层撰写（MD，不含飞书布局）。
@@ -2351,7 +2357,7 @@ def write_report(node, state, ctx):
               + "\n\n冻结需求：\n"
               + json.dumps(state.read_artifact("confirmed_plan") or {}, ensure_ascii=False))
     try:
-        md = semantic.chat(sys_p, user_p, max_tokens=16384, lm_scope="write_report")
+        md = semantic.chat(sys_p, user_p, max_tokens=16384, lm_scope="write_report", **_REPORT_LLM)
         if not md.strip():
             raise ValueError("模型返回空报告")
         # FIX-20：命中禁用措辞不再删除整句（删除会连带删掉数据与原文，且掩盖问题）。
@@ -2457,13 +2463,15 @@ def fix_report(node, state, ctx):
     current_md = canonical_previous
     current_issues = list(issues)
     last_preflight: dict = {}
+    best_md = canonical_previous   # 最后一版结构完整的全文（返修失败时交付复检，不丢稿）
     try:
         for repair_attempt in range(1, 4):
+            # 证据模块（Top10 表 / 代表原文 / 核心成果表等）由 assemble 按统计产物重建，
+            # 不交给模型整段重写——否则返修输出比首写还长，易超时或被截断。
             md = semantic.chat(
                 sys_p,
-                build_user_prompt(current_md, current_issues),
-                max_tokens=16384, lm_scope="fix_report",
-            )
+                build_user_prompt(_strip_generated_modules(current_md), current_issues),
+                max_tokens=16384, lm_scope="fix_report", **_REPORT_LLM)
             try:
                 if not md.strip():
                     raise ValueError("模型返回空修订")
@@ -2522,28 +2530,41 @@ def fix_report(node, state, ctx):
                     },
                 }}}
             current_md = md
+            best_md = md
             current_issues = remaining_p0
             sys_p += (
                 "\n上一版未通过确定性预检。下一次必须精确关闭以下剩余 P0，"
                 "不得用仅语义近似但机器规则不接受的表达。"
             )
-        remaining_ids = [
-            str(item.get("id") or item.get("title") or "unknown")
-            for item in (last_preflight.get("issues") or [])
-            if item.get("severity") == "P0"
-        ]
-        raise ValueError(
-            "fix_report: 3 次节点内返修后仍有确定性 P0: "
-            + ", ".join(remaining_ids)
-            + "; 具体问题: "
-            + _issue_text(last_preflight.get("issues") or [])
-        )
+        # 原版 Producer v0.60:286「最多 3 轮，超限触发 HC-7」：不判 run 失败。返回最后一版
+        # 结构完整的报告并标出未关闭的 P0，交 n17 独立复检、n18 按轮次路由（超限进 HC7 由用户处置）。
+        unresolved = [item for item in (last_preflight.get("issues") or [])
+                      if item.get("severity") == "P0"]
+        state.event(node.get("id", "n19_fix"), "repair_unresolved",
+                    ", ".join(str(i.get("id") or i.get("title") or "unknown")
+                              for i in unresolved)[:500])
+        return {"artifacts": {"report_md": {
+            "markdown": best_md, "chapters": chapters, "version": version,
+            "fixed_round": rnd, "source": "llm",
+            "guardrail_hits": _scan_forbidden(best_md),
+            "unresolved_p0": unresolved,
+            "deterministic_preflight": {
+                "attempts": 3, "p0_count": len(unresolved),
+                "scan_mode": last_preflight.get("scan_mode"),
+                "summary": _issue_text(unresolved)[:1000],
+            },
+        }}}
     except Exception:
         raise
 
 
 _EVIDENCE_BLOCK = re.compile(
     r"<!-- report-module:start -->.*?<!-- report-module:end -->", re.S)
+
+
+def _strip_generated_modules(md: str) -> str:
+    """去掉代码生成的模块（assemble 会按统计产物原样重建），只把可编辑正文交给模型。"""
+    return re.sub(r"\n{3,}", "\n\n", _EVIDENCE_BLOCK.sub("", md or ""))
 
 
 def _mask_evidence(md: str) -> str:
@@ -2633,7 +2654,7 @@ def _synthesize_experience(md: str, plan: dict, stats: dict) -> str:
     user = (f"品牌名：{plan.get('brand') or ''}\n活动名：{names}\n"
             f"活动目标：{_campaign_goal_text(plan, stats)}\n\n"
             "[全报告 Insight 内容]\n" + _chapter_text(md, 0, 2))
-    summary = semantic.chat(EXPERIENCE_SYSTEM, user, max_tokens=4096, lm_scope="write_report")
+    summary = semantic.chat(EXPERIENCE_SYSTEM, user, max_tokens=4096, lm_scope="write_report", **_REPORT_LLM)
     for number, title in _POLICY.SUMMARY_SECTIONS:
         if not re.search(rf"(?m)^#{{1,4}}\s+{re.escape(number)}\s+{re.escape(title)}", summary or ""):
             raise ValueError(f"write_report: 经验总结合成缺少「{number} {title}」")
@@ -2951,6 +2972,9 @@ def qc_decision(node, state, ctx):
         return {"route": "no_p0"}
     if qc_noise_ids(qc):
         if state.counters.get("noise_rollbacks", 0) >= NOISE_ROLLBACK_MAX:
+            # 噪音回退次数上限为迁移版新增（原版无次数限制）：留痕，HC7 卡片据此说明进入原因。
+            state.event(node.get("id", "n18_qc_gate"), "noise_rollback_maxed",
+                        f"已回退 {NOISE_ROLLBACK_MAX} 次仍发现噪音，转 HC7 由用户处置")
             return {"route": "has_p0_maxed"}
         return {"route": "noise_found"}
     if rounds >= max_rounds:
