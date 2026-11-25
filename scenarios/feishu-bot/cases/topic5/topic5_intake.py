@@ -1132,7 +1132,7 @@ INTAKE_TEMPLATE_PATH = (
     / "ma-resources" / "io" / "intake" / "KS_Project_Intake_Template.md"
 )
 REQUIREMENT_SOURCE_SKILL = "campaign_keyword_generation"
-INTAKE_SUMMARY_HEAD = "**需求解析结果**（无需确认，已进入方案编制；如需更正可直接在话题内说明）"
+INTAKE_SUMMARY_HEAD = "**需求解析结果**（无需确认，已进入方案编制；如需更正，请在方案确认卡片中打回并写明）"
 # 唤起语里不构成需求描述的成分：触发词 / 模式词 / 口语填充词。
 _TRIGGER_WORDS = ("复盘报告", "营销复盘", "活动复盘")
 _MODE_WORDS = ("demo", "演示", "小样本", "试跑", "full", "完整", "正式", "全量")

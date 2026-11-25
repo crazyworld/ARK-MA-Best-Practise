@@ -297,10 +297,14 @@ def format_review_lines(events: Iterable[HcEvent]) -> list[str]:
         resolved_at = time.strftime(
             "%H:%M", time.localtime(event.resolved_at or event.created_at)
         )
-        line = (
-            f"{event.hc_kind} · {emoji} {label} · "
-            f"{operator} · {resolved_at}"
-        )
+        if (event.payload or {}).get("source") == "skill_auto_adopted":
+            # 原版 Phase1 Step5（HC-T5-0）：需求由能力直接采用，只展示、无需用户确认。
+            line = f"需求解析 · 📋 已自动采用（无需确认） · {resolved_at}"
+        else:
+            line = (
+                f"{event.hc_kind} · {emoji} {label} · "
+                f"{operator} · {resolved_at}"
+            )
         if event.user_decision in {"reject", "remark"} and event.user_note:
             note = re.sub(r"\s+", " ", event.user_note).strip()
             if note:
