@@ -3,7 +3,7 @@
 #
 # ID 变化规则:
 #   - 6 个 Skills:强制重新上传，ID 会变化
-#   - Validator / Coordinator:删除同名旧 Agent 后重建，ID 会变化
+#   - Validator / Coordinator:按名称原地更新（ID 不变、version+1），不存在才新建
 #   - Environment / Memory Store:按名称原地更新，ID 不变
 #   - 飞书 App / Vault:本脚本不创建或更新，ID 不变
 # Coordinator 新 ID 会自动回写 config.env，因此脚本结束后必须手动重启 Gateway。
@@ -168,7 +168,7 @@ if [[ "${TOPIC5_TEST_ONLY:-0}" == "1" ]]; then
 fi
 
 # 热修复续跑：只改编排器代码时，测试通过后只打恢复包，不上传 Skill、不重建 Agent。
-# 全量部署会先删后建 Agent，旧 Session 绑定的 Agent 被删就无法续跑；恢复包由 Gateway 在
+# 全量部署原地更新 Agent（ID 不变），但进行中的 Session 仍按旧版本 prompt 运行；恢复包由 Gateway 在
 # /continue（retry_failed）时挂进原 Session，沙箱校验 sha256 后只重试当前失败节点。
 if [[ "${TOPIC5_BUNDLE_ONLY:-0}" == "1" ]]; then
   step "2/2 打恢复包（TOPIC5_BUNDLE_ONLY=1，不重建 Agent）"
@@ -194,7 +194,7 @@ step "3/5 强制上传全部 Topic 5 Skills"
   "${PYTHON[@]}" tools/upload_skills.py --force
 )
 
-step "4/5 更新 Environment、Memory 并重建 Agents"
+step "4/5 更新 Environment、Memory 并原地更新 Agents"
 (
   cd "$TOPIC5_DIR"
   ./ma-resources/create_all.sh --update-env --update-memory

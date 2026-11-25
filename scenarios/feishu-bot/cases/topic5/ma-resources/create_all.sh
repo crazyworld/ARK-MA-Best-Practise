@@ -5,7 +5,7 @@
 # 幂等策略:
 #   - Environment 优先复用 TOPIC5_ENVIRONMENT_ID,缺失或失效时再按 name 查找
 #   - MemoryStore 按 name 查找,存在则复用(重建代价大且没意义)
-#   - 2 个 Agent 每次都重建(prompt/skill 更新是主要驱动),同名旧 Agent 先删后建
+#   - 2 个 Agent 按名称原地更新(ID 不变、version+1),不存在才新建;进行中的 Session 可继续 /continue
 #
 # 使用:
 #   ./create_all.sh                    # 幂等运行,首次全建、后续只重建 Agent
@@ -317,35 +317,43 @@ render_agent_json() {
      ' "$ROOT/agents/$agent_file"
 }
 
-# 幂等辅助:按 name 找到同名 Agent 就先删(方舟 name 唯一)
-delete_agent_if_exists() {
-  local name="$1"
-  local aid
+# 幂等辅助:按 name 找到同名 Agent 就原地更新(POST /agents/{id} + 当前 version → version+1,
+# ID 不变),找不到才新建。不再先删后建:进行中的 Session 绑定的是 Agent ID + 版本,删除后
+# 其 coordinator / 子 Agent 全部 404,无法 /continue(job_bf3c6b52db7b n11r 即此故障)。
+# 原地更新后旧版本仍可按 version 读取,进行中的 Session 按固定版本继续,新 Session 用新版本。
+upsert_agent() {
+  local name="$1" payload="$2"
+  local aid current version resp
   aid=$(find_by_name "agents" "$name" || true)
   if [ -n "$aid" ]; then
-    echo "  发现同名旧 Agent: $name -> $aid,先删除以便重建"
-    ark_delete "/agents/$aid"
+    current=$(ark_get "/agents/$aid")
+    version=$(jq -er '(.data // .) | .version' <<<"$current") || {
+      echo "  [ERROR] 读取 Agent 当前版本失败: $name -> $aid" >&2
+      return 1
+    }
+    echo "  原地更新 Agent: $name -> $aid (version $version → $((version + 1)))" >&2
+    resp=$(ark_post "/agents/$aid" "$(jq --argjson v "$version" '. + {version: $v}' <<<"$payload")") || return 1
+  else
+    echo "  新建 Agent: $name" >&2
+    resp=$(ark_post "/agents" "$payload") || return 1
   fi
+  extract_id "$resp"
 }
 
-step "5) 创建子 Agent topic5-validator"
-delete_agent_if_exists "topic5-validator"
+step "5) 创建/原地更新子 Agent topic5-validator"
 validator_payload=$(render_agent_json validator.json validator.system.md)
-validator_resp=$(ark_post "/agents" "$validator_payload")
-AGENT_VALIDATOR_ID=$(extract_id "$validator_resp")
+AGENT_VALIDATOR_ID=$(upsert_agent "topic5-validator" "$validator_payload")
 echo "AGENT_VALIDATOR_ID=$AGENT_VALIDATOR_ID"
 
 # ---- 6. 创建协调器 ----
-step "6) 创建协调器 topic5-coordinator"
-delete_agent_if_exists "topic5-coordinator"
+step "6) 创建/原地更新协调器 topic5-coordinator"
 coordinator_payload=$(render_agent_json coordinator.json coordinator.system.md \
   | jq --arg v "$AGENT_VALIDATOR_ID" '
       (.. | strings) |= (
           gsub("\\$\\{agent_id.topic5-validator\\}"; $v)
       )
   ')
-coordinator_resp=$(ark_post "/agents" "$coordinator_payload")
-AGENT_COORDINATOR_ID=$(extract_id "$coordinator_resp")
+AGENT_COORDINATOR_ID=$(upsert_agent "topic5-coordinator" "$coordinator_payload")
 echo "AGENT_COORDINATOR_ID=$AGENT_COORDINATOR_ID"
 
 # ---- 7. 汇总输出 ----
@@ -360,7 +368,7 @@ EOF
 echo -e "\n完成。ID 落盘: $ROOT/created_ids.json"
 
 # ---- 8. 回写 gateway 侧 config.env ----
-# 子 Agent 每次都"先删旧再建新",AGENT_ID 会漂移。这里把 coordinator/env/memory
+# Agent 已改为原地更新(ID 稳定);首次新建时 ID 才会变化。这里把 coordinator/env/memory
 # 三个 gateway 必读的 ID 同步到 ~/.arkagent/cases/topicX/config.env,免得用户
 # 重跑本脚本后 gateway 还打着旧 ID(旧 Agent 已被删,调用会 404)。
 # topic5/topic6 共用字面目录 topicX;TOPIC5_* 前缀保证 ID 不与 topic6 冲突。
