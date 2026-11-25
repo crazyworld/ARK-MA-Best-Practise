@@ -1,15 +1,15 @@
 """语义节点的 Ark Chat 客户端 + 离线降级。
 
 语义类 handler（UGC 发现 / 观点候选 / 词云解读 / 报告撰写 / P0 修复）接真语义：
-走火山方舟 OpenAI 兼容 chat/completions（范式对齐 Topic6 C2 relay.py）。
+走 bmc-llm-relay（blueai 模型网关）OpenAI 兼容 chat/completions（对齐 Topic6 relay.py）。
 无凭据时降级到确定性 fallback——**输出 schema 与真路径完全一致**，供下游节点
 （聚合/图表/质检/交付）无差别消费；fallback payload 带 `degraded: true` 标记便于审计。
 
 凭据只从环境变量读取，按以下顺序取第一个非空值：
-  BASE_URL：ARK_BASE_URL → OPENAI_BASE_URL（需含版本前缀，如 .../api/v3）
-  Key：    ARK_API_KEY → OPENAI_API_KEY
-  模型：   TOPIC5_SEMANTIC_MODEL → 默认 doubao-seed-2-1-lite-260915
-  思考：   TOPIC5_SEMANTIC_THINKING → 默认 disabled
+  BASE_URL：LLM_RELAY_BASE_URL（如 https://bmc-llm-relay.bluemediagroup.cn/v1）
+  Key：    LLM_RELAY_API_KEY
+  模型：   TOPIC5_SEMANTIC_MODEL → 默认 claude-haiku-4-5-20251001（原版直连模型）
+不回退 ARK_* / OPENAI_*：缺 LLM_RELAY_* 即视为模型不可用，避免静默改走方舟。
 """
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ import urllib.request
 from contextlib import contextmanager
 from typing import Any
 
-_DEFAULT_MODEL = "doubao-seed-2-1-lite-260915"
+_DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 
 
 @contextmanager
@@ -54,10 +54,8 @@ def _hard_deadline(seconds: int):
 
 
 def _base_key() -> tuple[str, str]:
-    base = (os.environ.get("ARK_BASE_URL")
-            or os.environ.get("OPENAI_BASE_URL") or "").rstrip("/")
-    key = (os.environ.get("ARK_API_KEY")
-           or os.environ.get("OPENAI_API_KEY") or "")
+    base = (os.environ.get("LLM_RELAY_BASE_URL") or "").rstrip("/")
+    key = os.environ.get("LLM_RELAY_API_KEY") or ""
     return base, key
 
 
@@ -134,11 +132,14 @@ def with_lm(system: str, lm_scope: str | None) -> str:
 def chat(system: str, user: str, *, max_tokens: int = 4096,
          temperature: float = 0.2, timeout: int = 180, retries: int = 2,
          thinking: str | None = None, lm_scope: str | None = None) -> str:
-    """方舟 OpenAI 兼容 chat/completions（流式）。无凭据直接抛错，由调用方降级。"""
+    """bmc-llm-relay OpenAI 兼容 chat/completions（流式）。无凭据直接抛错，由调用方降级。
+
+    thinking 参数保留签名兼容；relay 的 GPT 模型不接受 thinking 字段（400），请求不再携带。
+    """
     system = with_lm(system, lm_scope)
     base, key = _base_key()
     if not base or not key:
-        raise RuntimeError("缺少 Ark 凭据（ARK_BASE_URL/ARK_API_KEY）")
+        raise RuntimeError("缺少 bmc-llm-relay 凭据（LLM_RELAY_BASE_URL/LLM_RELAY_API_KEY）")
     payload = {
         "model": _model(),
         "max_tokens": max_tokens,
@@ -150,13 +151,6 @@ def chat(system: str, user: str, *, max_tokens: int = 4096,
             {"role": "user", "content": user},
         ],
     }
-    thinking_mode = (
-        thinking
-        if thinking is not None
-        else os.environ.get("TOPIC5_SEMANTIC_THINKING", "disabled")
-    )
-    if thinking_mode:
-        payload["thinking"] = {"type": thinking_mode}
     body = json.dumps(payload, ensure_ascii=False).encode()
     url = f"{base}/chat/completions"
     for attempt in range(retries):

@@ -26,7 +26,7 @@ _SKILLS_DIR = os.path.dirname(_ORCH_DIR)
 DATAHUB_DIR = os.path.join(_SKILLS_DIR, "blueai-datahub-skill")
 
 # 轮次一/二默认批量标注模型（与客户 annotation_response 样例一致：gpt-4o-mini）。
-_DEFAULT_MODEL = os.environ.get("DATAHUB_ANNOTATE_MODEL") or "gpt-4o-mini"
+_DEFAULT_MODEL = os.environ.get("DATAHUB_ANNOTATE_MODEL") or "gpt-5.4-mini"
 
 
 def api_available() -> bool:

@@ -51,10 +51,16 @@ set +a
 
 # set -u 下安全读取环境变量:避免使用 ${!name:-}(zsh/dash 会拒绝该表达式)。
 # 先 eval 取值再判空,Bash 3.2.57 / zsh / dash 均可处理。
+# 模型统一走 bmc-llm-relay（对齐 topic6）：沙箱用 LLM_RELAY_*，2 个 Agent 的 BYOK 鉴权由
+# Gateway 按请求附加 BYOK_MODEL_AUTH_HEADER_*；ARK_API_KEY 只调方舟控制面。
 for name in \
   ARK_API_KEY \
   FEISHU_APP_ID \
-  FEISHU_APP_SECRET
+  FEISHU_APP_SECRET \
+  LLM_RELAY_BASE_URL \
+  LLM_RELAY_API_KEY \
+  BYOK_MODEL_AUTH_HEADER_NAME \
+  BYOK_MODEL_AUTH_HEADER_VALUE
 do
   eval "value=\${$name:-}"
   if [[ -z "$value" ]]; then
@@ -98,6 +104,10 @@ fi
 ISOLATED_TEST_ENV_KEYS=(
   ARK_API_KEY
   OPENAI_API_KEY
+  LLM_RELAY_BASE_URL
+  LLM_RELAY_API_KEY
+  BYOK_MODEL_AUTH_HEADER_NAME
+  BYOK_MODEL_AUTH_HEADER_VALUE
   DATAHUB_API_KEY
   SSJH_API_TOKEN
   SSJH_USERNAME

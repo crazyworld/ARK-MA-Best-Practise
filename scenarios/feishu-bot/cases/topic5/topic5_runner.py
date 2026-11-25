@@ -493,8 +493,12 @@ class Topic5Runner:
         loop: Optional[asyncio.AbstractEventLoop] = None,
         card_sender: Optional["Topic5CardSenderProtocol"] = None,
         artifact_sync=None,
+        extra_headers: Optional[dict] = None,
     ):
         self._ark = ark
+        # BYOK：Agent 走 bmc-llm-relay 时按请求附加的鉴权 Header；只经 _send_message 使用，
+        # 不记日志、不落库、不拼进消息正文（Header 值即 relay Key）。
+        self._extra_headers = extra_headers
         self._feishu = feishu
         self._store = store
         self._config = config
@@ -505,6 +509,13 @@ class Topic5Runner:
         self._active_streams: dict[str, asyncio.Task] = {}
         self._progress: dict[str, "_ProgressState"] = {}
         self._card_locks: dict[str, asyncio.Lock] = {}
+
+    async def _send_message(self, session_id: str, text: str) -> None:
+        """向 MA Session 注入 user.message 的唯一入口（启动、HC 续跑、重试、/continue 均经此）。
+
+        BYOK 鉴权 Header 按请求生效、不持久化：漏带则该次模型请求被 relay 拒绝（topic6 已踩坑）。
+        """
+        await self._ark.send_message(session_id, text, extra_headers=self._extra_headers)
 
     def bind_card_sender(self, sender: "Topic5CardSenderProtocol") -> None:
         self._card_sender = sender
@@ -1278,7 +1289,7 @@ class Topic5Runner:
                 try:
                     async with self._ark._open_event_stream(session_id) as stream:
                         if not sent_initial_message:
-                            await self._ark.send_message(session_id, first_user_message)
+                            await self._send_message(session_id, first_user_message)
                             sent_initial_message = True
                         terminal = await self._consume_events(
                             job_id, stream, seen_event_ids=seen_event_ids

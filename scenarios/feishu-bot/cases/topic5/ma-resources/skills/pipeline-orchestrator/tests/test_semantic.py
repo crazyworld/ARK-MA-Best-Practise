@@ -32,10 +32,10 @@ class SemanticTimeoutTest(unittest.TestCase):
                 time.sleep(5)
         self.assertLess(time.monotonic() - started, 2)
 
-    def test_stream_has_deadline_and_disables_thinking_by_default(self):
+    def test_stream_has_deadline_and_omits_thinking_param(self):
         env = {
-            "ARK_BASE_URL": "https://ark.example/api/v3",
-            "ARK_API_KEY": "test-key",
+            "LLM_RELAY_BASE_URL": "https://relay.example/v1",
+            "LLM_RELAY_API_KEY": "test-key",
             "TOPIC5_SEMANTIC_TIMEOUT_SEC": "10",
             "TOPIC5_SEMANTIC_IDLE_TIMEOUT_SEC": "3",
         }
@@ -56,7 +56,8 @@ class SemanticTimeoutTest(unittest.TestCase):
                 semantic.chat("system", "user", retries=1)
         self.assertEqual(urlopen.call_args.kwargs["timeout"], 3)
         request_body = json.loads(urlopen.call_args.args[0].data)
-        self.assertEqual(request_body["thinking"], {"type": "disabled"})
+        # relay 的 GPT 模型拒收 thinking 字段（400），请求不携带。
+        self.assertNotIn("thinking", request_body)
 
 
 if __name__ == "__main__":

@@ -164,13 +164,11 @@ if [ -z "$ENVIRONMENT_ID" ]; then
   ENVIRONMENT_ID=$(find_by_name "environments" "$env_name" || true)
 fi
 # ---- 沙箱环境变量渲染 ----
-# 沙箱内模型调用需要带 /api/v3 的 ARK_BASE_URL；Gateway 配置常不写它（用默认值），
-# 未导出时会被渲染成空串，导致 semantic.llm_available() 为假、去噪/标注/写作全部失败。
-export ARK_BASE_URL="$BASE_URL"
+# 沙箱模型统一走 bmc-llm-relay（LLM_RELAY_*），不再注入 ARK_*；ARK_API_KEY 只用于方舟控制面。
 # 必需凭证为空时中止：--update-env 会整体覆盖环境变量，空值会清掉已生效的 token。
 # SSJH_USERNAME/PASSWORD/FIXED_TOKEN 允许为空（缺失时 n03b 如实阻断，用户可改为上传活动明细）。
 _missing=()
-for _name in ARK_API_KEY ARK_BASE_URL SSJH_API_TOKEN FEISHU_APP_ID FEISHU_APP_SECRET; do
+for _name in LLM_RELAY_BASE_URL LLM_RELAY_API_KEY SSJH_API_TOKEN FEISHU_APP_ID FEISHU_APP_SECRET; do
   eval "_value=\${$_name:-}"
   [ -n "$_value" ] || _missing+=("$_name")
 done
@@ -194,14 +192,15 @@ env_payload="$(
 )"
 # ---- 沙箱环境变量渲染结束 ----
 # ---- 沙箱模型可达性探测 ----
-# 沙箱内去噪/标注/写作直接调方舟 chat/completions；模型 ID 不存在或无权限时返回 404，
-# 要到 n07b 才暴露。部署前用 1 token 请求逐个探测，失败则中止且不更新 Environment。
-for _model_key in TOPIC5_SEMANTIC_MODEL TOPIC5_MODEL_ID; do
+# 沙箱内去噪/标注/写作经 bmc-llm-relay 调模型；模型 ID 不存在或无权限时要到 n07b 才暴露。
+# 部署前用 1 token 请求逐个探测（含 DataHub 传入的标注模型，relay 与 DataHub 模型列表一致），
+# 失败则中止且不更新 Environment。
+for _model_key in TOPIC5_SEMANTIC_MODEL TOPIC5_MODEL_ID DATAHUB_ANNOTATE_MODEL; do
   _model=$(jq -r --arg k "$_model_key" '.config.env[$k] // ""' <<<"$env_payload")
   [ -n "$_model" ] || continue
-  _code=$(curl -sS -o /dev/null -w "%{http_code}" -X POST "$BASE_URL/chat/completions" \
-    -H "Authorization: Bearer $ARK_API_KEY" -H "Content-Type: application/json" \
-    -d "$(jq -n --arg m "$_model" '{model:$m,max_tokens:1,messages:[{role:"user",content:"ping"}],thinking:{type:"disabled"}}')" \
+  _code=$(curl -sS -o /dev/null -w "%{http_code}" -X POST "${LLM_RELAY_BASE_URL%/}/chat/completions" \
+    -H "Authorization: Bearer $LLM_RELAY_API_KEY" -H "Content-Type: application/json" \
+    -d "$(jq -n --arg m "$_model" '{model:$m,max_tokens:16,messages:[{role:"user",content:"ping"}]}')" \
     --max-time 60 || echo 000)
   if [ "$_code" != "200" ]; then
     echo "沙箱模型不可用：$_model_key=$_model（HTTP $_code）；已中止，未更新 Environment" >&2

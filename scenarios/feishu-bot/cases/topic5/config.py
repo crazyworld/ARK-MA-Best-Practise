@@ -39,6 +39,10 @@ class Topic5Config:
     artifact_sync_dir: str = ""
     artifact_poll_interval_sec: float = 60.0
     replay_job_id: str = ""
+    # BYOK Direct（对齐 topic6）：Agent 走 bmc-llm-relay 时，Gateway 每条 user.message 以
+    # X-User-Model-Header-{name} 附加 relay 鉴权，不写入方舟侧持久配置。
+    model_auth_header_name: str = ""
+    model_auth_header_value: str = ""
 
 
 DEFAULT_ARTIFACT_SYNC_DIR = Path(__file__).resolve().parent / "data" / "artifacts"
@@ -76,4 +80,6 @@ def load_case_config(env: Optional[Mapping[str, str]] = None) -> Topic5Config:
         ),
         # 测试回放：设为历史 job_id 时，新任务复用其外部数据与标注缓存。
         replay_job_id=(environ.get("TOPIC5_REPLAY_JOB_ID") or "").strip(),
+        model_auth_header_name=(environ.get("BYOK_MODEL_AUTH_HEADER_NAME") or "").strip(),
+        model_auth_header_value=(environ.get("BYOK_MODEL_AUTH_HEADER_VALUE") or "").strip(),
     )

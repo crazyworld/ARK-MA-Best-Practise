@@ -17,7 +17,8 @@ class TestSemanticDegradedContract(unittest.TestCase):
     def setUp(self):
         # 确保无凭据：语义 handler 走降级分支（不触网）。
         self._saved = {k: os.environ.pop(k, None)
-                       for k in ("ARK_BASE_URL", "ARK_API_KEY",
+                       for k in ("LLM_RELAY_BASE_URL", "LLM_RELAY_API_KEY",
+                                 "ARK_BASE_URL", "ARK_API_KEY",
                                  "OPENAI_BASE_URL", "OPENAI_API_KEY")}
         self.ws = tempfile.mkdtemp()
         self.st = make_state(self.ws)

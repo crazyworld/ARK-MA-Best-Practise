@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 from pathlib import Path
@@ -292,6 +293,31 @@ def _should_handle_message(message: IncomingMessage) -> bool:
     return message.chat_type == "p2p" or message.mentioned_bot
 
 
+_COORDINATOR_AGENT_JSON = Path(__file__).resolve().parent / "ma-resources" / "agents" / "coordinator.json"
+
+
+def _byok_model_headers(config: Topic5Config, agent_json: Path = _COORDINATOR_AGENT_JSON):
+    """对齐 topic6：coordinator 走 BYOK（model.provider 非空）时附加 relay 鉴权 Header。
+
+    缺 BYOK_MODEL_AUTH_HEADER_* 时启动即失败（否则每次模型请求都会被 relay 拒绝）；
+    方舟原生模型收到 X-User-Model-Header-* 会 400，因此原生模型时不附加。
+    """
+    try:
+        model = json.loads(agent_json.read_text(encoding="utf-8")).get("model") or {}
+    except (OSError, ValueError) as error:
+        log.warning("topic5 cannot read %s (%s); keep BYOK header", agent_json, error)
+        model = {"provider": "unknown"}
+    if not model.get("provider"):
+        log.info("topic5 coordinator uses Ark native model %s; BYOK header disabled", model.get("id"))
+        return None
+    if not (config.model_auth_header_name and config.model_auth_header_value):
+        raise RuntimeError(
+            f"coordinator 模型走 {model.get('provider')}，但未配置 BYOK_MODEL_AUTH_HEADER_NAME / "
+            "BYOK_MODEL_AUTH_HEADER_VALUE（bmc-llm-relay 的鉴权 Header），Agent 请求会被拒绝"
+        )
+    return {f"X-User-Model-Header-{config.model_auth_header_name}": config.model_auth_header_value}
+
+
 def build_gateway(config: Topic5Config, ark, sender, loop: asyncio.AbstractEventLoop):
     """Case 入口:装配 PipelineStore + Runner + HITL,返回 Topic5Gateway。"""
     from arkagent.paths import get_case_paths
@@ -329,6 +355,7 @@ def build_gateway(config: Topic5Config, ark, sender, loop: asyncio.AbstractEvent
         ),
         loop=loop,
         artifact_sync=artifact_sync,
+        extra_headers=_byok_model_headers(config),
     )
     log.info(
         "topic5 artifact sync dir=%s replay_job=%s",
