@@ -18,12 +18,15 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, Optional
 
 import annotation_cache
 import semantic
 import datahub
 import label_review
+
+log = logging.getLogger(__name__)
 
 # 情感标签 ↔ int（与 aggregate._row_sentiment 口径一致）。
 _SENTI_TO_INT = {
@@ -357,24 +360,50 @@ def annotate_round1(
     else:
         to_run = rows
     to_annotate, skipped = _r1_skip_empty(to_run)
+    dh_prompt = _r1_dh_prompt(ctx)
+    # DataHub 合法结果按「prompt+校准」指纹缓存：节点重试 / 续跑只提交未命中的行，
+    # 不再整批重跑（job_bf3c6b52db7b：每次重跑 9094 行约 9 分钟）。
+    dh_cache = (annotation_cache.AnnotationCache(
+        cache_dir, "round1_datahub",
+        dh_prompt + json.dumps(calibration or [], ensure_ascii=False, sort_keys=True))
+        if cache_dir is not None else None)
     routed_via, degraded = _route_and_run(
         to_annotate, threshold=threshold,
-        dh_prompt=_r1_dh_prompt(ctx), dh_apply=_apply_r1,
+        dh_prompt=dh_prompt, dh_apply=_apply_r1,
         small_engine=lambda batch: _small_engine_r1(
             batch, ctx, calibration, cache=cache),
         degrade=_degrade_r1, dh_columns=_R1_DH_COLUMNS,
-        route_decision=route_decision)
+        route_decision=route_decision,
+        dh_cache=dh_cache, dh_payload=_r1_payload_row, dh_labeled=_r1_labeled)
+    backfill = _r1_backfill(to_annotate, routed_via, ctx, calibration, cache)
     cov = _coverage_r1(to_annotate)
     cov["skipped_empty"] = len(skipped)
     out = {
         "rows": rows, "round": 1, "routed_via": routed_via,
-        "coverage": cov, "context": ctx,
+        "coverage": cov, "context": ctx, "backfill": backfill,
         "uncertain_ids": [r["_annot_id"] for r in to_annotate if r.get("r1_uncertain")],
         "cache_hits": cache.hits if cache is not None else 0,
     }
     if degraded:
         out["degraded"] = True
     return out
+
+
+def _r1_backfill(rows, routed_via, ctx, calibration, cache) -> dict:
+    """DataHub 行级缺口补标（原版 check_coverage：缺失/非法 → ERROR → 补标后重查）。
+
+    只把 DataHub 未给出合法情感/相关性的行交直连模型（原版 2A：batch 15、最多 3 次），
+    已有合法结果不覆盖；补标后仍缺的行原样留给覆盖检查报错，门槛不放宽。
+    """
+    missing = [r for r in rows if not _r1_labeled(r)] if routed_via == "datahub" else []
+    if missing and semantic.llm_available():
+        try:
+            _small_engine_r1(missing, ctx, calibration, cache=cache)
+        except Exception as error:  # 补标失败不吞缺口：覆盖检查照常报错
+            log.warning("annotate r1 backfill failed: %s", error)
+    remaining = [r["_annot_id"] for r in missing if not _r1_labeled(r)]
+    return {"rows": len(missing), "remaining": len(remaining),
+            "remaining_ids": remaining[:50]}
 
 
 def _degrade_r1(rows: list[dict]) -> None:
@@ -859,7 +888,8 @@ ROUTE_SMALL_ENGINE = "small_engine"
 
 
 def _route_and_run(rows, *, threshold, dh_prompt, dh_apply, small_engine, degrade,
-                   dh_columns=None, route_decision: str | None = None) -> tuple[str, bool]:
+                   dh_columns=None, route_decision: str | None = None,
+                   dh_cache=None, dh_payload=None, dh_labeled=None) -> tuple[str, bool]:
     """按阈值与可用凭据选择执行路径。返回 (routed_via, degraded)。
 
     - 行数 ≥ threshold：必须走 DataHub；DataHub 不可用或运行异常时抛
@@ -873,7 +903,8 @@ def _route_and_run(rows, *, threshold, dh_prompt, dh_apply, small_engine, degrad
         if not datahub.api_available():
             raise DataHubRouteRequired(n, threshold, "DataHub 不可用（DATAHUB_API_KEY 未配置或 SDK 缺失）")
         try:
-            _run_datahub(rows, dh_prompt, dh_apply, dh_columns)
+            _run_datahub(rows, dh_prompt, dh_apply, dh_columns,
+                         cache=dh_cache, payload_fn=dh_payload, is_labeled=dh_labeled)
             return "datahub", False
         except Exception as error:  # 批量任务级失败：同样先问用户，不静默切换
             raise DataHubRouteRequired(
@@ -888,11 +919,29 @@ def _route_and_run(rows, *, threshold, dh_prompt, dh_apply, small_engine, degrad
     return "fallback", True
 
 
-def _run_datahub(rows, prompt, apply_fn, content_columns=None) -> None:
-    """DataHub 批量标注并回填。行级解析失败不抛，留待覆盖检查判定。"""
-    results = datahub.batch_annotate(
-        rows, prompt, content_columns=content_columns or ["content", "title"])
-    for r in rows:
-        parsed = results.get(r["_annot_id"])
-        if isinstance(parsed, dict) and not parsed.get("_error"):
-            apply_fn(r, parsed)
+def _run_datahub(rows, prompt, apply_fn, content_columns=None, *,
+                 cache=None, payload_fn=None, is_labeled=None) -> None:
+    """DataHub 批量标注并回填。行级解析失败不抛，留待补标与覆盖检查判定。
+
+    cache（可选）：先回填已缓存的合法结果，只把未命中的行提交 DataHub；新的合法结果写回缓存。
+    """
+    use_cache = cache is not None and payload_fn is not None and is_labeled is not None
+    pending = rows
+    if use_cache:
+        for r in rows:
+            item = payload_fn(r)
+            hit = cache.get(item) if item else None
+            if hit:
+                apply_fn(r, hit)
+        pending = [r for r in rows if not is_labeled(r)]
+    if pending:
+        results = datahub.batch_annotate(
+            pending, prompt, content_columns=content_columns or ["content", "title"])
+        for r in pending:
+            parsed = results.get(r["_annot_id"])
+            if isinstance(parsed, dict) and not parsed.get("_error"):
+                apply_fn(r, parsed)
+                if use_cache and is_labeled(r) and (item := payload_fn(r)):
+                    cache.put(item, parsed)
+    if use_cache:
+        cache.save()

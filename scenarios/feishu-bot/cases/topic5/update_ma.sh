@@ -167,6 +167,21 @@ if [[ "${TOPIC5_TEST_ONLY:-0}" == "1" ]]; then
   exit 0
 fi
 
+# 热修复续跑：只改编排器代码时，测试通过后只打恢复包，不上传 Skill、不重建 Agent。
+# 全量部署会先删后建 Agent，旧 Session 绑定的 Agent 被删就无法续跑；恢复包由 Gateway 在
+# /continue（retry_failed）时挂进原 Session，沙箱校验 sha256 后只重试当前失败节点。
+if [[ "${TOPIC5_BUNDLE_ONLY:-0}" == "1" ]]; then
+  step "2/2 打恢复包（TOPIC5_BUNDLE_ONLY=1，不重建 Agent）"
+  (
+    cd "$TOPIC5_DIR"
+    ./tools/pack_skills.sh
+  )
+  echo
+  echo "恢复包已更新: $TOPIC5_DIR/tools/out/pipeline-orchestrator.zip"
+  echo "在失败任务的话题内发送 /continue，即在原 job/Session 上重试失败节点。"
+  exit 0
+fi
+
 step "2/5 打包全部 Topic 5 Skills"
 (
   cd "$TOPIC5_DIR"
