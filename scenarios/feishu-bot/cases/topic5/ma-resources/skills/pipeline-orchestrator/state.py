@@ -193,6 +193,22 @@ class RunState:
                 for idem, receipt in self.ledger.items()
                 if not invalidated_refs.intersection(receipt_artifact_ids(receipt))
             }
+        self._purge_effect_journals(set(keys))
+
+    def _purge_effect_journals(self, keys: set[str]) -> None:
+        """失效产物的副作用回执一并删除：否则节点重跑时引擎直接重放旧结果
+        （「版本一变，确认作废」；交接后修正 / HC7 回 n20 / 返工重发都依赖这一点）。"""
+        journal_dir = self.run_dir / "attempts" / "_effects"
+        if not keys or not journal_dir.is_dir():
+            return
+        for path in journal_dir.glob("*.json"):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            outputs = set(((payload.get("result") or {}).get("artifacts") or {}).keys())
+            if outputs & keys:
+                path.unlink(missing_ok=True)
 
     def record_attempt(self, node_id: str, attempt: int, receipt: dict) -> None:
         adir = self.run_dir / "attempts" / node_id / str(attempt)

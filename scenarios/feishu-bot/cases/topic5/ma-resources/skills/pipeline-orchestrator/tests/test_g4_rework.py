@@ -26,11 +26,12 @@ class G4ReworkTest(unittest.TestCase):
         return hc_bridge.build_human_outputs(
             self.st, "reject", json.dumps({"change_type": change, "note": "改一下"}))
 
-    def test_layout_skips_fix_and_validate(self):
+    def test_layout_rework_applies_note_without_consuming_qc_rounds(self):
+        # 版式说明必须经 n19 落到报告上（原样重发不会有任何变化）；不计 G3 返修轮次。
         out = self._reject("layout")
-        self.assertEqual(out["_control"]["next"], "n20_delivery_draft")
+        self.assertEqual(out["_control"]["next"], "n19_fix")
         self.assertNotIn("report_md", out["_control"]["invalidate_artifacts"])
-        self.assertNotIn("qc_report", out)
+        self.assertEqual(out["qc_report"]["issues"][-1]["change_type"], "layout")
         self.assertEqual(self.st.counters["user_rework_rounds"], 1)
         self.assertEqual(self.st.counters["qc_rounds"], 1)
 

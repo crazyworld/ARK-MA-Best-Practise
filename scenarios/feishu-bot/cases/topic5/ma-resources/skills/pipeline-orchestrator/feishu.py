@@ -1067,15 +1067,19 @@ def _key_for(block: dict) -> str:
 
 # ── handoff 复读 ──────────────────────────────────────────────
 def current_revision(doc_token: str) -> Optional[int]:
-    """handoff 阶段复读文档当前 revision_id；无凭据/失败返回 None（交由调用方按降级处理）。"""
+    """handoff 阶段复读文档当前 revision_id；无凭据返回 None。
+
+    复读失败带原因抛出：n24 随之失败、可 /continue 重试（吞掉会让 n24 标 completed、
+    run 再判 failed，retry 报「当前节点未失败」无法恢复）。
+    """
     if not doc_token or not api_available():
         return None
+    token = _tenant_token()
     try:
-        token = _tenant_token()
         data = _req("GET", f"/open-apis/docx/v1/documents/{doc_token}", token)
-        return (data.get("document") or {}).get("revision_id")
-    except Exception:
-        return None
+    except Exception as error:
+        raise RuntimeError(f"handoff: 复读飞书文档 revision 失败（{doc_token}）：{error}") from error
+    return (data.get("document") or {}).get("revision_id")
 
 
 # ── 降级 ──────────────────────────────────────────────────────

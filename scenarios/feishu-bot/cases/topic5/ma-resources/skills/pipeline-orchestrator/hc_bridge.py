@@ -449,9 +449,19 @@ def _g4_rework(st, confirmation: dict, note) -> dict:
     rework = {"change_type": change_type, "round": rounds, "note": text,
               "readback_text": readback.get("readback_text") or ""}
     if change_type == "layout":
-        # 版式修改：不改正文、不经 n19/n17，直接在原文档重发并回到 G4。
-        return {"user_confirmation": confirmation, "user_rework": rework,
-                "_control": {"next": "n20_delivery_draft", "gate_status": "rejected",
+        # 版式修改（Producer v0.60 HC-T5-2:333-335 原地修复）：用户说明必须落到报告上，
+        # 原样重发等于什么都没改。交 n19 按说明调整版式标记（不改数据），经 n17 复检后
+        # 在原文档上原位修正。不计入 G3 返修轮次（user_rework_rounds 单独计数）。
+        prior_qc = st.read_artifact("qc_report") or {}
+        qc = dict(prior_qc) if isinstance(prior_qc, dict) else {}
+        qc["issues"] = list(qc.get("issues") or []) + [{
+            "id": "P0-g4-user-reject", "severity": "P0", "title": "用户终验退回（版式修改）",
+            "evidence": text or "用户要求调整版式", "locus": "G4", "change_type": "layout",
+            "fix_required": "只调整版式与排版，不改数据和结论"}]
+        qc["has_p0"] = True
+        qc["p0_count"] = int(qc.get("p0_count") or 0) + 1
+        return {"user_confirmation": confirmation, "qc_report": qc, "user_rework": rework,
+                "_control": {"next": "n19_fix", "gate_status": "rejected",
                              "invalidate_artifacts": list(_DELIVERY_INVALIDATE)}}
     changes = _revision_changes(note)
     if changes:
@@ -522,7 +532,7 @@ def _relax(st, note) -> dict:
     qc.update({"issues": issues, "waivers": waivers, "has_p0": bool(remaining), "p0_count": len(remaining)})
     target = "n20_delivery_draft" if not remaining else "n19_fix"
     return {"qc_report": qc, "_control": {"next": target, "gate_status": "waived" if not remaining else "escalated",
-                                         "invalidate_artifacts": ["delivery_draft"] if not remaining else []}}
+                                         "invalidate_artifacts": list(_DELIVERY_INVALIDATE) if not remaining else []}}
 
 
 def _resume_hc7(st, expect, decision, note) -> dict:
@@ -548,7 +558,11 @@ def _resume_hc7(st, expect, decision, note) -> dict:
                 "_control": {"next": None, "gate_status": "terminated", "terminate": True}}
     target = "n19_fix"
     if decision in ("pass", "confirmed") and _is_external_permission_p0(_hc7_issues(st)):
-        target = "n20_delivery_draft"
+        # 外部权限类 P0（KS_Feishu_Format §九）：人工处理后重新发布。交付产物须失效，
+        # 否则引擎按旧回执幂等重放，飞书调用次数不变、永远回到 HC7。
+        return {key: record, "_control": {
+            "next": "n20_delivery_draft", "gate_status": "escalated",
+            "invalidate_artifacts": list(_DELIVERY_INVALIDATE)}}
     return {key: record, "_control": {"next": target, "gate_status": "escalated"}}
 
 

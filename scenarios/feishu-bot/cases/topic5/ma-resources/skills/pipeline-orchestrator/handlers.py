@@ -1460,8 +1460,8 @@ def handoff(node, state, ctx):
         hp.parent.mkdir(parents=True, exist_ok=True)
         hp.write_text(json.dumps(handoff_payload, ensure_ascii=False, indent=2),
                       encoding="utf-8")
-    except Exception:
-        pass
+    except OSError as error:   # 闭环证据写盘失败：留痕，产物仍以 artifact 形式保存
+        state.event(node.get("id", "n24_handoff"), "handoff_file_write_failed", str(error)[:300])
     out = {"handoff": handoff_payload}
     if fix.get("pending"):
         out["post_handoff_fix"] = {"pending": None, "history": amendments}
@@ -3002,11 +3002,15 @@ def delivery_draft_decision(node, state, ctx):
     """Route content defects to repair and external permission failures to HC7."""
     draft = state.read_artifact("delivery_draft") or {}
     validation = draft.get("post_publish_validation") or {}
-    has_p0 = bool(validation.get("has_p0")) or draft.get("state") != "ready"
-    if not has_p0:
+    # HC7 放宽（FIX-35）记在 qc_report.waivers；已豁免的发布后 P0 不再拦截。
+    waived = {str(w.get("issue_id")) for w in
+              ((state.read_artifact("qc_report") or {}).get("waivers") or [])
+              if isinstance(w, dict)}
+    issues = [i for i in (validation.get("issues") or [])
+              if not (isinstance(i, dict) and str(i.get("id")) in waived)]
+    open_p0 = [i for i in issues if isinstance(i, dict) and i.get("severity") == "P0"]
+    if not open_p0 and (draft.get("state") == "ready" or waived):
         return {"route": "ready"}
-
-    issues = validation.get("issues") or []
     external_p0 = any(
         isinstance(issue, dict)
         and issue.get("severity") == "P0"
@@ -3854,13 +3858,15 @@ def delivery_draft(node, state, ctx):
     title = str(plan.get("report_name") or f"{brand}营销活动复盘报告 v{report_version}")
     task_id = state.task_id
 
-    # 幂等复用：命中已存在回执则复用 doc_token，不新建。
+    # FIX-38：返工时在上次发布的文档上原位修正；基线为上次发布的 MD。
+    published = state.read_artifact("published_delivery") or {}
+    # 幂等复用：只有报告与上次发布完全一致时才复用回执、跳过写入；报告已变（发布后返修
+    # n19→n17→n20）必须原位修正，否则文档内容不变、回读比对新报告持续 P0。
     prev_receipts = state.read_artifact("external_receipts") or {}
     reused = (prev_receipts.get("doc_token")
               if isinstance(prev_receipts, dict) else "") or ""
-
-    # FIX-38：返工时（交付产物已失效）在上次发布的文档上原位修正；基线为上次发布的 MD。
-    published = state.read_artifact("published_delivery") or {}
+    if reused and published.get("doc_token") and published.get("markdown") != report_md:
+        reused = ""
     if feishu.api_available():
         try:
             feishu_doc = feishu.create_delivery(
@@ -3906,6 +3912,14 @@ def delivery_draft(node, state, ctx):
             "evidence": "；".join(f"{n.get('label')}={n.get('value_text')}" for n in numbers["missing"]),
             "locus": "feishu-docx",
         })
+    table_layout = readback.get("table_layout") or {}
+    if isinstance(table_layout, dict) and table_layout.get("ok") is False:
+        post_publish_issues.append({
+            "id": "P0-postpublish-table-layout", "severity": "P0",
+            "title": "飞书表格布局回读不一致",
+            "evidence": json.dumps({k: v for k, v in table_layout.items() if k != "ok"},
+                                   ensure_ascii=False)[:500],
+            "locus": "feishu-docx"})
     if readback.get("layout_complete") is False:
         post_publish_issues.append({
             "id": "P0-postpublish-layout", "severity": "P0",

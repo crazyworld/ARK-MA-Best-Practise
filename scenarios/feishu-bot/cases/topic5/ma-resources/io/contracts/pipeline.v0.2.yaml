@@ -566,7 +566,7 @@ nodes:
     outputs: [delivery_record, task_result]
     success: 发布后检查全过（图片/布局/所有权/链接/版本一致）
     side_effect: delivery-commit
-    idempotency: "commit:{task_id}:{resource_lock}"
+    idempotency: "commit:{task_id}:{resource_lock}:{report_artifact_sha256}:u{user_rework_rounds}"
     retry: {max: 1, on_fail: pause}
     checkpoint: true
     next: n24_handoff
