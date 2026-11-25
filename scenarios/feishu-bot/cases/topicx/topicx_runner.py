@@ -487,6 +487,7 @@ class TopicxRunner:
                 "stopped": "任务已停止，不再接收活动明细；如需重新分析，请新建任务。",
                 "done": "报告已完成，不再接收活动明细；如需分析另一份数据，请新建任务。",
                 "busy": "任务正在准备中，请等待 G1 需求确认和 G2 方案确认；当前不接收活动明细。",
+                "wait_intake": "当前正在梳理复盘需求。请先在本话题用文字描述或补充需求；活动明细会在方案确认后接收。",
             }.get(task.status)
             if unavailable:
                 await self.reply(task, unavailable)
@@ -508,6 +509,14 @@ class TopicxRunner:
                 await self.reply(task, str(error))
             except Topic5RunnerError as error:
                 await self.reply(task, f"数据文件未接收：{error}")
+            return
+        if task.scenario == "topic5" and task.status == "wait_intake" and text \
+                and await self._topic5_runner.handle_intake_reply(
+            chat_id=message.chat_id,
+            thread_id=message.thread_id,
+            user_open_id=message.user_open_id,
+            text=text,
+        ):
             return
         if task.status == "paused" and task.scenario == "topic5":
             if not text and not message.resources:

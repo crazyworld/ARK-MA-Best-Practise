@@ -12,6 +12,20 @@
 飞书原生Grid/Callout/富文本在`feishu.py`实现，完整性规则在独立Validator扫描器实现。
 打包器注入同一扫描器供N19预检；不依赖客户原目录，不修改客户资产。
 
+## 2026-11-25 Phase1 自然语言入口
+
+对齐原版 `Agent.Supervisor/.../Prompt/Phase1_需求梳理_Topic5_v1.10.md`（v1.12 Step0–5）：
+
+| 原版 | MA 版本 | 状态 |
+|---|---|---|
+| `Skills/campaign-keyword-generation/`（v1.1.0） | `ma-resources/skills/campaign-keyword-generation/`，挂载到 coordinator | 原样迁入 |
+| `KS/KS_Project_Intake_Template.md`（v2.6） | `ma-resources/io/intake/KS_Project_Intake_Template.md`，Gateway 读取代码块原样发送 | 原样迁入 |
+| Phase1 Step1–2（Supervisor 加载 Skill、消费返回） | `coordinator.system.md`「需求受理」+ `pipeline-orchestrator/intake_result.py`（契约校验、留痕、`INTAKE_RESULT`） | 适配迁入 |
+| Step2 第 6 条（结果映射确认单） | `topic5_intake.skill_result_to_requirement_input` → `normalize_requirement` 预检 | 适配迁入 |
+| Step5 HC-T5-0（只展示、无需确认） | Gateway 发「需求解析结果」；编排器 n01 读 `requirement_preset` 直接冻结（authority=skill_auto_adopted） | 适配迁入 |
+
+MA 环境未挂载秘塔搜索，Skill 按其降级规则执行（`dependency_state.metaso=unavailable`）。
+
 ## 标记说明
 
 截至2026-11-03，词云已使用客户 `wordcloud-insight` v0.2.6：n14 双版渲染，

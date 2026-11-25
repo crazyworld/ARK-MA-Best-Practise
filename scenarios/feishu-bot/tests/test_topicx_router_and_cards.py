@@ -1086,3 +1086,50 @@ async def test_topic6_routed_job_sets_title_env_and_activates_after_job(tmp_path
     assert ark.call[2]["env_overrides"]["FEISHU_USER_OPEN_ID"] == "ou-owner"
     assert ark.call[2]["vault_ids"] == ["base-vault", "user-vault"]
     assert job.task_id == "task-1"
+
+
+@pytest.mark.asyncio
+async def test_topic5_wait_intake_followup_goes_to_intake_not_session():
+    """Phase1：等待需求补充时，话题文字交给 Topic5 需求受理，不直发 Session、不走备注。"""
+    runner = object.__new__(TopicxRunner)
+    calls = []
+
+    class Topic5Runner:
+        @staticmethod
+        async def handle_intake_reply(**kwargs):
+            calls.append(kwargs["text"])
+            return True
+
+    class Ark:
+        @staticmethod
+        async def send_message(*_a):
+            raise AssertionError("intake reply must not bypass Topic5 runner")
+
+    runner._topic5_runner = Topic5Runner()
+    runner._ark = Ark()
+    message = SimpleNamespace(user_open_id="ou-other", chat_id="chat", thread_id="thread",
+                              text="统计 2026-10-22 至 11-04，小红书和抖音", resources=[])
+    task = SimpleNamespace(user_open_id="ou-owner", status="wait_intake", scenario="topic5",
+                           business_session_id="session-1")
+
+    await runner.handle_followup(message, task)
+
+    assert calls == ["统计 2026-10-22 至 11-04，小红书和抖音"]
+
+
+@pytest.mark.asyncio
+async def test_topic5_wait_intake_rejects_attachment():
+    runner = object.__new__(TopicxRunner)
+    replies = []
+
+    async def reply(_task, text):
+        replies.append(text)
+
+    runner.reply = reply
+    message = SimpleNamespace(user_open_id="ou", chat_id="chat", thread_id="thread",
+                              text="", resources=["xlsx"])
+    task = SimpleNamespace(user_open_id="ou", status="wait_intake", scenario="topic5")
+
+    await runner.handle_followup(message, task)
+
+    assert replies and "梳理复盘需求" in replies[0]

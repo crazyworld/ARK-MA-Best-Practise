@@ -243,10 +243,12 @@ def build_gateway(
         task = control.get_task(job.task_id)
         if task is None:
             return
-        if status == "wait_hc":
-            control.transition(job.task_id, ("running",), "wait_hc")
+        if status in ("wait_hc", "wait_intake"):
+            # 模板可能在 start_routed_job 返回前发出，此时控制面仍是 starting。
+            control.transition(
+                job.task_id, ("starting", "running", "wait_hc", "wait_intake"), status)
         elif status == "running":
-            control.transition(job.task_id, ("wait_hc", "failed"), "running")
+            control.transition(job.task_id, ("wait_hc", "wait_intake", "failed"), "running")
         elif status == "failed" and getattr(job, "failure_scope", "") in (
             "",
             "recoverable",
@@ -259,7 +261,7 @@ def build_gateway(
         elif status in ("done", "failed"):
             transitioned = control.transition(
                 job.task_id,
-                ("running", "wait_hc", "starting"),
+                ("running", "wait_hc", "wait_intake", "starting"),
                 status,
                 last_error=job.last_error if status == "failed" else "",
             )
