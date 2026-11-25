@@ -308,6 +308,27 @@ def _plan_preflight(context: dict) -> dict:
     return {}
 
 
+def _md_code(text: str) -> str:
+    """表达式按行内代码原样展示（含 | + 括号）；反引号替换避免截断代码段。"""
+    return "`" + str(text).replace("`", "'") + "`"
+
+
+def _query_scope_lines(scope) -> list[str]:
+    """G2「取数口径」：品牌/活动关键词、过滤词、产品词原样展示并标来源（方案 A）。"""
+    if not isinstance(scope, dict):
+        return []
+    lines = []
+    for row in scope.get("rows") or []:
+        if not isinstance(row, dict):
+            continue
+        value = str(row.get("value") or "").strip()
+        shown = _md_code(value) if value else "（空）"
+        source = str(row.get("source") or "").strip()
+        lines.append(f"- **{row.get('label') or '口径'}**：{shown}"
+                     + (f"（{source}）" if source else ""))
+    return lines
+
+
 def _plan_review_elements(payload: dict) -> list[dict]:
     """把 G2 review_context 渲染为可直接审核的中文方案。"""
     context = payload.get("review_context")
@@ -426,8 +447,12 @@ def _plan_review_elements(payload: dict) -> list[dict]:
         "BLOCKED": "信息不完整，暂不能开始执行",
     }.get(str(preflight.get("status")), "检查状态未知")
 
+    query_lines = _query_scope_lines(context.get("query_scope"))
     return [
         {"tag": "markdown", "content": "**待确认方案 · 复盘范围**\n" + "\n".join(scope_lines)},
+        *([{"tag": "markdown", "content": (
+            "**取数口径**（来自需求确认单，原样展示；有误请打回并写明）\n"
+            + "\n".join(query_lines))}] if query_lines else []),
         {
             "tag": "markdown",
             "content": (

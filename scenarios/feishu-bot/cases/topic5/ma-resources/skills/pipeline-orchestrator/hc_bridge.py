@@ -118,6 +118,9 @@ def write_hc_pending(st, run_dir: Path) -> dict:
                 for key in ("analysis_plan", "execution_plan", "selected_modules")
             },
         }
+        scope = query_scope(st.read_artifact("requirement_confirmed"))
+        if scope:
+            payload["review_context"]["query_scope"] = scope
     elif node_id == "n10_hc_opinion":
         # Forward the complete versioned artifacts, including review_items and
         # source_subject; the thin Coordinator must not rewrite review definitions.
@@ -204,6 +207,68 @@ def write_hc_pending(st, run_dir: Path) -> dict:
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return payload
+
+
+# 取数口径来源（Skill resolved_request.field_sources / adoption.source → 用户可读）。
+_SOURCE_USER = {"user", "user_explicit", "user_rule", "原话", "用户更正", "correction", "utterance"}
+_SOURCE_BLANK = {"user_blank"}
+_SOURCE_GENERATED = {"generated", "inferred", "推断"}
+_SOURCE_DEFAULT = {"default", "默认"}
+# (展示名, 确认单字段, Skill field_sources 字段)
+_QUERY_FIELDS = (
+    ("品牌取数关键词", "brand_query", "brand_keyword"),
+    ("品牌取数过滤词", "brand_filter", "brand_filter"),
+    ("活动取数关键词", "activity_query", "activity_keywords"),
+    ("活动取数过滤词", "activity_filter", "activity_filter"),
+    ("产品关键词", "product_query", "product_keywords"),
+)
+
+
+def _source_label(raw: str, value: str, skill_sourced: bool) -> str:
+    raw = str(raw or "").strip()
+    if raw in _SOURCE_BLANK:
+        return "用户留空"
+    if raw in _SOURCE_USER:
+        return "用户给定"
+    if raw in _SOURCE_GENERATED:
+        return "能力生成"
+    if raw in _SOURCE_DEFAULT:
+        return "默认"
+    if not value:
+        return "未填写"
+    return "能力生成" if skill_sourced else "用户给定"
+
+
+def query_scope(requirement: Any) -> dict:
+    """G2 方案卡「取数口径」（用户选定方案 A）。
+
+    原版 Phase1 v1.10:159：需求解析展示（HC-T5-0）不出现关键词/过滤词，只完整写入确认单。
+    G2 是方案确认关卡，在此原样展示确认单中的取数表达式及来源，供核对、有误打回。
+    只读 requirement_confirmed，不改写表达式。
+    """
+    if not isinstance(requirement, dict) or not requirement:
+        return {}
+    generation = requirement.get("keyword_generation") or {}
+    resolved = generation.get("resolved_request") if isinstance(generation, dict) else {}
+    sources = (resolved or {}).get("field_sources") or {}
+    if not isinstance(sources, dict):
+        sources = {}
+    skill_sourced = requirement.get("requirement_source") == "campaign_keyword_generation"
+    campaigns = [c for c in (requirement.get("campaigns") or []) if isinstance(c, dict)]
+    rows = []
+    for label, field, source_key in _QUERY_FIELDS:
+        if field in ("activity_query", "activity_filter") and len(campaigns) > 1:
+            for camp in campaigns:
+                value = str(camp.get(field) or (requirement.get(field) if field == "activity_filter" else "")
+                            or "").strip()
+                rows.append({"label": f"{label} · {camp.get('name') or camp.get('id')}",
+                             "value": value,
+                             "source": _source_label(sources.get(source_key), value, skill_sourced)})
+            continue
+        value = str(requirement.get(field) or "").strip()
+        rows.append({"label": label, "value": value,
+                     "source": _source_label(sources.get(source_key), value, skill_sourced)})
+    return {"rows": rows}
 
 
 def clear_hc_pending(run_dir: Path) -> None:
