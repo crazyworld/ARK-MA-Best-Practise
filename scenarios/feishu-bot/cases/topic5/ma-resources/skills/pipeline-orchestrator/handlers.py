@@ -1684,22 +1684,32 @@ def annotate(node, state, ctx):
         ) or []
 
         r2_rerun, r2_calib = _rerun_scope(state, "round2", "r2_review", rows)
+        # 与轮次一共用用户的路由决定（FIX-33：DataHub 不可用时用户确认 small_engine）。
+        decision = state.read_artifact("annotation_route_decision") or {}
+        route2 = decision.get("route") if isinstance(decision, dict) else None
         # FIX-31：正面任务用 positive_labels，负面任务用 negative_labels；旧产物两者共用 labels
         positive_labels = confirmed.get("positive_labels") if isinstance(confirmed, dict) else None
         negative_labels = confirmed.get("negative_labels") if isinstance(confirmed, dict) else None
-        result = annotate_mod.annotate_round2(
-            rows, rerun_ids=r2_rerun, calibration=r2_calib,
-            negative_labels=list(negative_labels) if negative_labels is not None else None,
-            opinion_labels=list(positive_labels or opinion_labels),
-            ugc_categories=list(ugc_categories), threshold=threshold,
-            ugc_not_applicable=ugc_not_applicable,
-            opinion_review_items=confirmed.get("opinion_review_items") or [],
-            ugc_review_items=confirmed.get("ugc_review_items") or [],
-            campaign_name=str(
-                (state.read_artifact("confirmed_plan") or {}).get("activity_name")
-                or ""))
+        try:
+            result = annotate_mod.annotate_round2(
+                rows, rerun_ids=r2_rerun, calibration=r2_calib,
+                negative_labels=list(negative_labels) if negative_labels is not None else None,
+                opinion_labels=list(positive_labels or opinion_labels),
+                ugc_categories=list(ugc_categories), threshold=threshold,
+                ugc_not_applicable=ugc_not_applicable,
+                opinion_review_items=confirmed.get("opinion_review_items") or [],
+                ugc_review_items=confirmed.get("ugc_review_items") or [],
+                campaign_name=str(
+                    (state.read_artifact("confirmed_plan") or {}).get("activity_name")
+                    or ""),
+                cache_dir=state.run_dir, route_decision=route2)
+        except annotate_mod.DataHubRouteRequired as required:
+            raise HumanPause(prompt=str(required),
+                             expect=["annotation_route_decision"]) from required
         if result.get("degraded"):
-            raise RuntimeError("annotate r2: 标注能力不可用，禁止确定性伪标注")
+            raise RuntimeError(
+                "annotate r2: 标注能力不可用，禁止确定性伪标注"
+                f"（{result.get('degraded_reason') or '未知原因'}）")
         # 覆盖检查缺口（真路径 ERROR）→ 直接报错，交引擎按 retry/on_fail=pause 处理。
         cov = result.get("coverage") or {}
         if cov.get("has_error"):

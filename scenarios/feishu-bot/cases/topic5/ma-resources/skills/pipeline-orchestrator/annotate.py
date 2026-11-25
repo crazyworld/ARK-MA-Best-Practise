@@ -682,8 +682,13 @@ def annotate_round2(
     rerun_ids: list[str] | None = None,
     calibration: list[dict] | None = None,
     negative_labels: list[str] | None = None,
+    cache_dir=None,
+    route_decision: str | None = None,
 ) -> dict:
     """轮次二标注：三个独立子任务 + 按适用范围的覆盖检查（FIX-28）。
+
+    路由（原版 KS_Data_Processing 2A/2B）：本轮待标行数 ≥ threshold 时三个子任务各建
+    一个 DataHub 任务（gpt-5.4-mini），行级缺口交直连模型补标；否则全部直连（batch 15）。
 
     子任务与客户 annot_r2.py 一致，DAG 仍是一个 n11 节点：三个任务的产物都写在
     同一行上，物理拆成多个节点只会增加 join，不改变结果。
@@ -711,36 +716,75 @@ def annotate_round2(
         or (not ugc_not_applicable and not str(row.get("ugc_category") or "").strip())
     )
 
-    routed_via, degraded = "small_engine", False
-    if semantic.llm_available():
+    tasks = (
+        ("opinion_pos", prompts["opinion"],
+         lambda row, parsed, allowed=opinion_labels: _apply_opinion(row, parsed, allowed),
+         opinion_missing),
+        ("opinion_neg", prompts["opinion_negative"],
+         lambda row, parsed, allowed=neg_labels: _apply_opinion(row, parsed, allowed),
+         opinion_missing),
+        ("attr", prompts["attr"],
+         lambda row, parsed: _apply_attr(row, parsed, ugc_categories, not ugc_not_applicable),
+         attr_missing),
+    )
+    total = len({id(r) for key in ("opinion_pos", "opinion_neg", "attr") for r in groups[key]})
+    use_datahub = total >= threshold and route_decision != ROUTE_SMALL_ENGINE
+    routed_via, degraded, degraded_reason = "small_engine", False, ""
+    backfill = {"rows": 0, "remaining": 0, "remaining_ids": []}
+    if use_datahub:
+        if not datahub.api_available():
+            raise DataHubRouteRequired(total, threshold, "DataHub 不可用（DATAHUB_API_KEY 未配置或 SDK 缺失）")
+        dh_prompts = _r2_dh_prompts(
+            campaign_name, opinion_labels, neg_labels, ugc_categories, ugc_not_applicable,
+            opinion_review_items, ugc_review_items, calibration)
         try:
-            # 正负各用各自的 prompt 与候选（原版 annot_r2.py 两个独立观点任务）
-            for group, prompt, allowed in (
-                (groups["opinion_pos"], prompts["opinion"], opinion_labels),
-                (groups["opinion_neg"], prompts["opinion_negative"], neg_labels),
-            ):
-                if group:
-                    _run_task(
-                        group, prompt=prompt,
-                        apply_fn=lambda row, parsed, allowed=allowed: _apply_opinion(
-                            row, parsed, allowed),
-                        is_missing=opinion_missing)
-            if groups["attr"]:
-                _run_task(
-                    groups["attr"], prompt=prompts["attr"],
-                    apply_fn=lambda row, parsed: _apply_attr(
-                        row, parsed, ugc_categories, not ugc_not_applicable),
-                    is_missing=attr_missing)
-        except Exception:
-            degraded = True
+            for key, _prompt, apply_fn, is_missing in tasks:
+                if not groups[key]:
+                    continue
+                cache = (annotation_cache.AnnotationCache(
+                    cache_dir, f"round2_datahub_{key}", dh_prompts[key])
+                    if cache_dir is not None else None)
+                _run_datahub(groups[key], dh_prompts[key], apply_fn, _R1_DH_COLUMNS,
+                             cache=cache, payload_fn=_r1_payload_row,
+                             is_labeled=lambda row, miss=is_missing: not miss(row))
+        except Exception as error:  # 批量任务级失败：先问用户，不静默切换
+            raise DataHubRouteRequired(
+                total, threshold, f"DataHub 运行异常：{type(error).__name__}") from error
+        routed_via = "datahub"
+        # 行级缺口补标（原版 check_coverage：缺失 → ERROR → 补标后重查）。
+        missing_ids: set[str] = set()
+        for key, prompt, apply_fn, is_missing in tasks:
+            gap = [row for row in groups[key] if is_missing(row)]
+            if not gap:
+                continue
+            missing_ids.update(row["_annot_id"] for row in gap)
+            if semantic.llm_available():
+                try:
+                    _run_task(gap, prompt=prompt, apply_fn=apply_fn, is_missing=is_missing)
+                except Exception as error:  # 补标失败不吞缺口：覆盖检查照常报错
+                    log.warning("annotate r2 backfill %s failed: %s", key, error)
+        remaining = sorted({row["_annot_id"] for key, _p, _a, is_missing in tasks
+                            for row in groups[key] if is_missing(row)})
+        backfill = {"rows": len(missing_ids), "remaining": len(remaining),
+                    "remaining_ids": remaining[:50]}
+    elif semantic.llm_available():
+        try:
+            for key, prompt, apply_fn, is_missing in tasks:
+                if groups[key]:
+                    _run_task(groups[key], prompt=prompt, apply_fn=apply_fn,
+                              is_missing=is_missing)
+        except Exception as error:
+            # 带出真实原因：之前只剩「标注能力不可用」，无法区分凭据、限流还是参数错误。
+            degraded, degraded_reason = True, f"{type(error).__name__}: {error}"[:500]
     else:
-        degraded = True
+        degraded, degraded_reason = True, "语义能力不可用（缺 LLM_RELAY_* 凭据）"
     if degraded:
         _degrade_r2(rows, opinion_labels, ugc_categories)
 
     cov = check_coverage(
         rows, degraded=degraded, ugc_not_applicable=ugc_not_applicable, groups=groups)
     out = {"rows": rows, "round": 2, "routed_via": routed_via, "coverage": cov,
+           "backfill": backfill,
            "tasks": {
                "opinion_positive": len(groups["opinion_pos"]),
                "opinion_negative": len(groups["opinion_neg"]),
@@ -750,7 +794,47 @@ def annotate_round2(
         out["not_applicable"] = ["ugc_category"]
     if degraded:
         out["degraded"] = True
+        out["degraded_reason"] = degraded_reason
     return out
+
+
+def _r2_dh_prompts(campaign_name, positive_labels, negative_labels, ugc_categories,
+                   ugc_not_applicable, opinion_review_items, ugc_review_items,
+                   calibration=None) -> dict[str, str]:
+    """DataHub 轮次二三任务 prompt（原版 KS_Data_Processing「2B DataHub Pass 2」）。
+
+    DataHub 逐行调用：用 {{列名}} 占位、输出单个 JSON 对象；标签表、规则与直连 prompt 同源。
+    """
+    fields = ("标题：{{title}}\n文本：{{content}}\n视频封面内容识别：{{video_cover_text}}\n"
+              "音频内容识别：{{audio_text}}\n视频文本识别：{{video_text}}\n")
+    calib = _calibration_block(calibration)
+
+    def opinion(polarity: str, labels: list[str]) -> str:
+        return (
+            f"你是专业文本标注员。以下是「{campaign_name}」活动的一条{polarity}内容。"
+            "候选观点标签是【讨论话题】，不含情感；该内容的情感已确定为"
+            f"{polarity}，只需判断它在讨论哪个话题。\n"
+            f"## 候选标签\n{_label_table(labels, opinion_review_items)}\n"
+            "## 规则\n从候选标签中选 1 个最匹配的；仅当内容兼有两个不同话题时选 2 个"
+            "（用英文逗号分隔）。优先篇幅最重的部分；都不匹配输出「其他」。\n"
+            f"## 证据边界\n{_EVIDENCE_BOUNDARY}\n{calib}\n## 待标注内容\n{fields}"
+            '只输出 JSON：{"opinion":"标签1,标签2"}'
+        )
+
+    ugc_part = (
+        "## ugc_category（UGC 参与方式）\n分类依据是用户做了什么动作、采用什么内容形式，"
+        "不依据情感/观点倾向。选 1 个；都不符合填「其他」。\n"
+        f"{_label_table(ugc_categories, ugc_review_items)}"
+        if not ugc_not_applicable else "## ugc_category\n本项目仅 PGC，一律填 N/A。"
+    )
+    attr = (
+        f"你是专业文本标注员。对「{campaign_name}」活动的一条内容标注字段（与情感无关，中性内容同样标注）。\n"
+        f"{ugc_part}\n\n## discussion_dimension（主要讨论对象，选 1 个主导项）\n"
+        f"{_DISCUSSION_DIM_PROMPT}\n{calib}\n## 待标注内容\n{fields}"
+        '只输出 JSON：{"ugc_category":"…","discussion_dimension":"品牌|产品|活动"}'
+    )
+    return {"opinion_pos": opinion("正面", positive_labels),
+            "opinion_neg": opinion("负面", negative_labels), "attr": attr}
 
 
 def _degrade_r2(rows: list[dict], opinion_labels, ugc_categories) -> None:
