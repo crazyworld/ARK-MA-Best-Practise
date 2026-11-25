@@ -63,5 +63,30 @@ class EnvironmentRenderTest(unittest.TestCase):
         self.assertEqual(env["SSJH_USERNAME"], "")
 
 
+class SemanticModelConfigTest(unittest.TestCase):
+    """回归：TOPIC5_SEMANTIC_MODEL=doubao-seed-2-1-lite-ultra-vision-260920 在方舟返回 404
+    （模型不存在或账号无权限），n07b 去噪两秒内失败。语义模型须为已验证可用的模型，
+    且部署前探测每个模型可达。"""
+
+    def test_semantic_model_matches_verified_model(self):
+        env = json.loads((_CASE_DIR / "ma-resources" / "environment.json")
+                         .read_text(encoding="utf-8"))["config"]["env"]
+        self.assertEqual(env["TOPIC5_SEMANTIC_MODEL"], env["TOPIC5_MODEL_ID"])
+        self.assertNotIn("ultra-vision", json.dumps(env))
+
+    def test_code_default_matches_environment(self):
+        source = (_CASE_DIR / "ma-resources" / "skills" / "pipeline-orchestrator"
+                  / "semantic.py").read_text(encoding="utf-8")
+        env = json.loads((_CASE_DIR / "ma-resources" / "environment.json")
+                         .read_text(encoding="utf-8"))["config"]["env"]
+        self.assertIn(f'_DEFAULT_MODEL = "{env["TOPIC5_SEMANTIC_MODEL"]}"', source)
+
+    def test_deploy_probes_models_before_updating_environment(self):
+        script = SCRIPT.read_text(encoding="utf-8")
+        probe = script.index("# ---- 沙箱模型可达性探测 ----")
+        self.assertLess(probe, script.index('ark_post "/environments/$ENVIRONMENT_ID"'))
+        self.assertIn("TOPIC5_SEMANTIC_MODEL", script[probe:probe + 1500])
+
+
 if __name__ == "__main__":
     unittest.main()

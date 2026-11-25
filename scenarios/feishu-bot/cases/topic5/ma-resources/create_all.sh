@@ -193,6 +193,22 @@ env_payload="$(
   ' "$ROOT/environment.json"
 )"
 # ---- 沙箱环境变量渲染结束 ----
+# ---- 沙箱模型可达性探测 ----
+# 沙箱内去噪/标注/写作直接调方舟 chat/completions；模型 ID 不存在或无权限时返回 404，
+# 要到 n07b 才暴露。部署前用 1 token 请求逐个探测，失败则中止且不更新 Environment。
+for _model_key in TOPIC5_SEMANTIC_MODEL TOPIC5_MODEL_ID; do
+  _model=$(jq -r --arg k "$_model_key" '.config.env[$k] // ""' <<<"$env_payload")
+  [ -n "$_model" ] || continue
+  _code=$(curl -sS -o /dev/null -w "%{http_code}" -X POST "$BASE_URL/chat/completions" \
+    -H "Authorization: Bearer $ARK_API_KEY" -H "Content-Type: application/json" \
+    -d "$(jq -n --arg m "$_model" '{model:$m,max_tokens:1,messages:[{role:"user",content:"ping"}],thinking:{type:"disabled"}}')" \
+    --max-time 60 || echo 000)
+  if [ "$_code" != "200" ]; then
+    echo "沙箱模型不可用：$_model_key=$_model（HTTP $_code）；已中止，未更新 Environment" >&2
+    exit 4
+  fi
+  echo "模型可用: $_model_key=$_model"
+done
 if [ -n "$ENVIRONMENT_ID" ]; then
   if [ "$UPDATE_ENV" = "1" ]; then
     # 原地更新 config;新配置只对后续 Session 生效。POST /environments/{id} body={"config": ...}

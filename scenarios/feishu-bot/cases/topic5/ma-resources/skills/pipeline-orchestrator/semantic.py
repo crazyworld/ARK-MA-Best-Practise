@@ -8,7 +8,7 @@
 凭据只从环境变量读取，按以下顺序取第一个非空值：
   BASE_URL：ARK_BASE_URL → OPENAI_BASE_URL（需含版本前缀，如 .../api/v3）
   Key：    ARK_API_KEY → OPENAI_API_KEY
-  模型：   TOPIC5_SEMANTIC_MODEL → 默认 doubao-seed-2-1-lite-ultra-vision-260920
+  模型：   TOPIC5_SEMANTIC_MODEL → 默认 doubao-seed-2-1-lite-260915
   思考：   TOPIC5_SEMANTIC_THINKING → 默认 disabled
 """
 from __future__ import annotations
@@ -24,7 +24,7 @@ import urllib.request
 from contextlib import contextmanager
 from typing import Any
 
-_DEFAULT_MODEL = "doubao-seed-2-1-lite-ultra-vision-260920"
+_DEFAULT_MODEL = "doubao-seed-2-1-lite-260915"
 
 
 @contextmanager
