@@ -86,20 +86,63 @@ def _overall_timeout(explicit: int | None) -> int:
 
 
 
-def parse_json(text: str) -> Any:
-    """剥 markdown 围栏/前后缀说明后解析 JSON；失败再按首尾花括号/方括号截取。"""
+def _escape_inner_quotes(text: str) -> str:
+    """修复字符串值里未转义的英文双引号（模型引用原文：「"reason": "角色设定"汉堡主理鹅"，属于…"」）。
+
+    在字符串内遇到 `"`：其后第一个非空白字符是 , : } ] 或文本结束才视为闭合引号，
+    否则按字面量转义。只在严格解析失败后使用。
+    """
+    out, in_str, i, n = [], False, 0, len(text)
+    while i < n:
+        ch = text[i]
+        if in_str and ch == "\\" and i + 1 < n:
+            out.append(text[i:i + 2]); i += 2; continue
+        if ch == '"':
+            if not in_str:
+                in_str = True
+            else:
+                j = i + 1
+                while j < n and text[j] in " \t\r\n":
+                    j += 1
+                if j >= n or text[j] in ",:}]":
+                    in_str = False
+                else:
+                    out.append('\\"'); i += 1; continue
+        out.append(ch); i += 1
+    return "".join(out)
+
+
+def _json_candidates(text: str) -> list[str]:
+    """候选 JSON 文本：整体、各 ```json 围栏段（流式偶发输出中途重来，取最后完整的一段）、
+    首尾括号截取。"""
     text = (text or "").strip()
-    text = re.sub(r"^```(?:json)?\s*", "", text)
-    text = re.sub(r"\s*```$", "", text).strip()
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-    for lo, hi in (("{", "}"), ("[", "]")):
-        start, end = text.find(lo), text.rfind(hi)
-        if 0 <= start < end:
+    fenced = [m.strip() for m in re.findall(r"```(?:json)?\s*(.*?)(?:```|$)", text, re.S) if m.strip()]
+    stripped = re.sub(r"\s*```$", "", re.sub(r"^```(?:json)?\s*", "", text)).strip()
+    out = [stripped] + list(reversed(fenced))
+    for base in list(out):
+        for lo, hi in (("{", "}"), ("[", "]")):
+            start, end = base.find(lo), base.rfind(hi)
+            if 0 <= start < end:
+                out.append(base[start:end + 1])
+            # 中途重来：最后一个起始括号到末尾
+            last = base.rfind("\n" + lo)
+            if last > 0 and base.rfind(hi) > last:
+                out.append(base[last + 1:base.rfind(hi) + 1])
+    return list(dict.fromkeys(out))
+
+
+def parse_json(text: str) -> Any:
+    """解析模型输出的 JSON：严格解析 → 放宽控制字符 → 修复未转义引号，依次尝试各候选段。
+
+    原版 annot_r1/annot_r2 由 Agent 读报错后修正；这里在程序侧兜住模型常见的格式瑕疵
+    （字符串内未转义的引号、换行等控制字符、围栏/说明文字、流式输出中途重来），
+    语义内容不改。全部失败才抛错。
+    """
+    candidates = _json_candidates(text)
+    for repair in (lambda s: s, _escape_inner_quotes):
+        for cand in candidates:
             try:
-                return json.loads(text[start:end + 1])
+                return json.loads(repair(cand), strict=False)
             except json.JSONDecodeError:
                 continue
     raise ValueError("无法解析模型输出为 JSON")
@@ -147,7 +190,7 @@ def with_lm(system: str, lm_scope: str | None) -> str:
 
 
 def chat(system: str, user: str, *, max_tokens: int = 4096,
-         temperature: float = 0.2, timeout: int | None = None, retries: int = 2,
+         temperature: float = 0.2, timeout: int | None = None, retries: int | None = None,
          thinking: str | None = None, lm_scope: str | None = None,
          model: str | None = None) -> str:
     """bmc-llm-relay OpenAI 兼容 chat/completions（流式）。无凭据直接抛错，由调用方降级。
@@ -171,6 +214,10 @@ def chat(system: str, user: str, *, max_tokens: int = 4096,
     }
     body = json.dumps(payload, ensure_ascii=False).encode()
     url = f"{base}/chat/completions"
+    # relay→Bedrock 偶发 400「model identifier is invalid」/5xx/断流：同一请求稍后重放即成功
+    # （job_436842fb74da n07b 实测：同模型 12/12 探测正常，单批连续 2 次 400）。
+    # 默认 4 次、退避 2/4/8s；可由 TOPIC5_RELAY_RETRIES 调整。
+    retries = int(retries or os.environ.get("TOPIC5_RELAY_RETRIES") or RELAY_RETRIES)
     for attempt in range(retries):
         parts: list[str] = []
         finish = ""
@@ -229,13 +276,16 @@ def chat(system: str, user: str, *, max_tokens: int = 4096,
             # relay 的 400 也出现过偶发（job_bf3c6b52db7b n09b 事后重放成功），保持重试。
             if attempt == retries - 1:
                 raise
-            time.sleep(2 ** attempt)
+            time.sleep(2 ** (attempt + 1))
         except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError):
             if attempt == retries - 1:
                 raise
-            time.sleep(2 ** attempt)
+            time.sleep(2 ** (attempt + 1))
     return ""
 
+
+# relay 调用重试次数（见 chat()）。
+RELAY_RETRIES = 4
 
 # 解析重试次数：对齐原版各 discovery/annot 脚本的 call_with_retry(tries=3) / range(3)（FIX-31）
 CHAT_JSON_ATTEMPTS = 3
