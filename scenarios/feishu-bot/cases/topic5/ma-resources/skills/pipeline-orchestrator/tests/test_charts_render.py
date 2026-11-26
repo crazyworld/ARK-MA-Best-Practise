@@ -154,8 +154,11 @@ class TestChartsRenderHandler(unittest.TestCase):
         self.assertIsNone(cu["cover"]["local_path"])
 
     def test_handler_rejects_degraded_render(self):
+        # 密闭：不依赖本机是否装了 node_modules，也不触发真实 npm install。
         for mode in ("demo", "full"):
-            with self.subTest(mode=mode):
+            with self.subTest(mode=mode), \
+                    patch("charts.ensure_renderer",
+                          side_effect=RuntimeError("缺少 node 可执行文件（>=18）")):
                 self.st.params["run_mode"] = mode
                 with self.assertRaisesRegex(RuntimeError, "禁止无图交付"):
                     handlers.get("charts_render")(
@@ -163,7 +166,8 @@ class TestChartsRenderHandler(unittest.TestCase):
                     )
 
     def test_handler_preserves_renderer_diagnostic(self):
-        with patch("charts.renderer_available", return_value=False), \
+        with patch("charts.ensure_renderer", return_value="/mnt/skills/example"), \
+                patch("charts.renderer_available", return_value=False), \
                 patch("charts.renderer_diagnostic",
                       return_value="echarts_dir=/mnt/skills/example"):
             with self.assertRaisesRegex(
