@@ -114,5 +114,17 @@ class EnsureRendererTest(unittest.TestCase):
         self.assertNotIn("renderer_available()", head)
 
 
+class RenderErrorDetailTest(unittest.TestCase):
+    def test_root_cause_survives_long_stack(self):
+        stderr = ("/x/render_chart.js:46\n    throw new Error(`中文字体未找到`);\n    ^\n\n"
+                  "Error: 中文字体未找到: /x/assets/fonts\n"
+                  + "    at Module._compile (node:internal/modules/cjs/loader:1105:14)\n" * 200
+                  + "Error: Command failed: node render_chart.js\n  status: 1,\n")
+        detail = charts._render_error_detail(stderr)
+        self.assertTrue(detail.startswith("Error: 中文字体未找到"))
+        self.assertNotIn("Module._compile", detail)
+        self.assertLessEqual(len(detail), 1200)
+
+
 if __name__ == "__main__":
     unittest.main()

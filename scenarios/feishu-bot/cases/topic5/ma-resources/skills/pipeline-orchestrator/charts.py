@@ -586,6 +586,20 @@ def _safe(name: str) -> str:
 
 
 # ── 真路径：逐张渲染为本地 PNG ───────────────────────────────
+def _render_error_detail(stderr: str, limit: int = 1200) -> str:
+    """从 node 报错里提取根因：Error 行优先，去掉 `at ...` 堆栈行。"""
+    lines = [line.rstrip() for line in (stderr or "").splitlines() if line.strip()]
+    errors = [line.strip() for line in lines if re.match(r"^\s*\w*Error\b", line)]
+    other = [line.strip() for line in lines
+             if not line.lstrip().startswith("at ") and line.strip() not in errors]
+    seen, picked = set(), []
+    for line in errors + other:
+        if line not in seen:
+            seen.add(line)
+            picked.append(line)
+    return " | ".join(picked)[:limit]
+
+
 def _render_png(spec: dict, out_png: str, width: int = 1200, height: int = 600) -> None:
     """调 render_from_spec.js 把单 spec 渲染为 PNG；逐张自检文件存在且非空。"""
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False,
@@ -602,7 +616,9 @@ def _render_png(spec: dict, out_png: str, width: int = 1200, height: int = 600) 
             )
         except subprocess.CalledProcessError as error:
             # 带出渲染器原文（字体缺失、chart_type 不支持等），否则只剩 exit status 1。
-            detail = (error.stderr or b"").decode("utf-8", "replace").strip()[-2000:]
+            # 只取尾部会被 node 堆栈挤掉根因（实测「中文字体未找到」被截没）：
+            # 优先取 Error: 行，其余非堆栈行补充，整体截断。
+            detail = _render_error_detail((error.stderr or b"").decode("utf-8", "replace"))
             raise RuntimeError(f"图表渲染失败 {spec.get('chart_id')}：{detail or error}") from error
     finally:
         try:

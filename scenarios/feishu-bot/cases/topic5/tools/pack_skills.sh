@@ -124,7 +124,9 @@ pack_one() {
     # 1be6883 之前的旧脚本）。只带脚本与说明，字体/node_modules 仍用挂载版本。
     mkdir -p "$staged_root/bundled_skills"
     for sibling in report-cover-skill wordcloud-insight blueai-yuqing-echarts-skill-new; do
+      # SKILL.md 不带：MA 要求每个 Skill 包恰好一个 SKILL.md，运行时也只用脚本。
       rsync -a --exclude='__pycache__' --exclude='node_modules' --exclude='.DS_Store' \
+            --exclude='SKILL.md' \
             --exclude='assets' --exclude='*.[oO][tT][fF]' --exclude='*.[tT][tT][fF]' \
             --exclude='*.[tT][tT][cC]' --exclude='*.[wW][oO][fF][fF]*' \
             "$ROOT/ma-resources/skills/$sibling/" "$staged_root/bundled_skills/$sibling/"

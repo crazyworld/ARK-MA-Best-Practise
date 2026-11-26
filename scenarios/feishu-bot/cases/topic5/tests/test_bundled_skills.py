@@ -76,8 +76,11 @@ class PackBundlesSiblingsTest(unittest.TestCase):
     def test_pack_includes_sibling_scripts(self):
         src = (CASE / "tools" / "pack_skills.sh").read_text(encoding="utf-8")
         self.assertIn("bundled_skills", src)
+        tail = src[src.index("bundled_skills"):]
         for name in ("report-cover-skill", "wordcloud-insight", "blueai-yuqing-echarts-skill-new"):
-            self.assertIn(name, src[src.index("bundled_skills"):])
+            self.assertIn(name, tail)
+        # MA 要求每个 Skill 包恰好一个 SKILL.md：随带的兄弟 Skill 不能把自己的带进来
+        self.assertIn("--exclude='SKILL.md'", tail[:tail.index("done")])
 
 
 if __name__ == "__main__":
