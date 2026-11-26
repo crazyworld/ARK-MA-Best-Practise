@@ -71,13 +71,31 @@ class PngSelfCheckTest(unittest.TestCase):
         self.assertFalse(charts.png_self_check(self._png((0, 0, 0, 0), "RGBA"))["ok"])
         self.assertTrue(charts.png_self_check(self._png((250, 250, 250)))["ok"])
 
-    def test_cover_failure_raises(self):
-        with patch.object(charts, "renderer_available", return_value=True), \
+    def test_cover_failure_is_skipped_not_raised(self):
+        """业务确认 2026-11-26：封面失败直接放弃，继续下一步（取代 FIX-39 阻断）。"""
+        for failure in ({"return_value": None},
+                        {"side_effect": ValueError("缺少封面接口凭据")},
+                        {"side_effect": RuntimeError("moderation_blocked")}):
+            with patch.object(charts, "ensure_renderer", return_value="/x"), \
+                    patch.object(charts, "build_chart_specs", return_value=[]), \
+                    patch.object(charts, "_gen_cover", **failure):
+                out = charts.render_charts({}, {}, project="p", version="v1.0",
+                                           report_name="r", outdir=tempfile.mkdtemp())
+            self.assertIsNone(out["cover"]["local_path"])
+            self.assertTrue(out["cover"]["skipped"])
+            self.assertTrue(out["cover"]["skipped_reason"])
+            self.assertFalse(out["degraded"])  # 图表本身不算降级
+
+    def test_cover_success_kept(self):
+        outdir = tempfile.mkdtemp()
+        good = self._png((250, 250, 250))
+        with patch.object(charts, "ensure_renderer", return_value="/x"), \
                 patch.object(charts, "build_chart_specs", return_value=[]), \
-                patch.object(charts, "_gen_cover", return_value=None):
-            with self.assertRaisesRegex(RuntimeError, "封面"):
-                charts.render_charts({}, {}, project="p", version="v1.0", report_name="r",
-                                     outdir=tempfile.mkdtemp())
+                patch.object(charts, "_gen_cover", return_value=good):
+            out = charts.render_charts({}, {}, project="p", version="v1.0",
+                                       report_name="r", outdir=outdir)
+        self.assertEqual(out["cover"]["local_path"], good)
+        self.assertFalse(out["cover"]["degraded"])
 
 
 if __name__ == "__main__":

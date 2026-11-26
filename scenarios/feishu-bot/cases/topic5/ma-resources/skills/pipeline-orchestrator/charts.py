@@ -652,6 +652,27 @@ def _ascii_or(text: str, fallback: str) -> str:
     return text if text and all(ord(ch) < 128 for ch in text) else fallback
 
 
+def build_cover(report_name: str, version: str, outdir: str) -> dict:
+    """封面 best-effort（业务确认 2026-11-26：封面失败直接放弃，继续下一步）。
+
+    取代 FIX-39「封面失败即阻断」：封面是装饰，不影响数据与结论；失败时返回
+    local_path=None + skipped_reason，下游（报告装配、飞书交付、Validator）按「无封面」
+    处理，不重试、不暂停。图表本身仍 fail-closed。
+    """
+    path = os.path.join(outdir, "cover.png")
+    try:
+        cover_png = _gen_cover(report_name, f"版本 {version}", path)
+        if not cover_png or not os.path.isfile(cover_png) or os.path.getsize(cover_png) == 0:
+            raise RuntimeError("cover.png 为空或不可用")
+        check = png_self_check(cover_png)
+        if not check["ok"]:
+            raise RuntimeError("封面自检未通过：" + "；".join(check["problems"]))
+        return {"local_path": cover_png, "url": None, "degraded": False, "self_check": check}
+    except Exception as error:  # noqa: BLE001 — 封面任何失败都放弃，不阻断
+        return {"local_path": None, "url": None, "degraded": True, "skipped": True,
+                "skipped_reason": f"{type(error).__name__}: {str(error)[:300]}"}
+
+
 def _gen_cover(title: str, subtitle: str, out_png: str) -> Optional[str]:
     """封面真生成；成功返回本地路径。失败带原因抛出（FIX-39 封面必须非空，不再静默降级）。"""
     if not cover_available():
@@ -723,13 +744,7 @@ def render_charts(stats_bundle: dict, wordcloud_data: dict, *,
                            **({"wordcloud_artifacts": wordcloud_artifacts} if wordcloud_artifacts else {}),
                            "url": None, "source_mode": spec.get("source_mode")})
 
-    # FIX-39：客户要求封面非空——失败即抛错，由 n14 重试/暂停，不再降级。
-    cover_png = _gen_cover(report_name, f"版本 {version}",
-                           os.path.join(outdir, "cover.png"))
-    if not cover_png or not os.path.isfile(cover_png) or os.path.getsize(cover_png) == 0:
-        raise RuntimeError("封面生成失败（cover.png 为空或不可用）")
-    cover = {"local_path": cover_png, "url": None, "degraded": False,
-             "self_check": png_self_check(cover_png)}
+    cover = build_cover(report_name, version, outdir)
 
     return {"charts": charts_out, "cover": cover, "project": project,
             "version": version, "report_name": report_name,
