@@ -91,6 +91,56 @@ class CoverageDispositionTest(unittest.TestCase):
         self.assertEqual(self._dispo(self._cov(), "BLOCK"), "block")
 
 
+class DirectionLabelsFromCandidatesTest(unittest.TestCase):
+    """轮次二取候选：优先确认产物的分方向字段，其次 opinion_candidates 分方向候选。
+
+    原版 annot_r2.py 读的就是 opinion_candidates_positive/negative.json；
+    合并的 13 个标签不能当作某方向的候选表（会把负面专属类别塞给正面任务）。
+    """
+
+    def test_uses_candidates_when_confirmed_lacks_direction(self):
+        from handlers import _round2_direction_labels
+        confirmed = {"labels": ["正面A", "正面B", "负面A"]}
+        candidates = {"candidates": ["正面A", "正面B", "负面A"],
+                      "positive_candidates": ["正面A", "正面B"],
+                      "negative_candidates": ["负面A"]}
+        pos, neg = _round2_direction_labels(confirmed, candidates)
+        self.assertEqual(pos, ["正面A", "正面B"])
+        self.assertEqual(neg, ["负面A"])
+
+    def test_confirmed_direction_wins(self):
+        from handlers import _round2_direction_labels
+        confirmed = {"positive_labels": ["P"], "negative_labels": ["N"]}
+        candidates = {"positive_candidates": ["x"], "negative_candidates": ["y"]}
+        self.assertEqual(_round2_direction_labels(confirmed, candidates), (["P"], ["N"]))
+
+    def test_falls_back_to_merged_labels(self):
+        from handlers import _round2_direction_labels
+        pos, neg = _round2_direction_labels({"labels": ["A"]}, {})
+        self.assertEqual((pos, neg), (None, None))
+
+
+class LimitationNoteTest(unittest.TestCase):
+    def _note(self, stats):
+        import handlers
+        return handlers._limitation_note(stats)
+
+    def test_no_issue_no_note(self):
+        self.assertEqual(self._note({"data_issues": []}), "")
+        self.assertEqual(self._note({}), "")
+
+    def test_module_degraded_is_disclosed(self):
+        note = self._note({"data_issues": [
+            {"affected_module": "sentiment_opinion", "severity": "module_degraded",
+             "reason": "观点「空值+其他」1211/7773（15.6%）未低于 10% 门槛"},
+            {"affected_module": "baseline_lift", "severity": "info", "reason": "x"},
+        ]})
+        self.assertIn("sentiment_opinion", note)
+        self.assertIn("15.6%", note)
+        self.assertNotIn("baseline_lift", note)
+        self.assertIn("数据说明区", note)
+
+
 class _FakeState:
     def __init__(self, artifacts):
         self._a = artifacts

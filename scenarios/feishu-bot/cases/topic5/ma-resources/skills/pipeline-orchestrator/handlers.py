@@ -1277,7 +1277,7 @@ def aggregate(node, state, ctx):
             "severity": "module_degraded",
             "reason": (f"观点「空值+其他」{item.get('other')}/{item.get('scope')}"
                        f"（{float(item.get('ratio') or 0):.1%}）未低于 10% 门槛"),
-            "action": "disclose opinion coverage limitation",
+            "action": "disclose opinion coverage limitation in the opinion section",
         })
     if baseline_unavailable:
         data_issues.append({
@@ -1743,9 +1743,11 @@ def annotate(node, state, ctx):
         # 与轮次一共用用户的路由决定（FIX-33：DataHub 不可用时用户确认 small_engine）。
         decision = state.read_artifact("annotation_route_decision") or {}
         route2 = decision.get("route") if isinstance(decision, dict) else None
-        # FIX-31：正面任务用 positive_labels，负面任务用 negative_labels；旧产物两者共用 labels
-        positive_labels = confirmed.get("positive_labels") if isinstance(confirmed, dict) else None
-        negative_labels = confirmed.get("negative_labels") if isinstance(confirmed, dict) else None
+        # FIX-31：正面任务用 positive_labels，负面任务用 negative_labels。
+        # 原版 annot_r2.py 直接读 opinion_candidates_positive.json / _negative.json，
+        # 不依赖人工确认产物带不带分方向字段；确认产物的 note 追加类别两方向都加。
+        positive_labels, negative_labels = _round2_direction_labels(
+            confirmed, state.read_artifact("opinion_candidates") or {})
         try:
             result = annotate_mod.annotate_round2(
                 rows, rerun_ids=r2_rerun, calibration=r2_calib,
@@ -2315,6 +2317,22 @@ _REPORT_LLM = {"model": semantic.report_model(),
 
 
 @handler("write_report")
+def _limitation_note(stats) -> str:
+    """受限口径披露块（原版 QC 协议:183/219）：只对 module_degraded 的 DataIssue 生成。
+
+    数据说明区只放平台/周期/关键词（KS_Report_Template §零），所以披露写在对应小节，
+    既不降门槛也不隐藏。
+    """
+    limits = [issue for issue in ((stats or {}).get("data_issues") or [])
+              if isinstance(issue, dict) and issue.get("severity") == "module_degraded"]
+    if not limits:
+        return ""
+    rows = "\n".join(f"- {issue.get('affected_module')}：{issue.get('reason')}"
+                     for issue in limits)
+    return ("受限口径披露（必须遵守）：以下指标存在口径限制，报告对应小节须用一句客观"
+            "说明其局限（不写方法论、不写清洗抽样说明、不放在数据说明区）：\n" + rows)
+
+
 def write_report(node, state, ctx):
     """报告内容层撰写（MD，不含飞书布局）。
 
@@ -2375,6 +2393,12 @@ def write_report(node, state, ctx):
         "metrics.互动量/条均互动量为 null 时写「不可得」。"
         "权威媒体：" + report_contract.AUTHORITY_MEDIA_RULE
     )
+    # 受限口径披露：观点「其他」占比未达标等质量阻断记在 stats_bundle.data_issues。
+    # 数据说明区只放平台/周期/关键词（KS_Report_Template §零），所以改在对应小节用一句
+    # 说明披露，不降门槛也不隐藏（原版 QC 协议:183/219）。
+    limitation_note = _limitation_note(stats)
+    if limitation_note:
+        sys_p += "\n\n" + limitation_note
     sys_p += "\n\n" + (Path(__file__).parent / "REPORT_CONTRACT.md").read_text(encoding="utf-8")
     user_p = ("统计数据(stats_bundle)：\n" + json.dumps(_report_evidence(stats), ensure_ascii=False)
               + "\n\n词云议题(wordcloud_insight)：\n"
@@ -4387,6 +4411,25 @@ def annotation_review_decision(node, state, ctx):
             "rounds_exhausted" if rounds >= max_rounds else "quota_exhausted")
         return {"route": "maxed"}
     return {"route": "retry"}
+
+
+def _round2_direction_labels(confirmed, candidates) -> tuple:
+    """轮次二正/负观点任务各自的候选表（原版 annot_r2.py 正负各一套）。
+
+    取数顺序：确认产物的分方向字段 → opinion_candidates 的分方向候选 → None（调用方
+    退回合并的 labels）。分方向候选就是该方向自己的表，不能把另一方向的类别并进来：
+    合并的 13 个标签含负面专属类别，混装后正面行会被标成负向话题（实测 3.05%）。
+    """
+    confirmed = confirmed if isinstance(confirmed, dict) else {}
+    candidates = candidates if isinstance(candidates, dict) else {}
+    pos = confirmed.get("positive_labels")
+    neg = confirmed.get("negative_labels")
+    if pos is None:
+        pos = candidates.get("positive_candidates")
+    if neg is None:
+        neg = candidates.get("negative_candidates")
+    return (list(pos) if pos is not None else None,
+            list(neg) if neg is not None else None)
 
 
 def coverage_disposition(coverage: dict, policy: str = "waive") -> str:
