@@ -645,6 +645,52 @@ def _task_payload(rows: list[dict], fields: tuple[str, ...]) -> list[dict]:
     return payload
 
 
+def _annotate_batch(
+    pending: list[dict], *, prompt: str, apply_fn, is_missing,
+    max_attempts: int = R2_MAX_ATTEMPTS, depth: int = 0,
+) -> list[dict]:
+    """标注一批；整批失败（relay 空流/超时/输出不可解析）时对半拆分重试。
+
+    212 实测（job_436842fb74da）：单批 payload 2 万字符以上时 relay 会超时或返回空流，
+    拆小后正常返回。返回仍未标注的行，由调用方交给覆盖检查，不悄悄丢行。
+    """
+    for _attempt in range(max_attempts):
+        if not pending:
+            return []
+        try:
+            data = semantic.chat_json(
+                prompt,
+                json.dumps(_task_payload(pending, ()), ensure_ascii=False),
+                max_tokens=2560, lm_scope="annotate_r2",
+            )
+        except (RuntimeError, ValueError, TimeoutError, OSError) as error:
+            if len(pending) > 1 and depth < 3:
+                half = len(pending) // 2
+                left = _annotate_batch(pending[:half], prompt=prompt, apply_fn=apply_fn,
+                                       is_missing=is_missing, max_attempts=max_attempts,
+                                       depth=depth + 1)
+                right = _annotate_batch(pending[half:], prompt=prompt, apply_fn=apply_fn,
+                                        is_missing=is_missing, max_attempts=max_attempts,
+                                        depth=depth + 1)
+                return left + right
+            raise RuntimeError(
+                f"annotate r2: {len(pending)} 行批量调用失败"
+                f"（首行 {pending[0].get('_annot_id')}；{type(error).__name__}: "
+                f"{str(error)[:200]}）") from error
+        by_id = (
+            {str(item.get("id")): item for item in data if isinstance(item, dict)}
+            if isinstance(data, list) else {}
+        )
+        for row in pending:
+            parsed = by_id.get(row["_annot_id"])
+            if isinstance(parsed, dict):
+                apply_fn(row, parsed)
+        pending = [row for row in pending if is_missing(row)]
+        if not pending:
+            return []
+    return pending
+
+
 def _run_task(
     rows: list[dict],
     *,
@@ -654,28 +700,15 @@ def _run_task(
     batch: int = R2_BATCH,
     max_attempts: int = R2_MAX_ATTEMPTS,
 ) -> None:
-    """跑一个子任务：每批 15 条、最多重试 3 次，只重试仍缺失的行。"""
+    """跑一个子任务：每批 15 条、最多重试 3 次，只重试仍缺失的行；整批失败时对半拆。"""
     for start in range(0, len(rows), batch):
         pending = list(rows[start:start + batch])
-        for _attempt in range(max_attempts):
-            if not pending:
-                break
-            data = semantic.chat_json(
-                prompt,
-                json.dumps(_task_payload(pending, ()), ensure_ascii=False),
-                max_tokens=2560, lm_scope="annotate_r2",
-            )
-            by_id = (
-                {str(item.get("id")): item for item in data if isinstance(item, dict)}
-                if isinstance(data, list) else {}
-            )
-            for row in pending:
-                parsed = by_id.get(row["_annot_id"])
-                if isinstance(parsed, dict):
-                    apply_fn(row, parsed)
-            pending = [row for row in pending if is_missing(row)]
-            if not pending:
-                break
+        remaining = _annotate_batch(pending, prompt=prompt, apply_fn=apply_fn,
+                                    is_missing=is_missing, max_attempts=max_attempts)
+        if remaining:
+            raise RuntimeError(
+                f"annotate r2: {len(remaining)} 行重试后仍无有效标注"
+                f"（首行 {remaining[0].get('_annot_id')}）")
 
 
 def annotate_round2(

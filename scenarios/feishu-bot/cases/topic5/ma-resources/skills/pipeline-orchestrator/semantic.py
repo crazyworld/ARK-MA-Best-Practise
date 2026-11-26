@@ -272,6 +272,13 @@ def chat(system: str, user: str, *, max_tokens: int = 4096,
                     time.sleep(1)
                     continue
                 raise ValueError(f"输出被 max_tokens={max_tokens} 截断")
+            if not parts:
+                # relay 偶发返回 200 + 空流（无任何 content 片段）：上游静默失败，
+                # 不是「模型没话说」。当作可重试，重试用尽才抛。
+                if attempt < retries - 1:
+                    time.sleep(2 ** (attempt + 1))
+                    continue
+                raise RuntimeError("relay 返回空内容流（无 content 片段）")
             return "".join(parts)
         except urllib.error.HTTPError as error:
             # 把 relay 响应体带进异常：只剩「HTTP Error 400: Bad Request」无法定位原因。
