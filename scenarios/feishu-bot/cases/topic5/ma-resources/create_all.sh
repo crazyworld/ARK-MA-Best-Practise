@@ -195,19 +195,28 @@ env_payload="$(
 # 沙箱内去噪/标注/写作经 bmc-llm-relay 调模型；模型 ID 不存在或无权限时要到 n07b 才暴露。
 # 部署前用 1 token 请求逐个探测（含 DataHub 传入的标注模型，relay 与 DataHub 模型列表一致），
 # 失败则中止且不更新 Environment。
+# relay 偶发 400/5xx（n09b 同请求重放即 200）：每个模型最多探测 3 次，均失败才中止，并带出响应体。
+_probe_body="$(mktemp)"
 for _model_key in TOPIC5_SEMANTIC_MODEL TOPIC5_REPORT_MODEL TOPIC5_MODEL_ID DATAHUB_ANNOTATE_MODEL; do
   _model=$(jq -r --arg k "$_model_key" '.config.env[$k] // ""' <<<"$env_payload")
   [ -n "$_model" ] || continue
-  _code=$(curl -sS -o /dev/null -w "%{http_code}" -X POST "${LLM_RELAY_BASE_URL%/}/chat/completions" \
-    -H "Authorization: Bearer $LLM_RELAY_API_KEY" -H "Content-Type: application/json" \
-    -d "$(jq -n --arg m "$_model" '{model:$m,max_tokens:16,messages:[{role:"user",content:"ping"}]}')" \
-    --max-time 60 || echo 000)
+  _code=000
+  for _try in 1 2 3; do
+    _code=$(curl -sS -o "$_probe_body" -w "%{http_code}" -X POST "${LLM_RELAY_BASE_URL%/}/chat/completions" \
+      -H "Authorization: Bearer $LLM_RELAY_API_KEY" -H "Content-Type: application/json" \
+      -d "$(jq -n --arg m "$_model" '{model:$m,max_tokens:16,messages:[{role:"user",content:"ping"}]}')" \
+      --max-time 60 || echo 000)
+    [ "$_code" = "200" ] && break
+    sleep $((_try * 3))
+  done
   if [ "$_code" != "200" ]; then
-    echo "沙箱模型不可用：$_model_key=$_model（HTTP $_code）；已中止，未更新 Environment" >&2
+    echo "沙箱模型不可用：$_model_key=$_model（HTTP $_code，重试 3 次）：$(head -c 300 "$_probe_body" 2>/dev/null)；已中止，未更新 Environment" >&2
+    rm -f "$_probe_body"
     exit 4
   fi
   echo "模型可用: $_model_key=$_model"
 done
+rm -f "$_probe_body"
 if [ -n "$ENVIRONMENT_ID" ]; then
   if [ "$UPDATE_ENV" = "1" ]; then
     # 原地更新 config;新配置只对后续 Session 生效。POST /environments/{id} body={"config": ...}
