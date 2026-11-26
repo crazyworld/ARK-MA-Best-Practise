@@ -263,6 +263,50 @@ def ask(system, user, validate, max_tokens=4096, audit_dir=None):
     raise RuntimeError("wordcloud-insight 语义契约 3 次重试失败：" + feedback)
 
 
+class PostAliases:
+    """模型只看短编号（P1、P2…），程序负责与真实帖子 ID 互转。
+
+    真实 ID 是 32 位哈希，模型逐字回写时会抄错个别字符（job_436842fb74da n15：
+    ...58977159aae... 抄成 ...58977119aae...，三次重试同错），契约校验因此失败。
+    """
+
+    def __init__(self, real_ids):
+        self.to_alias = {real: f"P{index}" for index, real in enumerate(real_ids, 1)}
+        self.to_real = {alias: real for real, alias in self.to_alias.items()}
+
+    def alias(self, real):
+        return self.to_alias.get(real, real)
+
+    def real(self, value):
+        """模型给的编号 → 真实 ID；容忍大小写与空白，未知编号原样返回交校验拒绝。"""
+        if not isinstance(value, str):
+            return value
+        key = value.strip().upper()
+        return self.to_real.get(key, value)
+
+    def real_list(self, values):
+        return [self.real(v) for v in values] if isinstance(values, list) else values
+
+    def post_view(self, post):
+        return {**post, "id": self.alias(post["id"])}
+
+    def reads_view(self, reads):
+        return [{**r, "post_id": self.alias(r.get("post_id"))} for r in reads]
+
+    def topics_view(self, topics):
+        out = []
+        for topic in topics:
+            ids = topic.get("post_ids")
+            out.append({**topic, "post_ids": [self.alias(i) for i in ids]}
+                       if isinstance(ids, list) else dict(topic))
+        return out
+
+    def restore_topics(self, data):
+        for topic in data.get("topics") or []:
+            if isinstance(topic, dict) and isinstance(topic.get("post_ids"), list):
+                topic["post_ids"] = self.real_list(topic["post_ids"])
+
+
 def require(ok, message):
     if not ok:
         raise ValueError(message)
@@ -392,11 +436,12 @@ def analyze(state, chart, skill_dir, forbidden):
         posts_path, posts_payload = prepared
         available = {p["id"]: p for p in posts_payload["posts"] if p["scope_status"] == "in_scope"}
         require(bool(available), "已提供原帖范围无法核查，不能静默跳过")
+        aliases = PostAliases(list(available))
         index = []
         original_terms = [row["term"] for row in payload["words"]]
         for p in available.values():
             text = p["text"] + p.get("title", "")
-            index.append({"id": p["id"], "title": p.get("title", ""),
+            index.append({"id": aliases.alias(p["id"]), "title": p.get("title", ""),
                           "matched_terms": [w for w in original_terms if w.casefold() in text.casefold()],
                           **({"author_id": p["author_id"]} if "author_id" in p else {}),
                           "body_sha256": hashlib.sha256(p["text"].encode()).hexdigest(),
@@ -404,6 +449,7 @@ def analyze(state, chart, skill_dir, forbidden):
         index_text = "\n候选原帖索引（正文由后续全文读取）：\n" + json.dumps(index, ensure_ascii=False)
 
         def check_selection(data):
+            data["initial_post_ids"] = aliases.real_list(data.get("initial_post_ids"))
             require(isinstance(data.get("selection_note"), str) and bool(data["selection_note"]), "缺抽样依据")
             require(isinstance(data.get("candidates"), list) and bool(data["candidates"]), "缺候选议题")
             for candidate in data["candidates"]:
@@ -432,8 +478,14 @@ def analyze(state, chart, skill_dir, forbidden):
                 def check_reads(data):
                     entries = data.get("read_posts")
                     require(isinstance(entries, list), "缺read_posts")
-                    require([r.get("post_id") for r in entries] == [p["id"] for p in batch],
-                            "须按顺序记录本批全部全文阅读")
+                    for entry in entries:
+                        if isinstance(entry, dict):
+                            entry["post_id"] = aliases.real(entry.get("post_id"))
+                    got = [r.get("post_id") if isinstance(r, dict) else None for r in entries]
+                    require(got == [p["id"] for p in batch],
+                            "须按顺序记录本批全部全文阅读：应为 "
+                            + json.dumps([aliases.alias(p["id"]) for p in batch], ensure_ascii=False)
+                            + "，实际为 " + json.dumps([aliases.alias(i) for i in got], ensure_ascii=False))
                     for entry in entries:
                         require(isinstance(entry.get("note"), str) and bool(entry["note"]), "缺阅读判断")
                         fragments = entry.get("evidence")
@@ -447,7 +499,7 @@ def analyze(state, chart, skill_dir, forbidden):
 
                 reading = ask(SYSTEM, base + "\n候选议题：" + json.dumps(candidates, ensure_ascii=False)
                               + "\n本批完整原帖字段与可选原句编号：\n"
-                              + json.dumps([{**post, "quote_choices": quote_choices(post)}
+                              + json.dumps([{**aliases.post_view(post), "quote_choices": quote_choices(post)}
                                             for post in batch], ensure_ascii=False) + """
 实际读完每条完整正文及必要标题/OCR，判断支持/反驳/限定哪个议题，保留否定与条件。
 选择能直达判断的连续关键原句，禁止默认摘录正文开头，OCR营销宣称不当作体验成效。
@@ -464,6 +516,9 @@ field只能精确为text、title、ocr_text三者之一，relation只能精确�
             read_ids = {r["post_id"] for r in reads}
 
             def check_final(data):
+                if isinstance(data.get("supplemental_post_ids"), list):
+                    data["supplemental_post_ids"] = aliases.real_list(data["supplemental_post_ids"])
+                aliases.restore_topics(data)
                 extra = data.get("supplemental_post_ids", [])
                 require(isinstance(extra, list) and all(isinstance(i, str) for i in extra)
                         and len(extra) == len(set(extra)) and set(extra) <= set(available) - read_ids,
@@ -477,8 +532,8 @@ field只能精确为text、title、ocr_text三者之一，relation只能精确�
                     validate_topics(data, words, read_ids, forbidden)
 
             final = ask(SYSTEM, base + index_text + "\n候选议题：" + json.dumps(candidates, ensure_ascii=False)
-                        + "\n实际全文阅读与关键原句：\n" + json.dumps(reads, ensure_ascii=False)
-                        + "\n可引用的已读原帖ID白名单：" + json.dumps(sorted(read_ids), ensure_ascii=False) + """
+                        + "\n实际全文阅读与关键原句：\n" + json.dumps(aliases.reads_view(reads), ensure_ascii=False)
+                        + "\n可引用的已读原帖ID白名单：" + json.dumps(sorted(aliases.alias(i) for i in read_ids), ensure_ascii=False) + """
 检查歧义、相反观点及重要判断的单条依据，主动选能挑战初判的内容补读。
 需补读时返回 {"supplemental_post_ids":["未读ID"],"supplemental_reason":"具体原因"}。
 若主要议题已理解且新内容重复则形成最终结果：
@@ -513,11 +568,13 @@ post_ids只能引用已读白名单中的ID且每议题不重复；候选索引�
         review_args = []
     # Script checks cannot prove semantic support. Review title and prose against
     # the complete table, known background and the actual field-grounded reading.
-    reviewed = ask(SYSTEM, base + "\n待交付议题：\n" + json.dumps(topics, ensure_ascii=False)
+    view = aliases if prepared else PostAliases([])
+    reviewed = ask(SYSTEM, base + "\n待交付议题：\n"
+                   + json.dumps({"topics": view.topics_view(topics["topics"])}, ensure_ascii=False)
                    + "\n实际全文阅读证据（无记录时仅按词表/背景判断）：\n"
-                   + json.dumps(reads, ensure_ascii=False)
+                   + json.dumps(view.reads_view(reads), ensure_ascii=False)
                    + "\n可引用的已读原帖ID白名单："
-                   + json.dumps(sorted({r["post_id"] for r in reads}), ensure_ascii=False) + """
+                   + json.dumps(sorted(view.alias(r["post_id"]) for r in reads), ensure_ascii=False) + """
 交付前逐议题语义复核并修正：标题中的每个业务判断也必须有依据，不能仅正文谨慎而标题夸大。
 例如只有渠道购买/下单证据，不能命名“囤货”；词频同列不等于同帖共现，不把热门样本变成多数观点。
 标题、正文和内部rationale保持一致；不以词频合计推算议题声量或人群排名。
@@ -530,7 +587,8 @@ OCR包装/商品页只支持归属或页面宣称，不当成用户体验、已�
 terms仍只能从本范围完整输入words逐字选择；post_ids只选已读白名单且不重复。
 返回 {"topics":[{"title":"短标题","terms":["原词"],"interpretation":"复核后的发现",
 "rationale":"内部证据及判断强度","post_ids":["实际已读ID，可空"]}]}。""",
-                   lambda data: (validate_topics(data, words, {r["post_id"] for r in reads}, forbidden),
+                   lambda data: (view.restore_topics(data),
+                                 validate_topics(data, words, {r["post_id"] for r in reads}, forbidden),
                                  validate_brief_review(data, brief)),
                    max_tokens=6144, audit_dir=root / "semantic/delivery-review")
     topics = {"topics": reviewed["topics"]}
