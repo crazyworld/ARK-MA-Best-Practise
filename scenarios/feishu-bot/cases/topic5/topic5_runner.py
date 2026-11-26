@@ -1196,9 +1196,18 @@ class Topic5Runner:
                 "echo \"$BUNDLE_SHA256  $BUNDLE\" | sha256sum -c - && "
                 "rm -rf \"$TARGET\" && mkdir -p \"$TARGET\" && "
                 "unzip -q \"$BUNDLE\" -d \"$TARGET\"\n"
-                # 编排器按同级目录定位其他 Skill（数说/DataHub/图表/封面…），恢复包只含编排器。
+                # 编排器按同级目录定位其他 Skill（数说/DataHub/图表/封面…）。恢复包随带的
+                # 兄弟 Skill 脚本（bundled_skills/）覆盖挂载版本的同名脚本，其余资源（字体、
+                # 依赖）仍链接挂载版：否则兄弟 Skill 的修复到不了进行中的 Session。
                 "for skill in /mnt/skills/*; do name=$(basename \"$skill\"); "
-                "[ \"$name\" = pipeline-orchestrator ] || ln -sfn \"$skill\" \"$TARGET/$name\"; done\n"
+                "[ \"$name\" = pipeline-orchestrator ] && continue; "
+                "B=\"$TARGET/pipeline-orchestrator/bundled_skills/$name\"; "
+                "if [ -d \"$B\" ]; then "
+                "(cd \"$skill\" && find . -type d) | while read -r d; do mkdir -p \"$TARGET/$name/$d\"; done; "
+                "(cd \"$skill\" && find . ! -type d) | while read -r f; do ln -sfn \"$skill/$f\" \"$TARGET/$name/$f\"; done; "
+                "(cd \"$B\" && find . -type d) | while read -r d; do mkdir -p \"$TARGET/$name/$d\"; done; "
+                "(cd \"$B\" && find . ! -type d) | while read -r f; do rm -f \"$TARGET/$name/$f\"; cp \"$B/$f\" \"$TARGET/$name/$f\"; done; "
+                "else ln -sfn \"$skill\" \"$TARGET/$name\"; fi; done\n"
                 "cd \"$TARGET/pipeline-orchestrator\" && "
                 f"{replace_source}"
                 "nohup python3 run_pipeline.py retry "

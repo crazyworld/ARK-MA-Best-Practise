@@ -119,6 +119,16 @@ pack_one() {
     # Validator skill. Bundle its canonical scanner for identical repair preflight.
     cp "$ROOT/ma-resources/skills/topic5-validator/scripts/scan_report.py" \
        "$staged_root/validator_scan.py"
+    # 恢复包随带编排器直接调用的兄弟 Skill 脚本：进行中的 Session 挂的是创建时的旧
+    # Skill，只换编排器会让兄弟 Skill 的修复永远到不了（job_436842fb74da n14 封面仍走
+    # 1be6883 之前的旧脚本）。只带脚本与说明，字体/node_modules 仍用挂载版本。
+    mkdir -p "$staged_root/bundled_skills"
+    for sibling in report-cover-skill wordcloud-insight blueai-yuqing-echarts-skill-new; do
+      rsync -a --exclude='__pycache__' --exclude='node_modules' --exclude='.DS_Store' \
+            --exclude='assets' --exclude='*.[oO][tT][fF]' --exclude='*.[tT][tT][fF]' \
+            --exclude='*.[tT][tT][cC]' --exclude='*.[wW][oO][fF][fF]*' \
+            "$ROOT/ma-resources/skills/$sibling/" "$staged_root/bundled_skills/$sibling/"
+    done
   fi
   check_skill_md "$staged_root"
 
