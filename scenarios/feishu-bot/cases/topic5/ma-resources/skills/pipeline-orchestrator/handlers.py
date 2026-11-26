@@ -2324,9 +2324,11 @@ def _report_evidence(stats: dict) -> dict:
 # 长报告输出约 1-2 万 token，按 relay 吞吐需要数分钟，整体时限单独放宽，不受标注默认 180s 约束。
 _REPORT_LLM = {"model": semantic.report_model(),
                "timeout": int(os.environ.get("TOPIC5_REPORT_TIMEOUT_SEC") or 900)}
+# 整篇报告/返修的输出预算。job_436842fb74da（品牌+1 活动、16 图）实测 16384 截断；
+# claude-sonnet-4-6 单次输出上限 64K，取 32768 留余量，可用环境变量覆盖。
+REPORT_MAX_TOKENS = int(os.environ.get("TOPIC5_REPORT_MAX_TOKENS") or 32768)
 
 
-@handler("write_report")
 def _limitation_note(stats) -> str:
     """受限口径披露块（原版 QC 协议:183/219）：只对 module_degraded 的 DataIssue 生成。
 
@@ -2343,6 +2345,7 @@ def _limitation_note(stats) -> str:
             "说明其局限（不写方法论、不写清洗抽样说明、不放在数据说明区）：\n" + rows)
 
 
+@handler("write_report")
 def write_report(node, state, ctx):
     """报告内容层撰写（MD，不含飞书布局）。
 
@@ -2418,7 +2421,7 @@ def write_report(node, state, ctx):
               + "\n\n冻结需求：\n"
               + json.dumps(state.read_artifact("confirmed_plan") or {}, ensure_ascii=False))
     try:
-        md = semantic.chat(sys_p, user_p, max_tokens=16384, lm_scope="write_report", **_REPORT_LLM)
+        md = semantic.chat(sys_p, user_p, max_tokens=REPORT_MAX_TOKENS, lm_scope="write_report", **_REPORT_LLM)
         if not md.strip():
             raise ValueError("模型返回空报告")
         # FIX-20：命中禁用措辞不再删除整句（删除会连带删掉数据与原文，且掩盖问题）。
@@ -2532,7 +2535,7 @@ def fix_report(node, state, ctx):
             md = semantic.chat(
                 sys_p,
                 build_user_prompt(_strip_generated_modules(current_md), current_issues),
-                max_tokens=16384, lm_scope="fix_report", **_REPORT_LLM)
+                max_tokens=REPORT_MAX_TOKENS, lm_scope="fix_report", **_REPORT_LLM)
             try:
                 if not md.strip():
                     raise ValueError("模型返回空修订")
