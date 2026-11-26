@@ -192,7 +192,7 @@ def with_lm(system: str, lm_scope: str | None) -> str:
 def chat(system: str, user: str, *, max_tokens: int = 4096,
          temperature: float = 0.2, timeout: int | None = None, retries: int | None = None,
          thinking: str | None = None, lm_scope: str | None = None,
-         model: str | None = None) -> str:
+         model: str | None = None, reasoning_effort: str | None = None) -> str:
     """bmc-llm-relay OpenAI 兼容 chat/completions（流式）。无凭据直接抛错，由调用方降级。
 
     thinking 参数保留签名兼容；relay 的 GPT 模型不接受 thinking 字段（400），请求不再携带。
@@ -207,6 +207,10 @@ def chat(system: str, user: str, *, max_tokens: int = 4096,
         "temperature": temperature,
         "stream": True,
         "stream_options": {"include_usage": True},
+        # 仅显式传入时携带（目前只有整篇报告/返修/经验合成）。relay 对 claude-sonnet-4-6
+        # 默认开启思考：13 万 token 输入下思考吃光 16384/32768 全部输出预算、正文为 0
+        # （job_436842fb74da n16 实测）；reasoning_effort=none 立即输出正文。
+        **({"reasoning_effort": reasoning_effort} if reasoning_effort else {}),
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},

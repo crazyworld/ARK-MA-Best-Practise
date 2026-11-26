@@ -94,6 +94,31 @@ class RelayRetryTest(unittest.TestCase):
                 semantic.chat("s", "u")
 
 
+class ReasoningEffortTest(unittest.TestCase):
+    """整篇报告关闭 relay 默认思考（n16 实测：13 万 token 输入下思考吃光 32768 输出、正文为 0）。"""
+
+    def setUp(self):
+        self.env = patch.dict(os.environ, {"LLM_RELAY_BASE_URL": "https://r/v1", "LLM_RELAY_API_KEY": "k"})
+        self.env.start()
+
+    def tearDown(self):
+        self.env.stop()
+
+    def _body(self, **kw):
+        with patch.object(semantic.urllib.request, "urlopen",
+                          side_effect=lambda *a, **k: _stream("ok")) as urlopen:
+            semantic.chat("s", "u", **kw)
+        return json.loads(urlopen.call_args_list[0].args[0].data)
+
+    def test_sent_only_when_given(self):
+        self.assertEqual(self._body(reasoning_effort="none")["reasoning_effort"], "none")
+        self.assertNotIn("reasoning_effort", self._body())
+
+    def test_report_calls_disable_reasoning(self):
+        import handlers
+        self.assertEqual(handlers._REPORT_LLM["reasoning_effort"], "none")
+
+
 class TruncationRetryTest(unittest.TestCase):
     """输出被 max_tokens 截断时放大预算重试（来源审核 13 个类别实测 2048 不够）。"""
 

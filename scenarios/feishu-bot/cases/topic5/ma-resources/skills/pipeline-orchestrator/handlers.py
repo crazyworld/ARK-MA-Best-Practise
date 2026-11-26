@@ -2323,7 +2323,9 @@ def _report_evidence(stats: dict) -> dict:
 # 报告撰写/经验总结/返修：原版推荐 claude-sonnet-4-6（KS_Content_Analysis_Prompt.md:142）；
 # 长报告输出约 1-2 万 token，按 relay 吞吐需要数分钟，整体时限单独放宽，不受标注默认 180s 约束。
 _REPORT_LLM = {"model": semantic.report_model(),
-               "timeout": int(os.environ.get("TOPIC5_REPORT_TIMEOUT_SEC") or 900)}
+               "timeout": int(os.environ.get("TOPIC5_REPORT_TIMEOUT_SEC") or 900),
+               # 关闭 relay 默认思考：长输入下思考会吃光输出预算（见 semantic.chat）。
+               "reasoning_effort": os.environ.get("TOPIC5_REPORT_REASONING_EFFORT") or "none"}
 # 整篇报告/返修的输出预算。job_436842fb74da（品牌+1 活动、16 图）实测 16384 截断；
 # claude-sonnet-4-6 单次输出上限 64K，取 32768 留余量，可用环境变量覆盖。
 REPORT_MAX_TOKENS = int(os.environ.get("TOPIC5_REPORT_MAX_TOKENS") or 32768)
