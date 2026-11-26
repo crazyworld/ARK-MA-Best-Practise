@@ -1011,6 +1011,31 @@ def check_coverage(
         item.get("status") == "ERROR"
         for item in cov.values() if isinstance(item, dict)
     )
+    # 区分两类 ERROR（原版 KS_Data_Processing:245 + QC 协议:219）：
+    #  - 可重试缺口：空值/非法值 —— 补标或重标能解决，重试有意义；
+    #  - 质量阻断：仅「其他」占比超门槛 —— 同一批数据重跑结果不变；原版要求阻断并交人
+    #    处置，且「其他」不能为了降比例强行归类。迁移版此前把它当普通失败重试 3 次
+    #    （job_436842fb74da n11 连烧三次都一样）。
+    quality_blocked = []
+    for task in ("opinion", "ugc_category", "discussion_dimension"):
+        item = cov.get(task)
+        if not isinstance(item, dict) or item.get("status") != "ERROR":
+            continue
+        if item.get("missing") or item.get("invalid_values"):
+            continue
+        scope = item.get("scope_total") or 0
+        quality_blocked.append({
+            "field": task, "scope": scope, "other": item.get("other") or 0,
+            "ratio": round((item.get("other") or 0) / scope, 4) if scope else None,
+            "threshold": (OPINION_OTHER_BLOCK_RATIO if task == "opinion"
+                          else UGC_OTHER_WARN_RATIO),
+        })
+    cov["quality_blocked"] = quality_blocked
+    cov["has_retryable_error"] = any(
+        isinstance(item, dict) and item.get("status") == "ERROR"
+        and (item.get("missing") or item.get("invalid_values"))
+        for item in cov.values()
+    )
     return cov
 
 

@@ -1265,6 +1265,20 @@ def aggregate(node, state, ctx):
         and (baseline.get("unavailable") or (baseline_meta or {}).get("unavailable"))
     )
     data_issues = []
+    # 轮次二观点「其他」超门槛（annotate r2 记的 blocked_quality）：不降门槛、不强行归类，
+    # 但把受限口径显式记成 DataIssue，报告数据说明区据此披露（原版 QC 协议:219）。
+    for item in (annotated.get("blocked_quality") or [] if isinstance(annotated, dict) else []):
+        if not isinstance(item, dict):
+            continue
+        data_issues.append({
+            "id": f"opinion-quality-{item.get('field')}-{state.run_id}",
+            "source": "annotation",
+            "affected_module": "sentiment_opinion",
+            "severity": "module_degraded",
+            "reason": (f"观点「空值+其他」{item.get('other')}/{item.get('scope')}"
+                       f"（{float(item.get('ratio') or 0):.1%}）未低于 10% 门槛"),
+            "action": "disclose opinion coverage limitation",
+        })
     if baseline_unavailable:
         data_issues.append({
             "id": f"baseline-unavailable-{state.run_id}",
@@ -1754,15 +1768,28 @@ def annotate(node, state, ctx):
                 f"（{result.get('degraded_reason') or '未知原因'}）")
         # 覆盖检查缺口（真路径 ERROR）→ 直接报错，交引擎按 retry/on_fail=pause 处理。
         cov = result.get("coverage") or {}
-        if cov.get("has_error"):
-            # 写清每项的缺失数、「其他」数与适用范围：缺失为 0 时即「空值+其他」≥10% 阻断。
-            miss = {t: {k: cov[t].get(k) for k in ("scope_total", "missing", "other",
-                                                    "invalid_values") if k in cov[t]}
-                    for t in ("opinion", "ugc_category", "discussion_dimension")
-                    if cov.get(t, {}).get("status") == "ERROR"}
+        miss = {t: {k: cov[t].get(k) for k in ("scope_total", "missing", "other",
+                                                "invalid_values") if k in cov[t]}
+                for t in ("opinion", "ugc_category", "discussion_dimension")
+                if cov.get(t, {}).get("status") == "ERROR"}
+        if cov.get("has_error") and cov.get("has_retryable_error", True):
+            # 可重试缺口（空值/非法值）：补标或重标能解决，交引擎重试。
             raise ValueError(
                 "annotate r2: 覆盖检查未通过（缺失/非法，或观点「空值+其他」≥"
                 f"{annotate_mod.OPINION_OTHER_BLOCK_RATIO:.0%}）：{miss}")
+        if cov.get("has_error"):
+            # 仅「其他」占比超门槛（质量阻断）：同一批数据重跑结果不变，重试无意义。
+            # 原版 KS_Data_Processing:245 要求阻断并由人处置，QC 协议:219 明确「其他」
+            # 不能为降比例强行归类 —— 因此默认记录 blocked_quality、继续出报告并在
+            # 数据说明披露；opinion_other_policy=block 时保持硬阻断。
+            policy = str(state.params.get("opinion_other_policy", "waive")).lower()
+            if coverage_disposition(cov, policy) == "block":
+                raise ValueError(
+                    "annotate r2: 观点「空值+其他」占比超门槛（opinion_other_policy=block）："
+                    f"{miss}")
+            result["blocked_quality"] = list(cov.get("quality_blocked") or [])
+            state.event(node.get("id", "n11_annotate_r2"), "quality_blocked",
+                        f"观点「其他」超门槛，按遗留口径披露继续：{result['blocked_quality']}")
         sc_mode = str(state.params.get("annotation_structure_check", "block")).lower()
         sc_config = _structure_config(
             opinion_labels=list(positive_labels or opinion_labels),
@@ -4360,6 +4387,23 @@ def annotation_review_decision(node, state, ctx):
             "rounds_exhausted" if rounds >= max_rounds else "quota_exhausted")
         return {"route": "maxed"}
     return {"route": "retry"}
+
+
+def coverage_disposition(coverage: dict, policy: str = "waive") -> str:
+    """覆盖检查不通过时怎么处置：retry（可补标）/ waive（记录披露继续）/ block（硬阻断）。
+
+    「其他」占比超门槛是质量结论而非偶发错误：同一批数据重跑标注结果不变，重试只会
+    重复同样结论（job_436842fb74da n11 连烧三次）。原版 KS_Data_Processing:245 把它
+    定为阻断并由人处置，QC 协议:219 又明确不能为降比例强行归类，所以默认 waive：
+    记录 blocked_quality、报告披露，门槛值本身不改。
+    """
+    if not isinstance(coverage, dict) or not coverage.get("has_error"):
+        return "ok"
+    if coverage.get("has_retryable_error", True):
+        return "retry"
+    if not coverage.get("quality_blocked"):
+        return "retry"
+    return "block" if str(policy).strip().lower() == "block" else "waive"
 
 
 def _is_systematic_error(affected_fields: list[str], error_types) -> bool:

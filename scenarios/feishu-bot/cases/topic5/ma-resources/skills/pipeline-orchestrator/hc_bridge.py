@@ -1024,8 +1024,21 @@ def build_human_outputs(
         ) or []
         extra = [x.strip() for x in re.split(r"[,，、]", note) if x.strip()] if note else []
         confirmed = decision in ("pass", "confirmed")
+        # FIX-31 分方向候选：人工确认也要带上，否则轮次二两个观点任务都用合并后的
+        # 13 个标签（原版 annot_r2 正/负各一套；job_436842fb74da N10 pass 后即如此）。
+        positive = (list(prev.get("positive_candidates") or [])
+                    if isinstance(prev, dict) and "positive_candidates" in prev
+                    else list(labels))
+        negative = (list(prev.get("negative_candidates") or [])
+                    if isinstance(prev, dict) and "negative_candidates" in prev
+                    else list(labels))
+        if confirmed and extra:
+            positive += extra
+            negative += extra
         result = {
             "labels": list(labels) + (extra if confirmed else []),
+            "positive_labels": positive,
+            "negative_labels": negative,
             "ugc_categories": list(ugc_categories),
             "ugc_not_applicable": bool(
                 isinstance(ugc, dict) and ugc.get("not_applicable")
