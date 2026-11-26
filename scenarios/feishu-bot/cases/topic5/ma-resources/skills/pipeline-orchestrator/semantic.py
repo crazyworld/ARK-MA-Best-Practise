@@ -263,6 +263,14 @@ def chat(system: str, user: str, *, max_tokens: int = 4096,
                         if isinstance(piece, str):
                             parts.append(piece)
             if finish == "length":
+                # 输出预算不够（来源审核 13 个类别时 2048 就会截断）：按 2 倍重试，
+                # 上限 MAX_TOKENS_CEILING；仍截断才抛，避免把「预算不足」当成内容失败。
+                if max_tokens < MAX_TOKENS_CEILING and attempt < retries - 1:
+                    max_tokens = min(max_tokens * 2, MAX_TOKENS_CEILING)
+                    payload["max_tokens"] = max_tokens
+                    body = json.dumps(payload, ensure_ascii=False).encode()
+                    time.sleep(1)
+                    continue
                 raise ValueError(f"输出被 max_tokens={max_tokens} 截断")
             return "".join(parts)
         except urllib.error.HTTPError as error:
@@ -286,6 +294,8 @@ def chat(system: str, user: str, *, max_tokens: int = 4096,
 
 # relay 调用重试次数（见 chat()）。
 RELAY_RETRIES = 4
+# 截断后自动放大输出预算的上限（见 chat()）。
+MAX_TOKENS_CEILING = 16384
 
 # 解析重试次数：对齐原版各 discovery/annot 脚本的 call_with_retry(tries=3) / range(3)（FIX-31）
 CHAT_JSON_ATTEMPTS = 3

@@ -586,9 +586,11 @@ def _label_review_elements(payload: dict, compact: bool = False) -> list[dict]:
             "\n通过将确认当前两套候选及定义、边界；打回时请说明具体标签与区分规则。"
         ),
     }]
+    # 展示上限只防卡片超长，不是业务上限：真实数据观点可达 13 个（job_436842fb74da），
+    # 卡在 8 会误报「超出约定，请打回核对」，让人以为候选生成有问题。
     for title, key, names_key, maximum in (
-        ("UGC 参与方式", "ugc_category_list", "categories", 6),
-        ("观点主题", "opinion_candidates", "candidates", 8),
+        ("UGC 参与方式", "ugc_category_list", "categories", 12),
+        ("观点主题", "opinion_candidates", "candidates", 20),
     ):
         artifact = context.get(key) or {}
         names = artifact.get(names_key) or artifact.get("labels") or []
@@ -1379,7 +1381,42 @@ class Topic5Hitl(Topic5CardSenderProtocol):
             log.exception("topic5 send_hc_card failed job=%s hc=%s: %s", _job.job_id, _hc_kind, error)
             raise
         log.info("topic5 hc card shown job=%s hc=%s message_id=%s", _job.job_id, _hc_kind, message_id)
+        await self._notify_hc_operator(_job, _hc_kind)
         return message_id
+
+    # 人工关卡要通知到人：卡片多为原地 patch 进度卡，飞书不会为「编辑消息」推通知，
+    # 操作人只看群消息会漏掉（job_436842fb74da N10 实例）。这里额外发一条 @ 提醒。
+    _HC_NOTIFY_LABELS = {
+        "G1": "需求解析结果待你查看确认",
+        "G2": "方案确认待你审核",
+        "N10": "观点与 UGC 标签待你审核",
+        "G3": "报告质检待你处理",
+        "G4": "复盘报告待你终验",
+        "HC7": "需要你决定如何处理",
+        "USER_ESCALATE": "需要你决定是否继续",
+        "HC_FILTER": "活动过滤词命中待你确认",
+        "HC_DATA": "数据异常待你确认",
+        "HC_ROUTE": "标注路线待你确认",
+        "R1_REVIEW": "轮次一审核待你处理",
+        "R2_REVIEW": "轮次二审核待你处理",
+    }
+
+    async def _notify_hc_operator(self, _job: PipelineJob, _hc_kind: str) -> None:
+        if not _job.user_open_id:
+            return
+        sender = getattr(self._runner._feishu, "reply_in_thread_plain", None)  # noqa: SLF001
+        target = _job.root_message_id or _job.progress_card_message_id
+        if sender is None or not target:
+            return
+        label = self._HC_NOTIFY_LABELS.get(_hc_kind, "需要你处理")
+        text = (f'<at user_id="{_job.user_open_id}"></at> '
+                f"【{_hc_kind}】{label}（任务 {_job.job_id}）。"
+                "卡片已在本话题更新，点卡片上的按钮即可；打回请写明原因。")
+        loop = asyncio.get_event_loop()
+        try:
+            await loop.run_in_executor(None, lambda: sender(target, text))
+        except Exception as error:  # noqa: BLE001 - 提醒失败不能影响关卡本身
+            log.warning("topic5 hc notify failed job=%s hc=%s: %s", _job.job_id, _hc_kind, error)
 
     # ---- HandleCardAction(orchestrator → hitl)----------------------------
 

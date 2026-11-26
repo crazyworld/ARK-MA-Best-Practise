@@ -94,5 +94,56 @@ class RelayRetryTest(unittest.TestCase):
                 semantic.chat("s", "u")
 
 
+class TruncationRetryTest(unittest.TestCase):
+    """输出被 max_tokens 截断时放大预算重试（来源审核 13 个类别实测 2048 不够）。"""
+
+    def setUp(self):
+        self.env = patch.dict(os.environ, {"LLM_RELAY_BASE_URL": "https://r/v1", "LLM_RELAY_API_KEY": "k"})
+        self.env.start()
+        self.sleep = patch.object(semantic.time, "sleep")
+        self.sleep.start()
+
+    def tearDown(self):
+        self.sleep.stop()
+        self.env.stop()
+
+    def _truncated(self):
+        chunk = {"choices": [{"delta": {"content": "{\"a\":"}, "finish_reason": "length"}]}
+        return _Resp(f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n".encode())
+
+    def test_retries_with_bigger_budget_then_succeeds(self):
+        seq = [self._truncated(), _stream('{"ok": 1}')]
+        with patch.object(semantic.urllib.request, "urlopen",
+                          side_effect=lambda *a, **k: seq.pop(0)) as urlopen:
+            self.assertEqual(semantic.chat("s", "u", max_tokens=2048), '{"ok": 1}')
+        bodies = [json.loads(c.kwargs["data"]) if "data" in c.kwargs else json.loads(c.args[0].data)
+                  for c in urlopen.call_args_list]
+        self.assertEqual([b["max_tokens"] for b in bodies], [2048, 4096])
+
+    def test_budget_capped_at_ceiling(self):
+        # 到上限后不再放大：继续截断说明是内容问题，直接抛，不无限重试。
+        with patch.object(semantic.urllib.request, "urlopen",
+                          side_effect=lambda *a, **k: self._truncated()) as urlopen:
+            with self.assertRaisesRegex(ValueError, "max_tokens=16384"):
+                semantic.chat("s", "u", max_tokens=8192)
+        bodies = [json.loads(c.args[0].data) for c in urlopen.call_args_list]
+        self.assertEqual([b["max_tokens"] for b in bodies], [8192, 16384])
+
+    def test_all_truncated_raises(self):
+        with patch.object(semantic.urllib.request, "urlopen",
+                          side_effect=lambda *a, **k: self._truncated()):
+            with self.assertRaisesRegex(ValueError, "截断"):
+                semantic.chat("s", "u", max_tokens=16384)
+
+
+class SourceReviewBudgetTest(unittest.TestCase):
+    """来源审核按类别数给输出预算。"""
+
+    def test_budget_scales_with_items(self):
+        import label_review
+        src = open(label_review.__file__, encoding="utf-8").read()
+        self.assertIn("1024 + 512 * len(items)", src)
+
+
 if __name__ == "__main__":
     unittest.main()

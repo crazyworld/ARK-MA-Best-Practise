@@ -597,6 +597,18 @@ class FeishuSender:
             message_id, "text", json.dumps({"text": text}, ensure_ascii=False)
         )
 
+    def reply_in_thread_plain(
+        self, message_id: str, text: str
+    ) -> Optional[str]:
+        """话题内发纯文本（不做 Markdown→post 转换）。
+
+        `<at user_id="ou_...">` 只有 text 类型才保证生效：人工关卡要真的把人叫醒，
+        而 patch 一张已有卡片飞书不推通知。
+        """
+        return self._reply_in_thread_with(
+            message_id, "text", json.dumps({"text": text}, ensure_ascii=False)
+        )
+
     def _reply_in_thread_with(
         self, message_id: str, msg_type: str, content: str
     ) -> Optional[str]:

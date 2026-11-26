@@ -461,10 +461,12 @@ def run_source_review(key: str, artifact: dict) -> tuple[list[str], dict]:
     if not semantic.llm_available():
         return _unreviewed(items, "llm_unavailable", "语义能力缺失，无法完成来源审核")
     try:
+        # 每个类别约 200-300 字判定，13 个类别实测需 >2048 tokens（212 job_436842fb74da）；
+        # 按条目数给预算，chat() 截断时还会再放大。
         data = semantic.chat_json(
             source_review_prompt(key, items),
             json.dumps([item.get("name") for item in items], ensure_ascii=False),
-            max_tokens=2048)
+            max_tokens=min(8192, 1024 + 512 * len(items)))
     except Exception as error:  # 审核调用异常：转人工，不猜结论
         return _unreviewed(items, f"llm_error:{type(error).__name__}", "来源审核调用失败")
     verdicts = parse_verdicts(data)
