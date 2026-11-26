@@ -1827,6 +1827,16 @@ def charts_render(node, state, ctx):
     outdir = str(state.run_dir / "charts")
 
     def _build() -> dict:
+        # 渲染依赖（echarts/resvg 的 node_modules）不入包，首次运行由 charts.ensure_renderer
+        # 现装；装不上直接走 fallback → 上图外抛错，禁止无图交付。
+        try:
+            charts.ensure_renderer()
+        except Exception as error:
+            result = charts.fallback(
+                stats, wc, project=project, version=version,
+                report_name=report_name)
+            result["render_error"] = f"{type(error).__name__}: {error}（{charts.renderer_diagnostic()}）"
+            return result
         if charts.renderer_available():
             try:
                 return charts.render_charts(

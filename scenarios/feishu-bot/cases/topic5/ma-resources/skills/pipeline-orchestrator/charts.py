@@ -53,6 +53,83 @@ COVER_DIR = _resolve_skill_dir("report-cover-skill")
 WORDCLOUD_DIR = _resolve_skill_dir("wordcloud-insight")
 _RENDER_SCRIPT = os.path.join(ECHARTS_DIR, "scripts", "render_from_spec.js")
 _ECHARTS_NODE_MODULES = os.path.join(ECHARTS_DIR, "scripts", "node_modules")
+# 依赖安装后可用的渲染根目录（skill 目录只读时用可写副本），见 ensure_renderer()。
+_RENDER_ROOT: Optional[str] = None
+_RENDER_ERROR = ""
+
+
+def _node_ok() -> bool:
+    try:
+        subprocess.run(["node", "--version"], capture_output=True, timeout=15, check=True)
+        return True
+    except Exception:
+        return False
+
+
+def _npm_install(dir_path: str) -> str:
+    """在 dir_path 安装 echarts/resvg 依赖；返回错误文本（空串成功）。"""
+    env = dict(os.environ)
+    registry = (os.environ.get("TOPIC5_NPM_REGISTRY") or "").strip()
+    if registry:
+        env["npm_config_registry"] = registry
+    try:
+        done = subprocess.run(
+            ["npm", "install", "--omit=dev", "--no-audit", "--no-fund"],
+            cwd=dir_path, capture_output=True, timeout=600, env=env,
+        )
+    except FileNotFoundError:
+        return "缺少 npm 可执行文件"
+    except subprocess.TimeoutExpired:
+        return "npm install 超时（600s）"
+    if done.returncode != 0:
+        detail = (done.stderr or b"").decode("utf-8", "replace").strip()[-800:]
+        return f"npm install 失败：{detail or done.returncode}"
+    return ""
+
+
+def ensure_renderer() -> str:
+    """返回可直接跑的 echarts 渲染根目录；缺 node_modules 时自动安装一次并缓存。
+
+    为什么需要：node_modules 不入 git（体量与文件数超 MA 上传限制），打包和沙箱都没有，
+    而 n14 是真渲染、没有图不许交付（原版 KS_Chart_Spec）。skill 目录在 MA 沙箱通常只读，
+    因此优先原地装，失败则整份复制到可写目录再装。
+    """
+    global _RENDER_ROOT, _RENDER_ERROR
+    if _RENDER_ROOT:
+        return _RENDER_ROOT
+    if not os.path.isfile(_RENDER_SCRIPT):
+        _RENDER_ERROR = f"缺少渲染脚本：{_RENDER_SCRIPT}"
+        raise RuntimeError(_RENDER_ERROR)
+    if not _node_ok():
+        _RENDER_ERROR = "缺少 node 可执行文件（>=18）"
+        raise RuntimeError(_RENDER_ERROR)
+    if os.path.isdir(_ECHARTS_NODE_MODULES):
+        _RENDER_ROOT = ECHARTS_DIR
+        return _RENDER_ROOT
+
+    import shutil
+    target = ECHARTS_DIR
+    error = _npm_install(os.path.join(ECHARTS_DIR, "scripts"))
+    if error:
+        # skill 目录只读：复制到可写目录后重试（副本含 assets 字体，渲染脚本按相对路径找）。
+        target = os.path.join(tempfile.gettempdir(), "topic5-echarts")
+        if not os.path.isdir(os.path.join(target, "scripts", "node_modules")):
+            shutil.rmtree(target, ignore_errors=True)
+            shutil.copytree(ECHARTS_DIR, target,
+                            ignore=shutil.ignore_patterns("node_modules", "__pycache__"))
+            error = _npm_install(os.path.join(target, "scripts"))
+        else:
+            error = ""
+        if error:
+            _RENDER_ERROR = f"{error}（原地与副本安装均失败）"
+            raise RuntimeError(_RENDER_ERROR)
+    scripts = os.path.join(target, "scripts")
+    if not os.path.isdir(os.path.join(scripts, "node_modules", "echarts")):
+        _RENDER_ERROR = f"依赖安装后仍缺 echarts：{scripts}/node_modules"
+        raise RuntimeError(_RENDER_ERROR)
+    globals()["_RENDER_SCRIPT"] = os.path.join(scripts, "render_from_spec.js")
+    _RENDER_ROOT = target
+    return _RENDER_ROOT
 
 # 情感维度中文标签（与 _campaign_stats.sentiment_dist 键对齐）。
 _SENTI_LABEL = {"positive": "正面", "neutral": "中性", "negative": "负面"}
@@ -81,7 +158,8 @@ def renderer_available() -> bool:
 
 def renderer_diagnostic() -> str:
     return (
-        f"echarts_dir={ECHARTS_DIR}, "
+        f"echarts_dir={_RENDER_ROOT or ECHARTS_DIR}, "
+        f"error={_RENDER_ERROR or '-'}, "
         f"render_script={os.path.isfile(_RENDER_SCRIPT)}, "
         f"node_modules={os.path.isdir(_ECHARTS_NODE_MODULES)}"
     )
@@ -604,8 +682,8 @@ def render_charts(stats_bundle: dict, wordcloud_data: dict, *,
     图片由飞书交付层（feishu.create_delivery）用 medias/upload_all 上传本地二进制。
     每张图返回 local_path（绝对路径）；url 置 None。
     """
-    if not renderer_available():
-        raise RuntimeError("图表渲染器不可用（缺 node_modules 或 node）")
+    # 缺 node_modules 时自动装一次（见 ensure_renderer）；装不上就抛，禁止无图交付。
+    ensure_renderer()
 
     specs = build_chart_specs(stats_bundle, wordcloud_data, plan)
     os.makedirs(outdir, exist_ok=True)
