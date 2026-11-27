@@ -192,65 +192,34 @@ def plan_review(
     seed: int = DEFAULT_SEED,
     config: dict | None = None,
 ) -> dict:
-    """生成分层抽检计划（纯确定性）。返回原版同构的计划报告。"""
+    """抽检计划 —— 直接调用原版 tools/plan_annotation_review.py（零改写）。
+
+    额度、分层、特殊层优先、seed、reserve 全部由原版脚本决定。本模块只补两步：
+      1) 内部行 → 原版列名的映射（original_adapter）；
+      2) 原版 KS_Metrics_Calculation:58 要求、但脚本未内置的「AI 判否占比 >10% 时
+         30 条定向复核」——该规则原版由 Producer 按 KS 手工执行，这里落成确定性追加，
+         且占用同一 reserve 额度（不突破 500 上限）。
+    """
+    import original_adapter
     if stage not in PLAN_STAGES:
         raise ValueError(f"plan_review: 未知 stage={stage!r}，应属 {PLAN_STAGES}")
-    config = config or {}
-    reviewed = _validate_inputs(rows, stage, reviewed_ids, reserve, config)
-
-    groups: dict[str, list[str]] = defaultdict(list)
-    populations: dict[str, int] = defaultdict(int)
-    for row in rows:
-        if not _in_scope(row, stage, config):
-            continue
-        key = stratum(row, stage, config)
-        populations[key] += 1
-        row_id = _row_id(row)
-        if row_id not in reviewed:
-            groups[key].append(row_id)
-
-    population = sum(populations.values())
-    base = min(math.ceil(population * REVIEW_RATIO), REVIEW_CAP)
-    remaining = REVIEW_CAP - len(reviewed)
-    reserve_actual = min(reserve, max(0, remaining - 1)) if population else 0
-    target = min(base, remaining - reserve_actual, sum(len(v) for v in groups.values()))
-    quotas = _allocate(groups, target)
-
+    reviewed = {str(x) for x in (reviewed_ids or [])}
+    plan = original_adapter.plan_review(
+        rows, stage=stage, reviewed_ids=sorted(reviewed), reserve=reserve,
+        seed=seed, config=config or {})
+    samples = [dict(item) for item in plan.get("samples") or []]
+    reserve_actual = max(0, int(plan.get("remaining_after_plan") or 0))
     rng = random.Random(seed)
-    samples: list[dict] = []
-    for key in sorted(groups):
-        picked = rng.sample(sorted(groups[key]), quotas[key])
-        samples.extend({"id": row_id, "stratum": key,
-                        "sample_kind": "stratified_random"} for row_id in picked)
-    irrelevant_check = _irrelevant_check(rows, stage, reviewed, samples,
-                                         reserve_actual, rng)
-    samples.extend(irrelevant_check["samples"])
-
-    return {
-        "stage": stage,
-        "population": population,
-        "field_populations": _field_populations(rows, stage, config),
-        "base_sample_size": base,
-        "sample_size": len(samples),
-        "distinct_reviewed_before": len(reviewed),
-        "distinct_reviewed_after_plan": len(reviewed) + len(samples),
-        "cap": REVIEW_CAP,
-        "reserve_requested": reserve,
-        "remaining_after_plan": remaining - len(samples),
-        "seed": seed,
-        "method": "special-prioritized stratified random; unequal inclusion probabilities",
-        # 抽样正确率是估计值，不能当成总体真值对外呈现。
-        "accuracy_is_population_truth": False,
-        "strata": {key: {"population": populations[key],
-                         "planned": quotas.get(key, 0)}
-                   for key in sorted(populations)},
-        "uncovered_strata": [key for key in sorted(populations)
-                             if not quotas.get(key)],
-        "samples": samples,
-        "irrelevant_check": {k: v for k, v in irrelevant_check.items() if k != "samples"},
-        "llm_requests": 0,
-    }
-
+    irrelevant = _irrelevant_check(rows, stage, reviewed, samples, reserve_actual, rng)
+    samples.extend(irrelevant["samples"])
+    plan["samples"] = samples
+    plan["sample_size"] = len(samples)
+    plan["distinct_reviewed_after_plan"] = len(reviewed) + len(samples)
+    plan["remaining_after_plan"] = (
+        int(plan.get("cap") or REVIEW_CAP) - len(reviewed) - len(samples))
+    plan["irrelevant_check"] = {k: v for k, v in irrelevant.items() if k != "samples"}
+    plan["llm_requests"] = 0
+    return plan
 
 def _irrelevant_check(rows: list[dict], stage: str, reviewed: set[str],
                       samples: list[dict], reserve: int, rng: random.Random) -> dict:

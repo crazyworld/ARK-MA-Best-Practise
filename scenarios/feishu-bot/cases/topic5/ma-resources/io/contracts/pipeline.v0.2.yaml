@@ -231,7 +231,7 @@ nodes:
     outputs: [ugc_category_list]
     success: 动态发现类别及 review_items（定义、边界、核验原帖）；categories 字符串数组兼容保留
     retry: {max: 1, on_fail: pause}
-    next: n11_annotate_r2                     # ugc_category_list 汇入轮次二(join)
+    next: n10_hc_opinion                      # 与 n09b 在类别审核处汇合；轮次二只由 n10_gate 放行
 
   - id: n09_annotate_r1
     name: 轮次一标注（情感+活动相关）
@@ -301,15 +301,36 @@ nodes:
     next: n10_hc_opinion
 
   - id: n10_hc_opinion
-    name: 观点标签策略校验（无歧义自动，有歧义转人工）
+    name: 观点与 UGC 类别来源审核（独立 Validator，不向用户确认）
     owner: Validator
     mode: agent
     handler: opinion_policy_gate
-    pause_capable: true
     inputs: [opinion_candidates, ugc_category_list]
     outputs: [confirmed_opinion_labels]
-    success: 来源、样本、数量、唯一性与审核元数据通过则自动确认；动态或歧义转人工，确认冻结两套定义及边界
-    next: n11_annotate_r2
+    success: 确定性检查 + 独立 Validator 来源审核；问题作为意见交给 n10_gate 打回重新发现
+    next: n10_gate
+
+  - id: n10_gate
+    name: 类别审核路由（通过 / 打回重新发现 / 两次不过转人工）
+    owner: engine
+    mode: decision
+    handler: label_policy_decision
+    routes:
+      pass: n11_annotate_r2
+      rework: n10_rework
+      maxed: n_hc7_escalate
+
+  - id: n10_rework
+    name: 类别重新发现（按 Validator 意见，失效下游）
+    owner: Topic5Agent
+    mode: code
+    handler: label_rework
+    inputs: [confirmed_opinion_labels]
+    outputs: [label_review_feedback]
+    success: 失效类别与标注下游，记录审核意见，回到 n08/n09b 重新发现
+    side_effect: none
+    retry: {max: 0, on_fail: pause}
+    next: [n09b_opinion_candidates, n08_ugc_discovery]
 
   - id: n11_annotate_r2
     name: 轮次二标注（观点/UGC方式/讨论维度）
@@ -350,7 +371,9 @@ nodes:
     routes:
       pass: n12_aggregate
       retry: n11r_rework
-      maxed: n_hc7_escalate
+      # 执行契约 §3:37：额度用完仍不达标 → 记 blocked_quality + 诊断，停止受影响下游、
+      # 继续不受影响工作；不降门槛、不转人工确认、不新增付费任务。
+      maxed: n11r_blocked
 
   - id: n11r_rework
     name: 轮次二重标准备（invalidate + 增量重标范围）
@@ -365,6 +388,18 @@ nodes:
     next: n11_annotate_r2
 
   # ④ 统计聚合
+  - id: n11r_blocked
+    name: 轮次二质量阻断登记（blocked_quality，继续不受影响模块）
+    owner: Topic5Agent
+    mode: code
+    handler: annotation_block
+    inputs: [r2_review, annotated_data]
+    outputs: [annotation_block_record]
+    success: 观点字段记 blocked_quality 与诊断；统计与报告照常继续，观点相关结论按未达标披露
+    side_effect: none
+    retry: {max: 0, on_fail: pause}
+    next: n12_aggregate
+
   - id: n12_aggregate
     name: 分对象统计聚合
     owner: Topic5Agent
@@ -492,7 +527,10 @@ nodes:
     owner: ProjectAgent
     mode: human
     handler: human_gate
-    inputs: [qc_report]
+    # 输入置空：HC7 有多个进入原因（报告质检轮次用尽 / 外部权限 P0 / 轮次一标注质量未达标）。
+    # qc_report 在标注重标与噪音回退后会被失效，写成必需输入会让 HC7 永不就绪（engine stuck）。
+    # 进入原因与所需产物由 hc_bridge._resume_hc7 / _hc7_issues 按现场读取。
+    inputs: []
     outputs: [escalation_decision]
     success: 超 qc_max_rounds 轮或遇到报告返修无法解决的外部权限异常时触发
     next: n20_delivery_draft

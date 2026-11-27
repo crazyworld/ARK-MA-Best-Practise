@@ -95,21 +95,22 @@ class ReviewDecisionTest(unittest.TestCase):
         result = self._route(_review({}, remaining=400))
         self.assertEqual(result["route"], "retry")
 
-    def test_rounds_exhausted_escalates(self):
+    def test_rounds_alone_do_not_stop(self):
+        """原版不设重标轮数上限，停止条件只看本轮 500 帖额度（执行契约 §2）。"""
         result = self._route(
             _review({"sentiment": 0.5}, remaining=400),
             counters={"annotation_review_rounds_round1": 2})
-        self.assertEqual(result["route"], "maxed")
+        self.assertEqual(result["route"], "retry")
 
     def test_quota_exhausted_escalates(self):
         result = self._route(_review({"sentiment": 0.5}, remaining=0))
         self.assertEqual(result["route"], "maxed")
 
-    def test_max_rounds_configurable(self):
+    def test_systematic_repeat_stops_for_diagnosis(self):
+        """契约 §1:13：连续两次同类系统错误先诊断，不再机械重标。"""
         result = self._route(
             _review({"sentiment": 0.5}, remaining=400),
-            params={"annotation_review_max_rounds": 1},
-            counters={"annotation_review_rounds_round1": 1})
+            counters={"annotation_systematic_round1": 2})
         self.assertEqual(result["route"], "maxed")
 
     def test_disabled_review_passes_through(self):
@@ -269,8 +270,10 @@ class DagWiringTest(unittest.TestCase):
         self.assertEqual(dag.nodes["n09r_gate"]["routes"]["pass"],
                          ["n09b_opinion_candidates", "n08_ugc_discovery"])
         self.assertEqual(dag.nodes["n11r_gate"]["routes"]["pass"], "n12_aggregate")
-        for gate in ("n09r_gate", "n11r_gate"):
-            self.assertEqual(dag.nodes[gate]["routes"]["maxed"], "n_hc7_escalate")
+        # 原版：轮次一额度用尽停活动层并交人工；轮次二额度用尽记 blocked_quality 继续（契约 §3:37）
+        self.assertEqual(dag.nodes["n09r_gate"]["routes"]["maxed"], "n_hc7_escalate")
+        self.assertEqual(dag.nodes["n11r_gate"]["routes"]["maxed"], "n11r_blocked")
+        self.assertEqual(dag.nodes["n11r_blocked"]["next"], "n12_aggregate")
         self.assertEqual(dag.nodes["n09r_rework"]["next"], "n09_annotate_r1")
         self.assertEqual(dag.nodes["n11r_rework"]["next"], "n11_annotate_r2")
 

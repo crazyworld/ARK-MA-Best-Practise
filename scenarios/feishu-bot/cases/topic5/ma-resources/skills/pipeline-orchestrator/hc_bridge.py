@@ -165,12 +165,21 @@ def write_hc_pending(st, run_dir: Path) -> dict:
         issues = list(post_publish.get("issues") or [])
         if not issues and isinstance(qc_report, dict):
             issues = list(qc_report.get("issues") or [])
+        r1_blocked = (st.read_artifact("r1_review") or {}).get("blocked_quality")
+        block_record = st.read_artifact("annotation_block_record") or {}
+        label_exhausted = bool((st.read_artifact("confirmed_opinion_labels") or {})
+                               .get("label_review", {}).get("reasons"))
         payload["review_context"] = {
             "escalation_reason": (
                 "external_permission"
                 if _is_external_permission_p0(issues)
+                else "annotation_quality_blocked" if r1_blocked
+                else "label_review_exhausted" if label_exhausted
                 else "qc_retry_exhausted"
             ),
+            "annotation_block": block_record if isinstance(block_record, dict) else {},
+            "label_review": (st.read_artifact("confirmed_opinion_labels") or {}).get("label_review") or {},
+            "blocked_stage": "round1" if r1_blocked else "",
             "issues": issues,
             "qc_report": qc_report,
             "delivery_draft": delivery_draft,
@@ -610,6 +619,20 @@ def _resume_hc7(st, expect, decision, note) -> dict:
         return {key: record, **out}
     if decision == HC7_REDO:
         st.counters["qc_rounds"] = 0
+        # 标注质量/类别审核阻断：重做的起点是重标与重新发现，不是 n02 重跑需求
+        r1 = st.read_artifact("r1_review") or {}
+        labels = (st.read_artifact("confirmed_opinion_labels") or {}).get("label_review") or {}
+        if r1.get("blocked_quality") or labels.get("reasons"):
+            st.counters.pop("annotation_systematic_round1", None)
+            st.counters.pop("label_review_attempts", None)
+            return {key: {**record, "redo": True, "scope": "annotation"},
+                    "_control": {"next": "n09_annotate_r1", "gate_status": "rejected",
+                                 "invalidate_artifacts": [
+                                     "annotated_data", "stats_bundle", "chart_urls",
+                                     "wordcloud_insight", "report_md", "qc_report",
+                                     "delivery_draft", "annotation_review_history",
+                                     "confirmed_opinion_labels", "opinion_candidates",
+                                     "ugc_category_list", "annotation_block_record"]}}
         changes = _revision_changes(note)
         if changes:
             return {key: {**record, "redo": True}, **_revision_control(st, changes, "rejected")}

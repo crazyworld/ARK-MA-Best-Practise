@@ -171,42 +171,10 @@ def _normalize_config(config: dict) -> dict:
 def check_structure(
     rows: list[dict], *, config: dict, stage: str
 ) -> dict:
-    """只读结构预检，返回原版同构的报告（不含 sha256 字段，由调用方按需补）。
+    """结构预检 —— 直接调用原版 tools/check_annotation_structure.py（零改写）。
 
-    stage ∈ {round1, positive, negative, attributes, full}；两个轮次二阶段
-    （positive/negative/attributes）只检查该任务适用范围，full 检查全部规则。
+    判定逻辑一律由 original/ 下的原版脚本给出（sha256 由 original_verify.py 校验）；
+    本模块只保留内部行 → 原版列名的映射与原版常量，供其余模块引用。
     """
-    if stage not in STAGES:
-        raise ValueError(f"check_structure: 未知 stage={stage!r}，应属 {STAGES}")
-    _require_config(config or {}, stage)
-    cfg = _normalize_config(config)
-
-    errors: list[dict] = []
-    seen: set[str] = set()
-    for index, row in enumerate(rows):
-        locator = _check_identity(row, index, seen, errors)
-        view = _row_view(row)
-        # 别名冲突：行里若混入原始列名且取值不一致，说明清洗层漏映射。
-        for key in ALIASES:
-            _alias_value(row, key, locator, errors)
-        if row.get("parse_error"):
-            errors.append({"id": locator, "field": "output",
-                           "reason": "parse_error"})
-        _check_round1(view, locator, errors)
-        if stage in ("positive", "negative", "full"):
-            _check_opinion(view, locator, cfg, stage, errors)
-        if stage in ("attributes", "full"):
-            _check_attributes(view, locator, cfg, errors)
-
-    return {
-        "status": "pass" if not errors else "fail",
-        "stage": stage,
-        "rows": len(rows),
-        "error_count": len(errors),
-        "errors_by_reason": dict(Counter(e["reason"] for e in errors)),
-        "errors": errors,
-        # 结构预检不做语义正确性判断（由 FIX-30 抽检负责），也不改数据、不调模型。
-        "semantic_accuracy_checked": False,
-        "source_modified": False,
-        "llm_requests": 0,
-    }
+    import original_adapter
+    return original_adapter.check_structure(rows, config=config, stage=stage)

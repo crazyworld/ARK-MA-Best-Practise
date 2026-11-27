@@ -1279,6 +1279,20 @@ def aggregate(node, state, ctx):
                        f"（{float(item.get('ratio') or 0):.1%}）未低于 10% 门槛"),
             "action": "disclose opinion coverage limitation in the opinion section",
         })
+    # 轮次二观点质量阻断（n11r_blocked，执行契约 §3:37）：观点相关结论按未达标披露，
+    # 其余模块（声量/互动/情感/UGC/词云）照常统计与撰写。
+    block = state.read_artifact("annotation_block_record") or {}
+    if isinstance(block, dict) and block.get("blocked_quality"):
+        data_issues.append({
+            "id": f"opinion-blocked-{state.run_id}",
+            "source": "annotation_review",
+            "affected_module": "sentiment_opinion",
+            "severity": "module_degraded",
+            "reason": (f"观点标注抽检正确率 {block.get('accuracy')} 未达 "
+                       f"{block.get('threshold')}，本轮额度用尽（{block.get('blocked_reason')}）"),
+            "action": "disclose opinion accuracy limitation in the opinion section; no opinion conclusion",
+            "diagnosis": block.get("diagnosis") or {},
+        })
     if baseline_unavailable:
         data_issues.append({
             "id": f"baseline-unavailable-{state.run_id}",
@@ -2212,22 +2226,20 @@ def opinion_policy_gate(node, state, ctx):
             if missing:
                 reasons.append(f"{title}候选缺少定义、边界或代表原帖支撑：" + "、".join(missing))
 
-    if reasons:
-        raise HumanPause(
-            prompt="观点与 UGC 标签需要人工审核：" + "；".join(reasons),
-            expect=node.get("outputs", []),
-        )
-
-    # FIX-30：确定性策略通过后，委派独立 Validator 做 D1/D2 来源审核。
-    # 审核通过即可自动确认（动态 UGC 不再一律转人工）；有 P0 转人工。
+    # 原版 QC 5.2:197：类别问题由 Validator 提意见 → 编排器修改/重新发现 → 复审；
+    # **不新增用户类别确认节点**（D1/D2 人工确认 2026-11-05 已废除）。判定结果交给
+    # n10_gate 路由：通过 → 轮次二；有意见 → 打回 n08/n09b 重新发现；两次仍不过 → HC7。
+    reasons = list(reasons)
     validator_review = _label_source_review(opinion, ugc)
     if validator_review["has_p0"]:
-        raise HumanPause(
-            prompt="观点与 UGC 标签来源审核未通过：" + "；".join(validator_review["p0"]),
-            expect=node.get("outputs", []),
-        )
+        reasons.extend(f"来源审核：{item}" for item in validator_review["p0"])
 
     return {"artifacts": {"confirmed_opinion_labels": {
+        "label_review": {
+            "reasons": reasons,
+            "passed": not reasons,
+            "attempts": int(state.counters.get("label_review_attempts", 0)),
+        },
         "validator_review": validator_review,
         "labels": labels,
         # FIX-31：正负两套候选分开冻结，供轮次二两个观点任务各自注入
@@ -3042,7 +3054,19 @@ def qc_decision(node, state, ctx):
     rounds = state.counters.get("qc_rounds", 0)
     if not qc.get("has_p0"):
         return {"route": "no_p0"}
-    if qc_noise_ids(qc):
+    noise_ids = qc_noise_ids(qc)
+    if noise_ids:
+        # 原版 KS_Report_Scope_Contract:55：只对仍在保留集的噪音回去噪；已剔除的帖子仍被
+        # 高点证据引用时，是报告层表述问题，走 n19 修报告（不得整链回退、作废已审核类别）。
+        kept_art = state.read_artifact("denoised_data") or {}
+        kept_ids = {str(r.get("id") or r.get("_dedup_key") or "")
+                    for r in (kept_art.get("rows") or []) if isinstance(r, dict)}
+        still_kept = [i for i in noise_ids if i in kept_ids]
+        if not still_kept:
+            state.event(node.get("id", "n18_qc_gate"), "noise_already_excluded",
+                        f"noise_ids={noise_ids} 均不在保留集，按报告层 P0 处理")
+            noise_ids = []
+    if noise_ids:
         if state.counters.get("noise_rollbacks", 0) >= NOISE_ROLLBACK_MAX:
             # 噪音回退次数上限为迁移版新增（原版无次数限制）：留痕，HC7 卡片据此说明进入原因。
             state.event(node.get("id", "n18_qc_gate"), "noise_rollback_maxed",
@@ -3060,13 +3084,37 @@ def noise_rollback(node, state, ctx):
     ids = qc_noise_ids(state.read_artifact("qc_report") or {})
     if not ids:
         raise RuntimeError("noise_rollback: qc_report 无 noise_ids")
+    # 原版 KS_Report_Scope_Contract:55 / KS_Noise_Review:71：只对**仍在保留集**的噪音做去噪回退，
+    # 并只重算受影响部分。已剔除过的帖子仍出现在 qc 高点证据里时，属于报告层表述问题，
+    # 走 n19 修改报告，不得整链回退（否则会白白作废已通过审核的类别与标注）。
+    kept = state.read_artifact("denoised_data") or {}
+    kept_ids = {str(r.get("id") or r.get("_dedup_key") or "")
+                for r in (kept.get("rows") or []) if isinstance(r, dict)}
+    still_kept = [i for i in ids if i in kept_ids]
+    if not still_kept:
+        state.event(node.get("id", "n18b_noise_rollback"), "noise_already_excluded",
+                    f"noise_ids={ids} 均不在当前保留集，按报告层问题处理")
+        return {"artifacts": {"noise_rollback_record": {
+            "noise_ids": ids, "still_kept": [], "rollback": state.counters.get("noise_rollbacks", 0),
+            "skipped": True,
+            "reason": "噪音帖已在保留集之外：属报告层表述问题，不回退去噪",
+            "action": "route_to_report_fix"}}}
+    ids = still_kept
     state.counters["noise_rollbacks"] = state.counters.get("noise_rollbacks", 0) + 1
     state.counters["rerun_epoch"] = state.counters.get("rerun_epoch", 0) + 1
     state.params["qc_noise_ids"] = sorted(set(map(str, state.params.get("qc_noise_ids") or [])) | set(ids))
-    state.invalidate_artifacts(NOISE_ROLLBACK_INVALIDATE)
+    # 契约：只重做受影响部分。去噪只剔除帖子，不改类别定义与已确认标签的内容，
+    # 因此保留 opinion_candidates / ugc_category_list / confirmed_opinion_labels；
+    # 若去噪改变了类别样本范围（QC 明确要求重新发现），由 qc_report 的 rediscover 标记触发。
+    invalidate = list(NOISE_ROLLBACK_INVALIDATE)
+    if not (state.read_artifact("qc_report") or {}).get("requires_rediscovery"):
+        keep = {"opinion_candidates", "ugc_category_list", "confirmed_opinion_labels",
+                "annotation_review_history", "annotation_rework_plan"}
+        invalidate = [key for key in invalidate if key not in keep]
+    state.invalidate_artifacts(invalidate)
     return {"artifacts": {"noise_rollback_record": {
         "noise_ids": ids, "rollback": state.counters["noise_rollbacks"],
-        "rerun_epoch": state.counters["rerun_epoch"], "invalidated": NOISE_ROLLBACK_INVALIDATE}}}
+        "rerun_epoch": state.counters["rerun_epoch"], "invalidated": invalidate}}}
 
 
 @handler("delivery_draft_decision")
@@ -4300,6 +4348,7 @@ def validator_gate(node, state, ctx):
 # 口径依据：tools/plan_annotation_review.py（抽样）、KS_Annotation_Review（审核职责）、
 # QC §5/§7（正确率阈值 90%/目标 95%、额度用完置 blocked_quality 并停下下游）。
 ANNOTATION_REVIEW_DEFAULT_ACCURACY = 0.90
+# 原版不设重标轮数上限（执行契约 §2/§3 以每轮 500 帖额度为界）；此常量仅用于诊断展示。
 ANNOTATION_REVIEW_DEFAULT_ROUNDS = 2
 # 重标范围判定：错误类型属于这些「系统性」类别时重标全部受影响行
 SYSTEMATIC_ERROR_TYPES = ("relevance", "sentiment", "global")
@@ -4311,6 +4360,44 @@ def _review_rows(node, state) -> tuple[list[dict], str]:
     art = state.read_artifact(key) or {}
     rows = art.get("rows") if isinstance(art, dict) else None
     return [dict(r) for r in (rows or [])], key
+
+
+@handler("label_policy_decision")
+def label_policy_decision(node, state, ctx):
+    """类别策略门路由：通过 → 轮次二；有意见 → 打回重新发现；两次仍不过 → HC7。"""
+    confirmed = state.read_artifact("confirmed_opinion_labels") or {}
+    review = confirmed.get("label_review") if isinstance(confirmed, dict) else {}
+    if not isinstance(review, dict) or review.get("passed", True):
+        return {"route": "pass"}
+    attempts = int(review.get("attempts") or 0)
+    if attempts >= 2:
+        # 契约 §1:13：连续两次同类问题先诊断，交人决定是否继续，不机械循环。
+        state.event(node.get("id", "n10_gate"), "label_review_exhausted",
+                    "；".join(review.get("reasons") or [])[:300])
+        return {"route": "maxed"}
+    return {"route": "rework"}
+
+
+@handler("label_rework")
+def label_rework(node, state, ctx):
+    """按 Validator 意见打回重新发现：失效类别与标注下游，记录本次意见与轮次。"""
+    state.counters["label_review_attempts"] = int(
+        state.counters.get("label_review_attempts", 0)) + 1
+    confirmed = state.read_artifact("confirmed_opinion_labels") or {}
+    review = confirmed.get("label_review") if isinstance(confirmed, dict) else {}
+    reasons = list((review or {}).get("reasons") or [])
+    downstream = ["confirmed_opinion_labels", "annotated_data", "stats_bundle",
+                  "chart_urls", "wordcloud_insight", "report_md", "qc_report",
+                  "delivery_draft", "annotation_review_history"]
+    state.invalidate_artifacts(downstream)
+    payload = {
+        "attempt": state.counters["label_review_attempts"],
+        "feedback": reasons,
+        "invalidated": downstream,
+        "action": "重新发现观点与 UGC 类别（带本次审核意见）",
+    }
+    state.event(node.get("id", "n10_rework"), "label_rework", "；".join(reasons)[:300])
+    return {"artifacts": {"label_review_feedback": payload}}
 
 
 @handler("annotation_review")
@@ -4420,18 +4507,30 @@ def annotation_review_decision(node, state, ctx):
     if not under:
         return {"route": "pass"}
 
-    rounds = state.counters.get(f"annotation_review_rounds_{stage}", 0)
-    max_rounds = int(state.params.get(
-        "annotation_review_max_rounds", ANNOTATION_REVIEW_DEFAULT_ROUNDS))
-    quota_plan = review.get("plan") or {}
-    remaining = quota_plan.get("remaining_after_plan")
+    # 停止条件一律按原版：以本轮 500 帖额度为界（执行契约 §2/§3），不设自定轮数上限。
+    plan = review.get("plan") or {}
+    remaining = plan.get("remaining_after_plan")
     quota_left = (remaining is None) or int(remaining) > 0
-    if rounds >= max_rounds or not quota_left:
+    repeat = int(state.counters.get(f"annotation_systematic_{stage}", 0))
+    if repeat >= 2:
+        # 契约 §1:13：连续两次同类系统错误必须先原因诊断、记录下一种处理办法，不机械循环。
+        state.event(node.get("id", "x"), "systematic_repeat",
+                    f"{stage} 连续 {repeat} 次系统性错误，进入原因诊断，不再自动重标")
         review["blocked_quality"] = True
-        review["blocked_reason"] = (
-            "rounds_exhausted" if rounds >= max_rounds else "quota_exhausted")
+        review["blocked_reason"] = "diagnosis_required"
         return {"route": "maxed"}
-    return {"route": "retry"}
+    if quota_left:
+        return {"route": "retry"}
+    # 额度用完仍不达标：记 blocked_quality + 诊断后继续，不转人工、不降门槛（契约 §3:37）。
+    # 轮次一（情感/相关性）是全部活动层模块的前提，停住活动层并交人工确认后续动作；
+    # 轮次二只影响观点模块，由 n11r_blocked 登记后继续统计与撰写。
+    if stage == "round1":
+        review["blocked_quality"] = True
+        review["blocked_reason"] = "quota_exhausted"
+        state.event(node.get("id", "n09r_gate"), "quality_blocked",
+                    "轮次一标注额度用尽仍未达 90%，活动层模块停住")
+        return {"route": "maxed"}
+    return {"route": "maxed"}
 
 
 def _round2_direction_labels(confirmed, candidates) -> tuple:
@@ -4489,6 +4588,59 @@ def _is_systematic_error(affected_fields: list[str], error_types) -> bool:
     return False
 
 
+def _diagnosis_from_review(review: dict, wrong_ids: dict) -> dict:
+    """按执行契约 §1:13 产出原因诊断输入。
+
+    原版要求「连续两次同类系统错误必须进入原因诊断：证据不足 / 类别定义不清 /
+    传参解析 / 模型能力」，记录下一种处理办法后再执行，不自动全量重跑。
+    程序不臆断原因，只把定位该原因所需的证据结构化：判错分布、原判与应有值、
+    受影响字段与类别。
+    """
+    verdicts = [v for v in (review.get("verdicts") or []) if isinstance(v, dict)]
+    wrong = [v for v in verdicts if str(v.get("verdict")) == "wrong"]
+    mismatches: dict[str, int] = {}
+    for item in wrong:
+        key = f"{item.get('got') or item.get('actual') or item.get('wrong') or '∅'} → {item.get('expected') or '∅'}"
+        mismatches[key] = mismatches.get(key, 0) + 1
+    return {
+        "candidate_causes": ["证据不足", "类别定义不清", "传参/解析问题", "模型能力"],
+        "wrong_total": len(wrong),
+        "wrong_by_field": {k: len(v or []) for k, v in (wrong_ids or {}).items()},
+        "top_mismatches": sorted(mismatches.items(), key=lambda kv: -kv[1])[:10],
+        "declared_error_types": review.get("error_types") or {},
+        "declared_feedback": review.get("feedback") or [],
+        "requires_human_decision": True,
+    }
+
+
+@handler("annotation_block")
+def annotation_block(node, state, ctx):
+    """轮次二质量阻断登记（执行契约 §3:37）。
+
+    额度用完仍不达门槛：记 blocked_quality + 已完成诊断，**停止受影响下游、继续不受影响
+    工作**；不降门槛、不声称通过、不自动扩查、不转人工确认。观点相关结论在报告中按
+    未达标披露（n12 记 DataIssue，n16 在观点小节写明）。
+    """
+    stage = "round2"
+    review = state.read_artifact("r2_review") or {}
+    wrong_ids = review.get("wrong_ids") or {}
+    record = {
+        "stage": stage,
+        "blocked_quality": True,
+        "blocked_reason": review.get("blocked_reason") or "quota_exhausted",
+        "accuracy": review.get("accuracy") or {},
+        "threshold": float(state.params.get(
+            "annotation_accuracy_min", ANNOTATION_REVIEW_DEFAULT_ACCURACY)),
+        "affected_modules": ["sentiment_opinion"],
+        "review_rounds": state.counters.get(f"annotation_review_rounds_{stage}", 0),
+        "diagnosis": _diagnosis_from_review(review, wrong_ids),
+        "contract": "KS_Annotation_Execution_Contract.md §3",
+    }
+    state.event(node.get("id", "n11r_blocked"), "quality_blocked",
+                f"观点正确率 {record['accuracy']} 未达 {record['threshold']}，额度用尽后登记阻断并继续")
+    return {"artifacts": {"annotation_block_record": record}}
+
+
 @handler("annotation_rework")
 def annotation_rework(node, state, ctx):
     """重标准备（FIX-30）：判定重标范围、invalidate 该轮产物、rerun_epoch 递增。
@@ -4505,7 +4657,16 @@ def annotation_rework(node, state, ctx):
     error_types = review.get("error_types") or {}
 
     affected_fields = sorted(field for field, ids in wrong_ids.items() if ids)
-    systematic = _is_systematic_error(affected_fields, error_types)
+    # 执行契约 §1:13 / §3:33：错误分个别与系统两类。Validator 逐帖给出 error_type
+    # （systematic/isolated）时以其为准；缺失时按受影响字段是否属系统性类别判定。
+    declared = {str(k): str(v) for k, v in (review.get("error_types") or {}).items()
+                if isinstance(v, str)}
+    systematic_declared = any(v.lower().startswith(("system", "系统")) for v in declared.values())
+    diagnosis = _diagnosis_from_review(review, wrong_ids)
+    systematic = systematic_declared or _is_systematic_error(affected_fields, error_types)
+    repeat_key = f"annotation_systematic_{stage}"
+    if systematic:
+        state.counters[repeat_key] = state.counters.get(repeat_key, 0) + 1
     rerun_ids = [] if systematic else sorted(
         {str(i) for ids in wrong_ids.values() for i in (ids or [])})
 
@@ -4531,9 +4692,23 @@ def annotation_rework(node, state, ctx):
 
     history = state.read_artifact("annotation_review_history") or {}
     by_stage = _history_by_stage(history)
-    plan = review.get("plan") or {}
-    by_stage[stage] = sorted(set(by_stage.get(stage, [])) | {
-        str(s.get("id")) for s in (plan.get("samples") or []) if s.get("id")})
+    # 执行契约 §2：本轮台账 = 本活动本轮**所有已审帖 ID 的并集**（校准、类别发现来源核验、
+    # 随机抽查、重点核查、返工复审核共用 500 额度）。逐帖判定在 review 顶层的 samples /
+    # verdicts，不在 review["plan"]（plan 只有统计元数据），故必须从两处汇总。
+    reviewed_now = {str(s.get("id")) for s in (review.get("samples") or []) if s.get("id")}
+    reviewed_now |= {str(v.get("id")) for v in (review.get("verdicts") or [])
+                     if isinstance(v, dict) and v.get("id")}
+    reviewed_now |= {str(s.get("id")) for s in ((review.get("plan") or {}).get("samples") or [])
+                     if isinstance(s, dict) and s.get("id")}
+    # 类别发现/校准的已读来源也计入对应轮额度（QC 协议:195）。
+    if stage == "round2":
+        for key in ("opinion_candidates", "ugc_category_list"):
+            art = state.read_artifact(key) or {}
+            for item in (art.get("review_items") or []) if isinstance(art, dict) else []:
+                for sid in (item.get("source_ids") or []) if isinstance(item, dict) else []:
+                    if sid:
+                        reviewed_now.add(str(sid))
+    by_stage[stage] = sorted(set(by_stage.get(stage, [])) | reviewed_now)
 
     payload = {
         "stage": stage,
@@ -4542,6 +4717,8 @@ def annotation_rework(node, state, ctx):
         "rerun_ids": rerun_ids,
         "affected_fields": affected_fields,
         "error_types": error_types,
+        "diagnosis": diagnosis,
+        "systematic_repeat": state.counters.get(repeat_key, 0),
         "review_rounds": state.counters[f"annotation_review_rounds_{stage}"],
         "invalidated": downstream,
         "base_artifact": base_ref,

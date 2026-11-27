@@ -260,10 +260,12 @@ class PolicyGateTest(unittest.TestCase):
 
     def test_tendency_name_pauses(self):
         names = ["包装好评", "口感风味", "价格优惠", "联名周边", "门店排队"]
-        with self.assertRaises(HumanPause) as raised:
-            self._gate({"candidates": names})
-        self.assertIn("类别名带倾向", raised.exception.prompt)
-        self.assertIn("包装好评", raised.exception.prompt)
+        out = self._gate({"candidates": names})
+        review = out["artifacts"]["confirmed_opinion_labels"]["label_review"]
+        self.assertFalse(review["passed"])
+        joined = "；".join(review["reasons"])
+        self.assertIn("类别名带倾向", joined)
+        self.assertIn("包装好评", joined)
 
     def test_neutral_name_passes(self):
         names = ["包装设计", "口感风味", "价格优惠", "联名周边", "门店排队"]
@@ -273,10 +275,11 @@ class PolicyGateTest(unittest.TestCase):
     def test_direction_counts_checked_separately(self):
         pos = ["口感风味", "价格优惠", "联名周边", "门店排队", "包装设计"]
         neg = ["排队时长", "出杯速度"]   # 负面要求 3-5
-        with self.assertRaises(HumanPause) as raised:
-            self._gate({"candidates": pos + neg, "positive_candidates": pos,
-                        "negative_candidates": neg})
-        self.assertIn("负面观点标签数量 2", raised.exception.prompt)
+        out = self._gate({"candidates": pos + neg, "positive_candidates": pos,
+                          "negative_candidates": neg})
+        review = out["artifacts"]["confirmed_opinion_labels"]["label_review"]
+        self.assertFalse(review["passed"])
+        self.assertTrue(any("负面观点标签数量 2" in r for r in review["reasons"]))
 
     def test_not_applicable_direction_exempt(self):
         pos = ["口感风味", "价格优惠", "联名周边", "门店排队", "包装设计"]

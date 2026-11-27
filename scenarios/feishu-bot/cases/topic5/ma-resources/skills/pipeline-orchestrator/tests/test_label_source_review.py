@@ -179,17 +179,21 @@ class GateTest(unittest.TestCase):
         self.st.write_artifact("ugc_category_list", _ugc())
         with patch("semantic.llm_available", return_value=True), \
              patch("semantic.chat_json", side_effect=self._fake_chat("测评分享")):
-            with self.assertRaises(HumanPause) as raised:
-                self._gate()
-        self.assertIn("来源审核未通过", raised.exception.prompt)
-        self.assertIn("测评分享", raised.exception.prompt)
+            out = self._gate()
+        review = out["artifacts"]["confirmed_opinion_labels"]["label_review"]
+        self.assertFalse(review["passed"])
+        joined = "；".join(review["reasons"])
+        self.assertIn("来源审核", joined)
+        self.assertIn("测评分享", joined)
 
     def test_no_semantic_capability_pauses(self):
         self.st.write_artifact("opinion_candidates", _opinion())
         self.st.write_artifact("ugc_category_list", _ugc())
         with patch("semantic.llm_available", return_value=False):
-            with self.assertRaises(HumanPause):
-                self._gate()
+            out = self._gate()
+        review = out["artifacts"]["confirmed_opinion_labels"]["label_review"]
+        self.assertFalse(review["passed"])
+        self.assertTrue(any("来源审核" in r for r in review["reasons"]))
 
     def test_pgc_only_skips_ugc_review(self):
         self.st.write_artifact("opinion_candidates", _opinion())
@@ -207,9 +211,10 @@ class GateTest(unittest.TestCase):
                                 "evidence_count": 1})
         self.st.write_artifact("ugc_category_list", _ugc())
         with patch("semantic.chat_json") as chat:
-            with self.assertRaises(HumanPause):
-                self._gate()
+            out = self._gate()
         chat.assert_not_called()
+        review = out["artifacts"]["confirmed_opinion_labels"]["label_review"]
+        self.assertFalse(review["passed"])
 
 
 if __name__ == "__main__":

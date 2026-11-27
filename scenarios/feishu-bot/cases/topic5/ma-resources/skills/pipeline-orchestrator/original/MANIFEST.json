@@ -1,0 +1,185 @@
+{
+ "source_root": "/Users/yuxin/work/agents/ada_topics/Topic5_V21/Topic5",
+ "files": [
+  {
+   "path": "tools/check_annotation_structure.py",
+   "sha256": "457ba4e43cad6f0ce72abb1f41c9036c4a6d424d0a552a5d4f1ad193d0214c56",
+   "origin": "Topic5/Agent.Producer/Topic5 营销活动复盘报告/tools/check_annotation_structure.py",
+   "bytes": 6879
+  },
+  {
+   "path": "tools/plan_annotation_review.py",
+   "sha256": "14ab93a619c4a31cc700b19b9799bb1f26b4dfab87dcc9c4f2a9e3b689b88937",
+   "origin": "Topic5/Agent.Producer/Topic5 营销活动复盘报告/tools/plan_annotation_review.py",
+   "bytes": 8741
+  },
+  {
+   "path": "stats/aggregate.py",
+   "sha256": "e3f2f58aae157b0650def032794900be32e264bfb4a97acf8878e9280396dd9d",
+   "origin": "Topic5/Skills/blueai-stats-aggregation-skill/scripts/aggregate.py",
+   "bytes": 13202
+  },
+  {
+   "path": "stats/content_stats.py",
+   "sha256": "7e53131a885766c46b78a56fdcdbbdeff6601532c0b015d7c6002cb1b721bf06",
+   "origin": "Topic5/Skills/blueai-stats-aggregation-skill/scripts/content_stats.py",
+   "bytes": 9284
+  },
+  {
+   "path": "stats/check_coverage.py",
+   "sha256": "e6328326b372aea8bc43499d4d10794281466b7a46d5464f3b5635037438be66",
+   "origin": "Topic5/Skills/blueai-stats-aggregation-skill/scripts/check_coverage.py",
+   "bytes": 14577
+  },
+  {
+   "path": "stats/lift_compare.py",
+   "sha256": "24f91d2eb64abe37b4702f43be95c7a6272434d2e48dee666cc9164d4bb95cd0",
+   "origin": "Topic5/Skills/blueai-stats-aggregation-skill/scripts/lift_compare.py",
+   "bytes": 5036
+  },
+  {
+   "path": "stats/check_filterwords.py",
+   "sha256": "b57714e04b235ab3145c3557a2607ac53752d18b513ad44c0531f83b63774b7b",
+   "origin": "Topic5/Skills/blueai-stats-aggregation-skill/scripts/check_filterwords.py",
+   "bytes": 3262
+  },
+  {
+   "path": "discovery/opinion_run.py",
+   "sha256": "39f1dc5652a1a80da3ba87814f1bf59db728def2dccf25b0086b0f8b316ad522",
+   "origin": "Topic5/Skills/blueai-opinion-discovery-skill/scripts/run.py",
+   "bytes": 13079
+  },
+  {
+   "path": "discovery/ugc_run.py",
+   "sha256": "9826f16c1fdd8a4dceed0248525f763c4526ec392c86f65791dac59ab50b0bdf",
+   "origin": "Topic5/Skills/blueai-phase-ugc-discovery-skill/scripts/run.py",
+   "bytes": 13072
+  },
+  {
+   "path": "annot/annot_r1.py",
+   "sha256": "5c24e47f1d211d57401af299481a6b8f094b921226a719bf0bb1146258fc44fc",
+   "origin": "Topic5/Agent.Projects/Topic5 营销活动复盘报告/_scripts/annot_r1.py",
+   "bytes": 3445
+  },
+  {
+   "path": "annot/annot_r2.py",
+   "sha256": "d64e8de3cc5baec14d11b1c69c30f0e80eda34c6b03fdc1cd66e4dc38343c28f",
+   "origin": "Topic5/Agent.Projects/Topic5 营销活动复盘报告/_scripts/annot_r2.py",
+   "bytes": 5931
+  },
+  {
+   "path": "ks/KS_Activity_Data_Acquisition.md",
+   "sha256": "5ef11d8f2a0df379c1a2fbe8247de2b1318eeca8163555c948dd9f812ba4ed20",
+   "origin": "Topic5/Agent.Producer/.../KS/report_pack/KS_Activity_Data_Acquisition.md",
+   "bytes": 11910
+  },
+  {
+   "path": "ks/KS_Annotation_Execution_Contract.md",
+   "sha256": "4c850f62db9721475b5169964e0abdeb95cdd27ee1181fc611639ceee3609d5a",
+   "origin": "Topic5/Agent.Producer/.../KS/report_pack/KS_Annotation_Execution_Contract.md",
+   "bytes": 7970
+  },
+  {
+   "path": "ks/KS_Business_Context.md",
+   "sha256": "5e98ec40206841b978370ce4bbe2f9637c8d362421d47d5d15014e2d236dee27",
+   "origin": "Topic5/Agent.Producer/.../KS/report_pack/KS_Business_Context.md",
+   "bytes": 998
+  },
+  {
+   "path": "ks/KS_Chart_Spec.md",
+   "sha256": "a5414126ae3cc346ba201de80ca83105de630ca7f46021d5dfdd1170941d14d4",
+   "origin": "Topic5/Agent.Producer/.../KS/report_pack/KS_Chart_Spec.md",
+   "bytes": 13720
+  },
+  {
+   "path": "ks/KS_Classification_Rules.md",
+   "sha256": "86786683741720bcac8222372b4c11ca697a919f6a0fc1beb9dcf9f3570e76f5",
+   "origin": "Topic5/Agent.Producer/.../KS/report_pack/KS_Classification_Rules.md",
+   "bytes": 14777
+  },
+  {
+   "path": "ks/KS_Content_Analysis_Prompt.md",
+   "sha256": "64cab11ffc1d43241fcb3d968c9f70018bd0eb596fa9d6ed666259b97373d052",
+   "origin": "Topic5/Agent.Producer/.../KS/report_pack/KS_Content_Analysis_Prompt.md",
+   "bytes": 13030
+  },
+  {
+   "path": "ks/KS_Data_Processing.md",
+   "sha256": "e34e3f9cb997c165f116b7c2f3637533234e5a977feb0ca8acc225e1ce45f2e4",
+   "origin": "Topic5/Agent.Producer/.../KS/report_pack/KS_Data_Processing.md",
+   "bytes": 41853
+  },
+  {
+   "path": "ks/KS_Exception_Handling.md",
+   "sha256": "a5dea6d4b946c02262c96ef0c6ca37555ca8bf54b116cb0289ad12b076615c36",
+   "origin": "Topic5/Agent.Producer/.../KS/report_pack/KS_Exception_Handling.md",
+   "bytes": 12738
+  },
+  {
+   "path": "ks/KS_Feishu_Format.md",
+   "sha256": "ce020d21cb8a63eee6805884d09a79a3ef29a67d859d1f185c0d0971242d0f2d",
+   "origin": "Topic5/Agent.Producer/.../KS/report_pack/KS_Feishu_Format.md",
+   "bytes": 29875
+  },
+  {
+   "path": "ks/KS_Metadata_Structure.md",
+   "sha256": "221a7624f9a862274591d8247e3add94e7c2c5486480c53b72e06bd09394203c",
+   "origin": "Topic5/Agent.Producer/.../KS/report_pack/KS_Metadata_Structure.md",
+   "bytes": 10645
+  },
+  {
+   "path": "ks/KS_Metrics_Calculation.md",
+   "sha256": "0318d7b7e357caae3d4961d0695821062b91a6ff16a603371dc38f589bd850f0",
+   "origin": "Topic5/Agent.Producer/.../KS/report_pack/KS_Metrics_Calculation.md",
+   "bytes": 28490
+  },
+  {
+   "path": "ks/KS_Noise_Review.md",
+   "sha256": "50f2cf79fa09357a2802065b215b4b859a6f6692b1bbaea2e5f7ff77340c3de1",
+   "origin": "Topic5/Agent.Producer/.../KS/report_pack/KS_Noise_Review.md",
+   "bytes": 10944
+  },
+  {
+   "path": "ks/KS_Report_Scope_Contract.md",
+   "sha256": "343ed9f58f73cdcd657699dfd67164574d2f79f86d091cdbf64499738bac185a",
+   "origin": "Topic5/Agent.Producer/.../KS/report_pack/KS_Report_Scope_Contract.md",
+   "bytes": 11031
+  },
+  {
+   "path": "ks/KS_Report_Template.md",
+   "sha256": "e65ac4dd813fbad1723e5884e91394e345a5b2281bd415bf7fd8415a132b4ae1",
+   "origin": "Topic5/Agent.Producer/.../KS/report_pack/KS_Report_Template.md",
+   "bytes": 54704
+  },
+  {
+   "path": "ks/KS_Topic5_Validator_QC_Protocol.md",
+   "sha256": "09c4cdd0b612ca2e8e25d6d1382e8dfacc814cb4b1b426e7eba3362f6ec860aa",
+   "origin": "Topic5/Agent.Producer/.../KS/report_pack/KS_Topic5_Validator_QC_Protocol.md",
+   "bytes": 31272
+  },
+  {
+   "path": "ks/KS_Wordcloud_Skill_Integration.md",
+   "sha256": "259be56cf646905899b07c4e98af411f2fde2d04a32b8a97f97dad7f1becb695",
+   "origin": "Topic5/Agent.Producer/.../KS/report_pack/KS_Wordcloud_Skill_Integration.md",
+   "bytes": 10834
+  },
+  {
+   "path": "ks/KS_Writing_Standards.md",
+   "sha256": "f2bc6515227e6ed4653675255df67ae6593013dfa1640d7cf42d124d2493aa81",
+   "origin": "Topic5/Agent.Producer/.../KS/report_pack/KS_Writing_Standards.md",
+   "bytes": 7280
+  },
+  {
+   "path": "prompts/annotation_prompt.md",
+   "sha256": "f606b36307105dae14a53db50534ec3a3498c6144d087521ef0dfd0c7c7ef1ff",
+   "origin": "Topic5/.../prompts/annotation_prompt.md",
+   "bytes": 13699
+  },
+  {
+   "path": "prompts/wordcloud_call_brief.md",
+   "sha256": "619ff21806af50cca19dd86bfa8ed0b77d7a6df7ee625538e2abe612a09110fc",
+   "origin": "Topic5/.../prompts/wordcloud_call_brief.md",
+   "bytes": 7599
+  }
+ ]
+}

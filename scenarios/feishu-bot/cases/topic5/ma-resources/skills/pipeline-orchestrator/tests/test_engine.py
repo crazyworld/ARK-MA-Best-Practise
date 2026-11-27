@@ -33,7 +33,9 @@ class TestDagLoad(unittest.TestCase):
         self.assertEqual(dag.slug, "marketing-activity-review")
         self.assertEqual(dag.version, "0.2")
         # 29 个 v0.2 基线节点 + FIX-30 的 6 个标注审核节点
-        self.assertEqual(len(dag.nodes), 38)   # FIX-05 n07b、FIX-06 n18b、FIX-04 n03b_activity_pull
+        # 38 + n10_gate/n10_rework（类别打回重新发现，对齐原版 D1/D2 由 Validator 审核）
+        #    + n11r_blocked（轮次二额度用尽记 blocked_quality 继续，契约 §3:37）
+        self.assertEqual(len(dag.nodes), 41)   # FIX-05 n07b、FIX-06 n18b、FIX-04 n03b_activity_pull
         for node_id in ("n09r_review_r1", "n09r_gate", "n09r_rework",
                         "n11r_review_r2", "n11r_gate", "n11r_rework"):
             self.assertIn(node_id, dag.nodes)

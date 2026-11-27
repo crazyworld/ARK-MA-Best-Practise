@@ -33,6 +33,8 @@ class RollbackTest(unittest.TestCase):
         self.st.write_artifact("qc_report", _QC)
 
     def test_route_noise_found_then_maxed(self):
+        # 噪音帖必须仍在保留集才回去噪；已剔除的按报告层 P0 处理（KS_Report_Scope_Contract:55）
+        self.st.write_artifact("denoised_data", {"rows": [{"id": "x1"}, {"id": "x2"}]})
         self.assertEqual(handlers.qc_decision({}, self.st, {})["route"], "noise_found")
         self.st.counters["noise_rollbacks"] = handlers.NOISE_ROLLBACK_MAX
         self.assertEqual(handlers.qc_decision({}, self.st, {})["route"], "has_p0_maxed")
@@ -42,7 +44,7 @@ class RollbackTest(unittest.TestCase):
         self.assertEqual(handlers.qc_decision({}, self.st, {})["route"], "has_p0_retry")
 
     def test_rollback_invalidates_and_bumps_epoch(self):
-        self.st.write_artifact("denoised_data", {"rows": []})
+        self.st.write_artifact("denoised_data", {"rows": [{"id": "x1"}, {"id": "x2"}]})
         self.st.write_artifact("stats_bundle", {"x": 1})
         out = handlers.noise_rollback({}, self.st, {})["artifacts"]["noise_rollback_record"]
         self.assertEqual(out["noise_ids"], ["x1", "x2"])
@@ -50,6 +52,8 @@ class RollbackTest(unittest.TestCase):
         self.assertEqual(self.st.counters["rerun_epoch"], 1)
         self.assertIsNone(self.st.read_artifact("denoised_data"))
         self.assertIsNone(self.st.read_artifact("stats_bundle"))
+        # 契约：只重做受影响部分——类别与已确认标签不因去噪被作废
+        self.assertNotIn("confirmed_opinion_labels", out["invalidated"])
         key = self.st.render_idempotency({"idempotency": "annot:r1:{task_id}:e{rerun_epoch}"})
         self.assertTrue(key.endswith(":e1"))
 

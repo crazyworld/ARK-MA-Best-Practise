@@ -80,7 +80,7 @@ class TestSpecificHandlers(unittest.TestCase):
         self.assertTrue(confirmed["automatic"])
         self.assertEqual(confirmed["confirmed_by"], "validator-policy")
 
-    def test_opinion_policy_gate_pauses_on_ambiguous_labels(self):
+    def test_opinion_policy_gate_reports_problems_without_pausing(self):
         self.st.write_artifact("opinion_candidates", {
             "candidates": ["正面", "正面", "其他"],
             "source": "llm",
@@ -90,12 +90,15 @@ class TestSpecificHandlers(unittest.TestCase):
             "mode": "dynamic",
             "categories": ["其他"],
         })
-        with self.assertRaises(HumanPause):
-            handlers.opinion_policy_gate(
-                {"id": "n10_hc_opinion", "outputs": ["confirmed_opinion_labels"]},
-                self.st,
-                {},
-            )
+        # 原版：类别问题交 n10_gate 打回重新发现，不向用户发确认卡（QC 5.2:197）。
+        out = handlers.opinion_policy_gate(
+            {"id": "n10_hc_opinion", "outputs": ["confirmed_opinion_labels"]},
+            self.st,
+            {},
+        )
+        review = out["artifacts"]["confirmed_opinion_labels"]["label_review"]
+        self.assertFalse(review["passed"])
+        self.assertTrue(review["reasons"])
 
     def test_run_init_sets_resource_lock(self):
         self.st.write_artifact("requirement_confirmed", {

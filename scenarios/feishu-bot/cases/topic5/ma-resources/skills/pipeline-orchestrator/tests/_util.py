@@ -112,6 +112,25 @@ def compliant_pipeline_services():
                 "source": "fixture",
                 "degraded": False,
             },
+            "confirmed_opinion_labels": {
+                "labels": ["正面体验"],
+                "positive_labels": ["正面体验"],
+                "negative_labels": ["负面体验"],
+                "ugc_categories": ["到店打卡", "开箱测评"],
+                "label_review": {"reasons": [], "passed": True, "attempts": 0},
+                "validator_review": {"has_p0": False, "p0": []},
+                "confirmed": True,
+            },
+            # 标注审核：走廊 fixture 直接给合格审核结果（审核逻辑本身由
+            # test_annotation_review / test_review_plan 覆盖），避免夹具在审核环里打转。
+            "r1_review": {"enabled": True, "stage": "round1",
+                          "accuracy": {"sentiment": 1.0, "relevance": 1.0},
+                          "verdict_count": 4,
+                          "plan": {"sample_size": 4, "remaining_after_plan": 400}},
+            "r2_review": {"enabled": True, "stage": "round2",
+                          "accuracy": {"opinion": 1.0},
+                          "verdict_count": 4,
+                          "plan": {"sample_size": 4, "remaining_after_plan": 400}},
             "annotated_data": {
                 "round": 2,
                 "rows": [],
@@ -168,7 +187,8 @@ def compliant_pipeline_services():
 
     for name in (
         "run_init", "ssjh_pull", "clean_campaign", "noise_review", "ugc_discovery", "annotate",
-        "opinion_candidates", "aggregate", "charts_render", "wordcloud_insight",
+        "opinion_candidates", "opinion_policy_gate", "annotation_review",
+        "aggregate", "charts_render", "wordcloud_insight",
         "write_report", "fix_report", "delivery_draft", "delivery_commit", "handoff",
     ):
         install(name, output_fixture)

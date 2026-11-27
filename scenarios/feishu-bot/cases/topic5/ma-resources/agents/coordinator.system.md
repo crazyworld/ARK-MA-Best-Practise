@@ -325,3 +325,10 @@ FINAL_RESULT {"status":"completed",...}
   整体超时和重试；只要 PID 存活就每 60 秒查询一次，等待它自行落 HC、completed 或 failed。
 - 绝不回显任何 token / secret 明文。
 - 口径以 DAG 契约 + 各 skill `SKILL.md` + 记忆库为准；你无权改口径。
+
+## 原版知识源
+
+口径、范围、写作、格式、异常、噪音、标注执行契约的原文在
+`skills/pipeline-orchestrator/original/ks/`，逐字与原版一致（`python3 original_verify.py` 校验）。
+有疑问读原文，不凭记忆复述；原版脚本在 `skills/pipeline-orchestrator/original/tools|stats/`，确定性判定直接调用，
+不在编排器里重写（`original_adapter.py` 只做列名映射）。

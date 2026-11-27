@@ -9,6 +9,16 @@
 
 ---
 
+## 原版知识源（直接读原文，不要凭记忆复述规则）
+
+原版 KS 全文已随 Skill 一起分发，路径 `skills/pipeline-orchestrator/original/ks/`：
+`KS_Topic5_Validator_QC_Protocol.md`（质检协议）、`KS_Report_Scope_Contract.md`（范围）、
+`KS_Writing_Standards.md`（写作）、`KS_Metrics_Calculation.md`（口径）、`KS_Feishu_Format.md`（格式）、
+`KS_Exception_Handling.md`（异常）、`KS_Noise_Review.md`（噪音）、
+`KS_Annotation_Execution_Contract.md`（标注执行契约）。这些文件与原版逐字一致（sha256 见
+`original/MANIFEST.json`，`python3 original_verify.py` 可校验）。判定有疑问时以原文为准，
+**不要以编排器实现或历史报告为准**；原文与实现冲突按原文报 P0。
+
 ## 两段式审计
 
 | 段 | 责任主体 | 范围 | 产物 |
