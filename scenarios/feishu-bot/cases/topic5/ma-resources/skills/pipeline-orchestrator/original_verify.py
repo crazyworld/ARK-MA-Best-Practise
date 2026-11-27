@@ -36,7 +36,8 @@ def verify() -> list[str]:
         if not path.is_file():
             problems.append(f"缺失: {rel}")
             continue
-        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        # 按 LF 规范化后计算：git 检出会把 CRLF 转 LF，若按原始字节哈希会在 212 上误报被改动。
+        digest = hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
         if digest != item.get("sha256"):
             problems.append(f"被改动: {rel} (期望 {str(item.get('sha256'))[:12]}, 实际 {digest[:12]})")
     for path in sorted(ROOT.rglob("*")):

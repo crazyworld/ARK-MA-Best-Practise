@@ -27,7 +27,7 @@
   },
   {
    "path": "stats/check_coverage.py",
-   "sha256": "e6328326b372aea8bc43499d4d10794281466b7a46d5464f3b5635037438be66",
+   "sha256": "764b99397cf31153161006e55f68b42da3c72aba667fce726fbd48c09981c2bb",
    "origin": "Topic5/Skills/blueai-stats-aggregation-skill/scripts/check_coverage.py",
    "bytes": 14577
   },
@@ -45,13 +45,13 @@
   },
   {
    "path": "discovery/opinion_run.py",
-   "sha256": "39f1dc5652a1a80da3ba87814f1bf59db728def2dccf25b0086b0f8b316ad522",
+   "sha256": "bd3f1373af87b261c7aa2f8192d6d2a47fb25efb3b7577221ba54ad1f42171c9",
    "origin": "Topic5/Skills/blueai-opinion-discovery-skill/scripts/run.py",
    "bytes": 13079
   },
   {
    "path": "discovery/ugc_run.py",
-   "sha256": "9826f16c1fdd8a4dceed0248525f763c4526ec392c86f65791dac59ab50b0bdf",
+   "sha256": "a2110a068d50f22fddc9595c901f42b2a2a10c6839f175a61e2ae85f98a179b7",
    "origin": "Topic5/Skills/blueai-phase-ugc-discovery-skill/scripts/run.py",
    "bytes": 13072
   },
@@ -69,7 +69,7 @@
   },
   {
    "path": "ks/KS_Activity_Data_Acquisition.md",
-   "sha256": "5ef11d8f2a0df379c1a2fbe8247de2b1318eeca8163555c948dd9f812ba4ed20",
+   "sha256": "7c55946459ff22656e7f1a676d111539147804dfd2d7c47e75b2b9daeeea4358",
    "origin": "Topic5/Agent.Producer/.../KS/report_pack/KS_Activity_Data_Acquisition.md",
    "bytes": 11910
   },
@@ -87,7 +87,7 @@
   },
   {
    "path": "ks/KS_Chart_Spec.md",
-   "sha256": "a5414126ae3cc346ba201de80ca83105de630ca7f46021d5dfdd1170941d14d4",
+   "sha256": "5f50ff6e15ab53b32946b0042e7c2a231432d99b308274322731a7c63829f25e",
    "origin": "Topic5/Agent.Producer/.../KS/report_pack/KS_Chart_Spec.md",
    "bytes": 13720
   },
@@ -105,7 +105,7 @@
   },
   {
    "path": "ks/KS_Data_Processing.md",
-   "sha256": "e34e3f9cb997c165f116b7c2f3637533234e5a977feb0ca8acc225e1ce45f2e4",
+   "sha256": "68d1bed3837ebe0fd120f8ed422b5cd22cbd4de97fcf2a465c5f2aa7749df7f2",
    "origin": "Topic5/Agent.Producer/.../KS/report_pack/KS_Data_Processing.md",
    "bytes": 41853
   },
@@ -117,69 +117,70 @@
   },
   {
    "path": "ks/KS_Feishu_Format.md",
-   "sha256": "ce020d21cb8a63eee6805884d09a79a3ef29a67d859d1f185c0d0971242d0f2d",
+   "sha256": "3e600824d0046f62d91d9228d5116b4922d9756e2a6ced6ad7e1fc49da7ad549",
    "origin": "Topic5/Agent.Producer/.../KS/report_pack/KS_Feishu_Format.md",
    "bytes": 29875
   },
   {
    "path": "ks/KS_Metadata_Structure.md",
-   "sha256": "221a7624f9a862274591d8247e3add94e7c2c5486480c53b72e06bd09394203c",
+   "sha256": "6adbf252684ca9469748f4c961aa32c0cf85acf2dac043a67e48b8d4ba254296",
    "origin": "Topic5/Agent.Producer/.../KS/report_pack/KS_Metadata_Structure.md",
    "bytes": 10645
   },
   {
    "path": "ks/KS_Metrics_Calculation.md",
-   "sha256": "0318d7b7e357caae3d4961d0695821062b91a6ff16a603371dc38f589bd850f0",
+   "sha256": "0735236d008e366b015ee1c2997de7bebc286dd28338291a8132d2f6da1182f8",
    "origin": "Topic5/Agent.Producer/.../KS/report_pack/KS_Metrics_Calculation.md",
    "bytes": 28490
   },
   {
    "path": "ks/KS_Noise_Review.md",
-   "sha256": "50f2cf79fa09357a2802065b215b4b859a6f6692b1bbaea2e5f7ff77340c3de1",
+   "sha256": "3e87e9f62f645d91b4615b88179302ddce9572e54c1a71dc690bc1a079412067",
    "origin": "Topic5/Agent.Producer/.../KS/report_pack/KS_Noise_Review.md",
    "bytes": 10944
   },
   {
    "path": "ks/KS_Report_Scope_Contract.md",
-   "sha256": "343ed9f58f73cdcd657699dfd67164574d2f79f86d091cdbf64499738bac185a",
+   "sha256": "0bf73d89035920e2da4273ca8687148a133802b45dbb89520b6a8597e8e9c035",
    "origin": "Topic5/Agent.Producer/.../KS/report_pack/KS_Report_Scope_Contract.md",
    "bytes": 11031
   },
   {
    "path": "ks/KS_Report_Template.md",
-   "sha256": "e65ac4dd813fbad1723e5884e91394e345a5b2281bd415bf7fd8415a132b4ae1",
+   "sha256": "70913391964af07a525bf0791cab8bf291f8171f8ad7dbbffa2d65a3958baf7f",
    "origin": "Topic5/Agent.Producer/.../KS/report_pack/KS_Report_Template.md",
    "bytes": 54704
   },
   {
    "path": "ks/KS_Topic5_Validator_QC_Protocol.md",
-   "sha256": "09c4cdd0b612ca2e8e25d6d1382e8dfacc814cb4b1b426e7eba3362f6ec860aa",
+   "sha256": "91809bda00755eec822aebe5fa17b973f75db5389904d78a0ade7cde697f6ed7",
    "origin": "Topic5/Agent.Producer/.../KS/report_pack/KS_Topic5_Validator_QC_Protocol.md",
    "bytes": 31272
   },
   {
    "path": "ks/KS_Wordcloud_Skill_Integration.md",
-   "sha256": "259be56cf646905899b07c4e98af411f2fde2d04a32b8a97f97dad7f1becb695",
+   "sha256": "dd5a0dc0a7495dc4683e6454f318409607959dac7199bc42457afaac253f0961",
    "origin": "Topic5/Agent.Producer/.../KS/report_pack/KS_Wordcloud_Skill_Integration.md",
    "bytes": 10834
   },
   {
    "path": "ks/KS_Writing_Standards.md",
-   "sha256": "f2bc6515227e6ed4653675255df67ae6593013dfa1640d7cf42d124d2493aa81",
+   "sha256": "66738801a403b6771ed695c9787dd61a17dfecc0c780e5e5640cddee9b4f758e",
    "origin": "Topic5/Agent.Producer/.../KS/report_pack/KS_Writing_Standards.md",
    "bytes": 7280
   },
   {
    "path": "prompts/annotation_prompt.md",
-   "sha256": "f606b36307105dae14a53db50534ec3a3498c6144d087521ef0dfd0c7c7ef1ff",
+   "sha256": "40d5eba7f3730499281e207ff3d2fce6129e738600d29d066d75d60a2b8e1b3a",
    "origin": "Topic5/.../prompts/annotation_prompt.md",
    "bytes": 13699
   },
   {
    "path": "prompts/wordcloud_call_brief.md",
-   "sha256": "619ff21806af50cca19dd86bfa8ed0b77d7a6df7ee625538e2abe612a09110fc",
+   "sha256": "75fade65dd0291f51f52250730206ebad13dc5b56aa43eafc5c16719d6b28781",
    "origin": "Topic5/.../prompts/wordcloud_call_brief.md",
    "bytes": 7599
   }
- ]
+ ],
+ "hash_rule": "sha256 over LF-normalized bytes (CRLF→LF before hashing)"
 }

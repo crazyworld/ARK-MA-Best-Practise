@@ -1,0 +1,2 @@
+# 原版资产逐字保留：禁止 git 做行尾转换
+scenarios/feishu-bot/cases/topic5/ma-resources/skills/pipeline-orchestrator/original/** -text
