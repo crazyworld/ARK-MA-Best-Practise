@@ -557,6 +557,10 @@ def _apply_opinion(row: dict, parsed: dict, allowed: list[str]) -> None:
     labels = _split_opinion_labels(value)
     if not labels or any(label not in (*allowed, OPINION_OTHER) for label in labels):
         return
+    # 重复标签（如「口味,口味」）原版 check_annotation_structure:87 判 duplicate_labels，
+    # 程序不修源：不回填，视为漏标交补标重试（job_436842fb74da n11 结构预检失败）。
+    if len(labels) != len(set(labels)):
+        return
     # 原版：最多 2 个标签，用英文逗号连接（check_annotation_structure 按 "," 拆分）。
     row["opinion"] = ",".join(labels[:2])
 

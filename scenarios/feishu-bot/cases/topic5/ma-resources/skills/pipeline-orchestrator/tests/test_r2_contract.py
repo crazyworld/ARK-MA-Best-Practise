@@ -112,6 +112,23 @@ class ApplyTest(unittest.TestCase):
         A._apply_opinion(row, {"opinion": "口味好评,周边讨论"}, LABELS)
         self.assertEqual(row["opinion"], "口味好评,周边讨论")
 
+    def test_opinion_duplicate_labels_left_for_backfill(self):
+        """原版 check_annotation_structure:87 判 duplicate_labels；回填时拒收，交补标重试，
+        不在程序里去重修源（job_436842fb74da n11：「X,X」进结构预检整节点失败）。"""
+        for value in ("口味好评,口味好评", "口味好评，口味好评", "口味好评、 口味好评"):
+            row = _row()
+            A._apply_opinion(row, {"opinion": value}, LABELS)
+            self.assertNotEqual(row.get("opinion"), "口味好评,口味好评", value)
+            self.assertNotIn("口味好评,口味好评", str(row.get("opinion")))
+
+    def test_duplicate_reject_matches_structure_gate(self):
+        """回填接受的值必须能过结构预检：两处对 duplicate 的判定一致。"""
+        import annotation_structure as S
+        row = _row()
+        A._apply_opinion(row, {"opinion": "口味好评,周边讨论"}, LABELS)
+        labels = S._split_labels(row["opinion"])
+        self.assertEqual(len(labels), len(set(labels)))
+
     def test_opinion_over_two_labels_truncated(self):
         row = _row()
         A._apply_opinion(row, {"opinion": "口味好评,周边讨论,价格讨论"}, LABELS)
