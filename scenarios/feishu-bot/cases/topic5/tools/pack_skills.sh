@@ -119,6 +119,10 @@ pack_one() {
     # Validator skill. Bundle its canonical scanner for identical repair preflight.
     cp "$ROOT/ma-resources/skills/topic5-validator/scripts/scan_report.py" \
        "$staged_root/validator_scan.py"
+    # scan_report 以「同目录 import policy」取口径事实源；只带扫描器不带 policy，
+    # 恢复包内加载即 No module named 'policy'（job_436842fb74da n16）。
+    cp "$ROOT/ma-resources/skills/topic5-validator/scripts/policy.py" \
+       "$staged_root/policy.py"
     # 恢复包随带编排器直接调用的兄弟 Skill 脚本：进行中的 Session 挂的是创建时的旧
     # Skill，只换编排器会让兄弟 Skill 的修复永远到不了（job_436842fb74da n14 封面仍走
     # 1be6883 之前的旧脚本）。只带脚本与说明，字体/node_modules 仍用挂载版本。
