@@ -2193,6 +2193,12 @@ def opinion_policy_gate(node, state, ctx):
         )
     ):
         reasons.append("UGC 类别不完整或不稳定")
+    # UGC 数量超 3-6：原版 run.py:202 lint_count 告警交核查；与观点数量一致转人工确认，
+    # 不在发现节点硬失败（job_436842fb74da n08 给 7 类即失败）。
+    if not ugc.get("not_applicable") and ugc_categories:
+        low, high = label_review.CATEGORY_COUNT["ugc"]
+        if not low <= len(ugc_categories) <= high:
+            reasons.append(f"UGC 类别数量 {len(ugc_categories)} 不在 {low}-{high} 个范围")
     for title, artifact in (("观点", opinion), ("UGC", ugc)):
         if artifact.get("review_schema_version"):
             expected_names = artifact.get("candidates") or artifact.get("categories") or []

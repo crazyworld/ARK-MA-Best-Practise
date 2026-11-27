@@ -22,6 +22,26 @@ class LabelGroundingTest(unittest.TestCase):
             "evidence_refs": [{"quote_id": quote_id, "usage": "representative", "reason": "明确描述购买。"}],
         }]}
 
+    def test_count_over_range_warns_not_fails(self):
+        """原版 run.py 数量超区间只告警（lint_count）；job_436842fb74da n08 给 7 个 UGC 类即失败。"""
+        base = self.response["candidates"][0]
+        many = {"categories": [{**copy.deepcopy(base), "name": f"参与方式{i}"} for i in range(7)]}
+        result = label_review.ground_candidates(many, "categories", self.catalog, 6)
+        self.assertEqual(len(result["categories"]), 7)
+        warns = label_review.lint_categories(result["categories"], "ugc")
+        self.assertTrue(any("类别数为 7" in w for w in warns))
+
+    def test_policy_gate_routes_ugc_count_to_human(self):
+        import handlers
+        src = open(handlers.__file__, encoding="utf-8").read()
+        gate = src[src.index("def opinion_policy_gate("):]
+        gate = gate[:gate.index("raise HumanPause(")]
+        self.assertIn('CATEGORY_COUNT["ugc"]', gate)
+
+    def test_empty_still_fails(self):
+        with self.assertRaisesRegex(ValueError, "非空"):
+            label_review.ground_candidates({"categories": []}, "categories", self.catalog, 6)
+
     def test_exact_source_quotes_and_no_personal_fields(self):
         result = label_review.ground_candidates(self.response, "candidates", self.catalog, 8)
         evidence = result["review_items"][0]["evidence"][0]

@@ -236,11 +236,17 @@ def _required_text(item: dict, field: str, max_length: int) -> str:
     return value.strip()
 
 
-def ground_candidates(data: Any, key: str, catalog: dict, max_items: int) -> dict:
-    """Reject fabricated/cross-field references; missing support stays explicit for HC."""
+def ground_candidates(data: Any, key: str, catalog: dict, max_items: int | None = None) -> dict:
+    """Reject fabricated/cross-field references; missing support stays explicit for HC.
+
+    类别数量不在这里拦：原版 opinion/ugc discovery run.py 对数量超区间只做 lint_count
+    告警、交 Validator/人工核查（run.py:199/202），只有「没有类别」才失败。数量告警由
+    lint_categories 产出。max_items 参数保留仅为兼容调用方，不再作为硬上限
+    （job_436842fb74da n08：模型给 7 个 UGC 类别即整节点失败）。
+    """
     items = data.get(key) if isinstance(data, dict) else None
-    if not isinstance(items, list) or not items or len(items) > max_items:
-        raise ValueError(f"{key} 必须是 1-{max_items} 个包含审核定义的对象")
+    if not isinstance(items, list) or not items:
+        raise ValueError(f"{key} 必须是非空的类别对象数组")
     names, review_items = [], []
     for item in items:
         if not isinstance(item, dict):
